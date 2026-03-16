@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Handler</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+<div id="app">
+
+  <nav id="sidebar">
+    <div id="logo">handler</div>
+    <ul id="nav-list">
+      <li class="nav-item active" data-tab="chat" onclick="switchTab('chat')">Chat</li>
+      <li class="nav-item" data-tab="memory" onclick="switchTab('memory')">Memory</li>
+      <li class="nav-item" data-tab="tokens" onclick="switchTab('tokens')">Tokens</li>
+      <li class="nav-item" data-tab="cron" onclick="switchTab('cron')">Cron</li>
+      <li class="nav-item" data-tab="logs" onclick="switchTab('logs')">Logs</li>
+      <li class="nav-item" data-tab="config" onclick="switchTab('config')">Config</li>
+      <li class="nav-item" data-tab="tools" onclick="switchTab('tools')">Tools</li>
+      <li class="nav-item" data-tab="files" onclick="switchTab('files')">Files</li>
+    </ul>
+    <div id="sidebar-bottom">
+      <button id="theme-toggle" onclick="toggleTheme()">Light</button>
+    </div>
+  </nav>
+
+  <div id="content">
+
+    <!-- Chat -->
+    <div id="tab-chat" class="tab-pane chat-layout active">
+      <div id="messages"></div>
+      <div id="pending-files"></div>
+      <div id="input-area">
+        <button id="upload-btn" onclick="document.getElementById('file-input').click()" title="Upload files">+</button>
+        <input id="file-input" type="file" multiple onchange="handleFiles(this.files)">
+        <textarea id="input" rows="1" placeholder="Type a message..." autofocus></textarea>
+        <button id="send-btn" onclick="send()">Send</button>
+      </div>
+    </div>
+
+    <!-- Memory -->
+    <div id="tab-memory" class="tab-pane split-layout">
+      <div class="split-left">
+        <div class="panel-header">
+          <span>Memory Files</span>
+          <button class="btn-small" onclick="newMemFile()">+ New</button>
+        </div>
+        <div id="memory-file-list" class="file-list"></div>
+      </div>
+      <div class="split-right">
+        <div class="panel-header">
+          <input id="mem-filename" type="text" class="filename-input" placeholder="filename.md" readonly>
+          <div class="btn-row">
+            <button class="btn-small btn-primary" onclick="saveMemFile()">Save</button>
+            <button class="btn-small btn-danger" onclick="deleteMemFile()">Delete</button>
+          </div>
+        </div>
+        <textarea id="mem-content" class="editor" placeholder="Select a file or click + New"></textarea>
+      </div>
+    </div>
+
+    <!-- Tokens -->
+    <div id="tab-tokens" class="tab-pane scroll-pane">
+      <div class="pane-title">Token Usage</div>
+      <div id="tokens-content"></div>
+    </div>
+
+    <!-- Cron -->
+    <div id="tab-cron" class="tab-pane scroll-pane">
+      <div class="pane-title">
+        Scheduled Jobs
+        <button class="btn-small" style="margin-left:12px" onclick="loadCron()">Refresh</button>
+      </div>
+      <div id="cron-content"></div>
+    </div>
+
+    <!-- Logs -->
+    <div id="tab-logs" class="tab-pane logs-layout">
+      <div class="panel-header">
+        <span>Logs</span>
+        <div class="btn-row">
+          <select id="log-lines" onchange="loadLogs()">
+            <option value="50">50 lines</option>
+            <option value="100" selected>100 lines</option>
+            <option value="250">250 lines</option>
+            <option value="500">500 lines</option>
+          </select>
+          <button class="btn-small" onclick="loadLogs()">Refresh</button>
+        </div>
+      </div>
+      <div id="logs-content" class="log-output"></div>
+    </div>
+
+    <!-- Config -->
+    <div id="tab-config" class="tab-pane split-layout">
+      <div class="split-left">
+        <div class="panel-header"><span>Config Files</span></div>
+        <div id="config-file-list" class="file-list"></div>
+      </div>
+      <div class="split-right">
+        <div class="panel-header">
+          <span id="config-filename-label" class="filename-label">Select a file</span>
+          <button class="btn-small btn-primary" onclick="saveConfigFile()">Save</button>
+        </div>
+        <textarea id="config-content" class="editor" placeholder="Select a config file to edit..."></textarea>
+      </div>
+    </div>
+
+    <!-- Tools -->
+    <div id="tab-tools" class="tab-pane scroll-pane">
+      <div class="pane-title">Available Tools</div>
+      <div id="tools-content"></div>
+    </div>
+
+    <!-- Files -->
+    <div id="tab-files" class="tab-pane scroll-pane">
+      <div class="pane-title">
+        Uploaded Files
+        <button class="btn-small" style="margin-left:12px" onclick="loadFiles()">Refresh</button>
+      </div>
+      <div id="files-content"></div>
+    </div>
+
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

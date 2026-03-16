@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "handler"
+version = "0.1.0"
+description = "Autonomous personal agent framework"
+authors = [
+    {name = "Danny Liu", email = "danny.dingtao.liu@gmail.com"},
+]
+dependencies = [
+    "google-api-python-client>=2.190.0",
+    "google-auth-httplib2>=0.3.0",
+    "google-auth-oauthlib>=1.2.4",
+    "rich>=13.0.0",
+    "openai>=1.0.0",
+    "html2text>=2020.1.16",
+    "claude-agent-sdk>=0.1.44",
+    "openai-agents>=0.10.2",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "python-dotenv>=1.0.0",
+    "markitdown[pdf]>=0.1.0",
+    "python-telegram-bot>=21.0",
+]
+requires-python = ">=3.12"
+license = "MIT"
+
+[project.scripts]
+handler = "handler.cli:cli"
+
+[tool.setuptools]
+packages = ["handler"]
+
+[tool.setuptools.package-dir]
+handler = "."
