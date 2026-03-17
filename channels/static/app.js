@@ -68,7 +68,9 @@ const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
 const pendingFilesEl = document.getElementById('pending-files');
+const convListEl = document.getElementById('conv-list');
 let pendingUploads = [];
+let _activeCid = null;  // current conversation id
 
 inputEl.addEventListener('input', function() {
     this.style.height = 'auto';
@@ -92,11 +94,71 @@ function addMsg(role, content) {
 }
 
 async function loadHistory() {
+    await loadConversationList();
+    // Load the conversation from cookie (server sets it), or the first one
     try {
         const res = await fetch('/api/history');
         const data = await res.json();
+        if (data.conversation_id) {
+            _activeCid = data.conversation_id;
+            renderConvList();
+            for (const msg of data.messages) addMsg(msg.role, msg.content);
+        } else if (_activeCid) {
+            await selectConversation(_activeCid, false);
+        }
+    } catch(e) {}
+}
+
+async function loadConversationList() {
+    try {
+        const res = await fetch('/api/conversations');
+        const data = await res.json();
+        _convs = data.conversations || [];
+        renderConvList();
+    } catch(e) {}
+}
+
+let _convs = [];
+
+function renderConvList() {
+    convListEl.innerHTML = '';
+    if (_convs.length === 0) {
+        convListEl.innerHTML = '<div class="empty-state" style="padding:16px;font-size:12px">No conversations yet</div>';
+        return;
+    }
+    for (const c of _convs) {
+        const el = document.createElement('div');
+        el.className = 'file-item conv-item' + (c.id === _activeCid ? ' active' : '');
+        const ts = c.last_ts ? new Date(c.last_ts.replace(' ', 'T') + 'Z').toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+        const preview = c.last_content ? esc(c.last_content.slice(0, 60)) + (c.last_content.length > 60 ? '…' : '') : '<em>empty</em>';
+        el.innerHTML =
+            '<div class="conv-ts">' + esc(ts) + '</div>' +
+            '<div class="conv-preview">' + preview + '</div>';
+        el.onclick = () => selectConversation(c.id);
+        convListEl.appendChild(el);
+    }
+}
+
+async function selectConversation(cid, reload = true) {
+    _activeCid = cid;
+    messagesEl.innerHTML = '';
+    renderConvList();
+    try {
+        const res = await fetch('/api/history?cid=' + encodeURIComponent(cid));
+        const data = await res.json();
         for (const msg of data.messages) addMsg(msg.role, msg.content);
     } catch(e) {}
+    inputEl.focus();
+    if (reload) await loadConversationList();
+}
+
+async function newConversation() {
+    const res = await fetch('/api/conversations', { method: 'POST' });
+    const data = await res.json();
+    _activeCid = data.conversation_id;
+    messagesEl.innerHTML = '';
+    await loadConversationList();
+    inputEl.focus();
 }
 
 function handleFiles(fileList) {
@@ -149,14 +211,21 @@ async function send() {
     thinking.classList.add('thinking');
 
     try {
+        const body = { message };
+        if (_activeCid) body.conversation_id = _activeCid;
         const res = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message }),
+            body: JSON.stringify(body),
         });
         const data = await res.json();
         thinking.remove();
+        if (data.conversation_id && data.conversation_id !== _activeCid) {
+            _activeCid = data.conversation_id;
+        }
         addMsg('assistant', data.error ? 'Error: ' + data.error : data.response);
+        // Refresh conversation list to update preview
+        loadConversationList();
     } catch(e) {
         thinking.remove();
         addMsg('assistant', 'Error: ' + e.message);
@@ -164,6 +233,7 @@ async function send() {
     sendBtn.disabled = false;
     inputEl.focus();
 }
+
 
 // ─── Memory ───────────────────────────────────────────────────────────────────
 let _memFiles = [];
@@ -320,12 +390,29 @@ async function deleteCronJob(id) {
 }
 
 // ─── Logs ─────────────────────────────────────────────────────────────────────
+const logDateEl = document.getElementById('log-date');
+
 async function loadLogs() {
+    // Populate date picker on first load
+    if (logDateEl.options.length === 0) {
+        try {
+            const dr = await fetch('/api/logs/dates');
+            const dd = await dr.json();
+            for (const d of (dd.dates || [])) {
+                const opt = document.createElement('option');
+                opt.value = d;
+                opt.textContent = d;
+                logDateEl.appendChild(opt);
+            }
+        } catch(e) {}
+    }
     const lines = document.getElementById('log-lines').value;
-    const res = await fetch('/api/logs?lines=' + lines);
+    const date = logDateEl.value;
+    const url = '/api/logs?lines=' + lines + (date ? '&date=' + encodeURIComponent(date) : '');
+    const res = await fetch(url);
     const data = await res.json();
     const el = document.getElementById('logs-content');
-    el.textContent = (data.lines || []).join('\n');
+    el.textContent = (data.lines || []).join('\n') || '(no log entries for this date)';
     el.scrollTop = el.scrollHeight;
 }
 

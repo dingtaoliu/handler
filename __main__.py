@@ -2,10 +2,8 @@
 
 import asyncio
 import logging
-import logging.handlers
 import os
 import signal
-from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -14,6 +12,8 @@ from .context import AgentContext
 from .event_store import EventStore
 from .memory import Memory
 from .environment import Environment
+from .paths import DATA_DIR, CONFIG_DIR, MEMORY_DIR, PID_PATH, LOG_DIR, get_log_path
+from .types import RunContext
 from .channels import WebChannel, TelegramChannel, SchedulerChannel, gmail_tools
 from .actions import (
     read_file,
@@ -22,6 +22,7 @@ from .actions import (
     web_search,
     run_python,
     run_shell,
+    compact_tool,
     cron_tools,
     mark_stable,
     restart_self,
@@ -38,24 +39,20 @@ load_dotenv()
 
 logger = logging.getLogger("handler")
 
-_PID_PATH = None  # set in main() after DATA_DIR is known
+MODEL = "gpt-5.4-2026-03-05"
+KEEP_RECENT = 10
 
 
 def _write_pid() -> None:
-    _PID_PATH.write_text(str(os.getpid()))
+    PID_PATH.write_text(str(os.getpid()))
 
 
 def _remove_pid() -> None:
     try:
-        _PID_PATH.unlink(missing_ok=True)
+        PID_PATH.unlink(missing_ok=True)
     except Exception:
         pass
 
-
-_PACKAGE_DIR = Path(__file__).resolve().parent
-DATA_DIR = _PACKAGE_DIR / "data"
-CONFIG_DIR = DATA_DIR / "config"
-MEMORY_DIR = DATA_DIR / "memory"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,10 +61,10 @@ logging.basicConfig(
 )
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-_file_handler = logging.handlers.RotatingFileHandler(
-    DATA_DIR / "handler.log",
-    maxBytes=5 * 1024 * 1024,
-    backupCount=3,
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+_file_handler = logging.FileHandler(
+    get_log_path(),
+    mode="a",
     encoding="utf-8",
 )
 _file_handler.setFormatter(
@@ -77,8 +74,6 @@ logging.getLogger().addHandler(_file_handler)
 
 
 def main():
-    global _PID_PATH
-    _PID_PATH = DATA_DIR / "handler.pid"
     _write_pid()
 
     # Auto-detect and install watchdog if not already configured
@@ -103,8 +98,10 @@ def main():
     mem = Memory(memory_dir=MEMORY_DIR)
     context = AgentContext(config_dir=CONFIG_DIR, memory_dir=MEMORY_DIR, memory=mem)
     store = EventStore(db_path=str(DATA_DIR / "handler.db"))
+    run_ctx = RunContext()
 
     tools = [
+        compact_tool(store, run_ctx, model=MODEL, keep_recent=KEEP_RECENT),
         read_file,
         write_file,
         write_and_run,
@@ -120,16 +117,7 @@ def main():
         read_source,
     ]
 
-    # Cron tools need a reference to the agent's current conversation_id,
-    # which is set during Agent.run(). We wire them up via a lambda that
-    # reads from the agent instance — but agent doesn't exist yet, so we
-    # use a mutable container.
-    _agent_ref: list[Agent | None] = [None]
-
-    def _get_cid() -> str | None:
-        return _agent_ref[0] and _agent_ref[0]._current_conversation_id
-
-    tools.extend(cron_tools(store, get_conversation_id=_get_cid))
+    tools.extend(cron_tools(store, run_ctx))
     tools.extend(memory_tools(mem))
 
     # Gmail tools (requires credentials/desktop.json + token.json)
@@ -142,9 +130,11 @@ def main():
     agent = Agent(
         context=context,
         store=store,
+        run_ctx=run_ctx,
         tools=tools,
+        model=MODEL,
+        keep_recent=KEEP_RECENT,
     )
-    _agent_ref[0] = agent
 
     env = Environment(agent, store)
     env.add_channel(WebChannel(store, memory=mem, config_dir=CONFIG_DIR, tools=tools))

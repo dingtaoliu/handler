@@ -32,13 +32,22 @@
 
     <!-- Chat -->
     <div id="tab-chat" class="tab-pane chat-layout active">
-      <div id="messages"></div>
-      <div id="pending-files"></div>
-      <div id="input-area">
-        <button id="upload-btn" onclick="document.getElementById('file-input').click()" title="Upload files">+</button>
-        <input id="file-input" type="file" multiple onchange="handleFiles(this.files)">
-        <textarea id="input" rows="1" placeholder="Type a message..." autofocus></textarea>
-        <button id="send-btn" onclick="send()">Send</button>
+      <div id="conv-list-panel">
+        <div class="panel-header">
+          <span>Chats</span>
+          <button class="btn-small btn-primary" onclick="newConversation()">+ New</button>
+        </div>
+        <div id="conv-list" class="file-list"></div>
+      </div>
+      <div id="chat-main">
+        <div id="messages"></div>
+        <div id="pending-files"></div>
+        <div id="input-area">
+          <button id="upload-btn" onclick="document.getElementById('file-input').click()" title="Upload files">+</button>
+          <input id="file-input" type="file" multiple onchange="handleFiles(this.files)">
+          <textarea id="input" rows="1" placeholder="Type a message..." autofocus></textarea>
+          <button id="send-btn" onclick="send()">Send</button>
+        </div>
       </div>
     </div>
 
@@ -83,6 +92,7 @@
       <div class="panel-header">
         <span>Logs</span>
         <div class="btn-row">
+          <select id="log-date" onchange="loadLogs()"></select>
           <select id="log-lines" onchange="loadLogs()">
             <option value="50">50 lines</option>
             <option value="100" selected>100 lines</option>

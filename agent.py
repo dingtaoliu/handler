@@ -1,12 +1,23 @@
+"""Agent: wraps the OpenAI Agents SDK to provide conversation-level reasoning.
+
+Owns the inner reasoning loop — given a conversation's messages and system
+prompt, it calls the LLM, executes tool calls, and returns the final response.
+Also handles automatic compaction (summarizing old messages when input tokens
+exceed a threshold) and per-turn token accounting.
+
+The outer event loop (routing events to conversations) lives in Environment.
+"""
+
 import logging
 
 from agents import Agent as OAIAgent, Runner, RunHooks
 from agents.lifecycle import RunContextWrapper
-from openai import AsyncOpenAI
 
-from .actions import compact_tool
+from .actions.session import compact_messages
+from .actions.watchdog import get_health_problems
 from .context import AgentContext
 from .event_store import EventStore
+from .types import RunContext
 
 logger = logging.getLogger("handler.agent")
 
@@ -52,6 +63,7 @@ class Agent:
         self,
         context: AgentContext,
         store: EventStore,
+        run_ctx: RunContext,
         tools: list | None = None,
         model: str = "gpt-5.4-2026-03-05",
         max_turns: int = 20,
@@ -60,76 +72,20 @@ class Agent:
     ):
         self.store = store
         self.context = context
+        self.run_ctx = run_ctx
         self.model = model
         self.max_turns = max_turns
         self.compact_token_threshold = compact_token_threshold
         self.keep_recent = keep_recent
-        self._current_conversation_id: str | None = None
+        self.tools = list(tools or [])
         self._hooks = LoggingHooks()
 
-        comp_tool = compact_tool(
-            store,
-            get_conversation_id=lambda: self._current_conversation_id,
-            keep_recent=keep_recent,
-            do_compact=lambda cid, msgs: self._compact(cid, msgs),
-        )
-        self.tools = [comp_tool] + (tools or [])
-
-    async def _compact(self, conversation_id: str, messages: list[dict]) -> int:
-        """Summarize messages[:-keep_recent] via a bare LLM call and persist the result."""
-        to_compact = messages[: -self.keep_recent]
-        if not to_compact:
-            return 0
-
-        existing_summary = self.store.get_latest_summary(conversation_id)
-
-        parts = []
-        if existing_summary:
-            parts.append(f"## Prior Summary\n{existing_summary}")
-        parts.append("## Conversation")
-        for m in to_compact:
-            parts.append(f"{m['role'].capitalize()}: {m['content']}")
-        user_content = "\n\n".join(parts)
-
-        system_prompt = (
-            "You are a conversation summarizer. Produce a concise but complete summary that preserves:\n"
-            "- All facts, decisions, and conclusions reached\n"
-            "- Key numbers, dates, names, and values mentioned\n"
-            "- Any tasks or follow-ups\n"
-            "- The user's goals and context\n\n"
-            "If a prior summary is provided, incorporate it so the output covers the full conversation history.\n"
-            "Be dense and factual. This summary replaces the original messages in the context window."
-        )
-
-        logger.info(
-            f"[compact] summarizing {len(to_compact)} messages "
-            f"(prior summary: {'yes' if existing_summary else 'no'})"
-        )
-        client = AsyncOpenAI()
-        response = await client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-        )
-        summary = response.choices[0].message.content or ""
-        self.store.store_compaction(conversation_id, summary, len(to_compact))
-
-        # Record compaction token usage
-        if response.usage:
-            self.store.record_token_usage(
-                conversation_id=conversation_id,
-                model=self.model,
-                input_tokens=response.usage.prompt_tokens,
-                output_tokens=response.usage.completion_tokens,
-                trigger="compaction",
-            )
-
-        logger.info(
-            f"[compact] done: {len(to_compact)} messages → {len(summary)} char summary"
-        )
-        return len(to_compact)
+    def _get_health_problems(self) -> list[str]:
+        """Fetch health problems (best-effort). Called before building the prompt."""
+        try:
+            return get_health_problems()
+        except Exception:
+            return []
 
     async def end_session(self, conversation_id: str) -> None:
         """Give the agent a chance to persist important info before the session is wiped."""
@@ -137,6 +93,7 @@ class Agent:
         if not messages:
             return
 
+        self.run_ctx.conversation_id = conversation_id
         instructions = self.context.build(
             summary=self.store.get_latest_summary(conversation_id),
             token_brief=self.store.get_token_cost_brief(),
@@ -191,10 +148,15 @@ class Agent:
         )
 
     async def run(self, conversation_id: str, messages: list[dict]) -> str:
-        self._current_conversation_id = conversation_id
+        self.run_ctx.conversation_id = conversation_id
         summary = self.store.get_latest_summary(conversation_id)
         token_brief = self.store.get_token_cost_brief()
-        instructions = self.context.build(summary=summary, token_brief=token_brief)
+        health_problems = self._get_health_problems()
+        instructions = self.context.build(
+            summary=summary,
+            token_brief=token_brief,
+            health_problems=health_problems,
+        )
         logger.info(
             f"agent.run: conversation={conversation_id}, messages={len(messages)}"
         )
@@ -243,7 +205,10 @@ class Agent:
                     f"[compact] auto-triggering: {self._hooks._prev_input:,} input tokens "
                     f">= threshold {self.compact_token_threshold:,}"
                 )
-                await self._compact(conversation_id, active)
+                await compact_messages(
+                    self.store, conversation_id, active,
+                    self.model, self.keep_recent,
+                )
 
         logger.info(f"agent.run complete: {len(result.final_output)} chars")
         return result.final_output

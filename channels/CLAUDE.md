@@ -1,0 +1,46 @@
+# Channels
+
+Event sources and sinks that connect the outside world to the handler event loop.
+
+## Channel ABC
+
+Defined in `environment.py`. Every channel implements two methods:
+
+- `start(queue)` — begin producing `Event` objects onto the shared asyncio queue
+- `deliver(event, response)` — return the agent's response to the original caller
+
+Channels run as concurrent asyncio tasks started by `Environment.run()`.
+
+## Channels
+
+| Channel | File | Transport | Conversation model |
+|---|---|---|---|
+| **Web** | `web.py` | FastAPI HTTP at `:8000` | Single conversation (`"web"`) |
+| **Telegram** | `telegram.py` | Long-polling bot | Per-chat (`"telegram:{chat_id}"`) |
+| **Scheduler** | `scheduler.py` | In-process background loops | Varies (uses existing conversation IDs) |
+| **Gmail** | `gmail.py` | Google API (tools only, no channel) | N/A — tools, not a channel |
+
+## Web channel (`web.py` + `admin.py`)
+
+The web channel is split into two files:
+
+- **`web.py`** — `WebChannel` class (chat UI only): `GET /`, `POST /api/chat`, `GET /api/history`
+- **`admin.py`** — `create_admin_router()` returns a FastAPI `APIRouter` with all admin/dashboard endpoints: memory CRUD, config editing, cron management, log tailing, file uploads, token usage, tools list, recovery endpoint
+
+`WebChannel._build_app()` includes the admin router via `app.include_router()`.
+
+The static web UI lives in `channels/static/` (index.html, style.css, app.js, logo.svg).
+
+## Telegram channel
+
+Per-chat conversation isolation. Handles text, photos, documents, and voice messages. Sends typing indicators while the agent is processing. Renders markdown responses with plain-text fallback.
+
+## Scheduler channel
+
+Two background loops running concurrently:
+1. **Session expiry** — every 15 minutes, checks for conversations idle > 4 hours
+2. **Cron executor** — every 30 seconds, runs due jobs (shell commands or prompt injection)
+
+## Gmail
+
+Not a channel — provides tools (`search_gmail`, `read_email`, `draft_reply`) via a factory function. Requires OAuth credentials at `data/credentials/desktop.json`.

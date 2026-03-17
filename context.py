@@ -88,7 +88,12 @@ class AgentContext:
                 return ""
         return ""
 
-    def build(self, summary: str | None = None, token_brief: str | None = None) -> str:
+    def build(
+        self,
+        summary: str | None = None,
+        token_brief: str | None = None,
+        health_problems: list[str] | None = None,
+    ) -> str:
         sections = []
 
         # System layer
@@ -138,18 +143,13 @@ class AgentContext:
         if token_brief:
             sections.append(f"# Cost Tracking\n{token_brief}")
 
-        # Health check — only inject when there are problems
-        try:
-            from .actions.watchdog import get_health_problems
-            problems = get_health_problems()
-            if problems:
-                sections.append(
-                    "# Health Issues\n"
-                    "The following problems were detected automatically. "
-                    "Try to fix them or inform the user.\n\n"
-                    + "\n".join(f"- {p}" for p in problems)
-                )
-        except Exception:
-            pass  # health check is best-effort
+        # Health problems — injected by the caller (Agent), not fetched here
+        if health_problems:
+            sections.append(
+                "# Health Issues\n"
+                "The following problems were detected automatically. "
+                "Try to fix them or inform the user.\n\n"
+                + "\n".join(f"- {p}" for p in health_problems)
+            )
 
         return "\n\n".join(sections)

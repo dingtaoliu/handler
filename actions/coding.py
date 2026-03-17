@@ -8,10 +8,9 @@ from pathlib import Path
 
 from agents import function_tool
 
-logger = logging.getLogger("handler.actions.coding")
+from ..paths import PACKAGE_DIR as _PACKAGE_DIR, PROJECT_ROOT as _PROJECT_ROOT
 
-_PACKAGE_DIR = Path(__file__).resolve().parent.parent
-_PROJECT_ROOT = _PACKAGE_DIR.parent
+logger = logging.getLogger("handler.actions.coding")
 
 
 @function_tool

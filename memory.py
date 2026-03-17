@@ -13,9 +13,26 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger("handler.memory")
+
+
+def _validate_filename(name: str) -> str:
+    """Sanitize and validate a memory filename.
+
+    Strips path components, ensures .md extension, rejects path traversal
+    and non-alphanumeric characters. Raises ValueError on invalid input.
+    """
+    name = Path(name).name  # strip any directory components
+    if not name or ".." in name:
+        raise ValueError(f"Invalid memory filename: {name!r}")
+    if not name.endswith(".md"):
+        name += ".md"
+    if not re.match(r"^[\w][\w\-\.]*\.md$", name) or len(name) > 120:
+        raise ValueError(f"Invalid memory filename: {name!r}")
+    return name
 
 _INDEX_FILE = ".index.json"
 _MTIME_FILE = ".index_mtime.json"
@@ -151,8 +168,7 @@ class Memory:
 
     def read(self, filename: str) -> str:
         """Read the full content of a memory file."""
-        if not filename.endswith(".md"):
-            filename = f"{filename}.md"
+        filename = _validate_filename(filename)
         path = self.memory_dir / filename
         if not path.exists():
             return ""
@@ -160,16 +176,14 @@ class Memory:
 
     def write(self, filename: str, content: str) -> None:
         """Write a memory file and immediately update the index."""
-        if not filename.endswith(".md"):
-            filename = f"{filename}.md"
+        filename = _validate_filename(filename)
         path = self.memory_dir / filename
         path.write_text(content)
         self._update_entry(filename, content)
 
     def delete(self, filename: str) -> bool:
         """Delete a memory file and remove its index entry. Returns True if deleted."""
-        if not filename.endswith(".md"):
-            filename = f"{filename}.md"
+        filename = _validate_filename(filename)
         path = self.memory_dir / filename
         if not path.exists():
             return False

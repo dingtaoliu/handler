@@ -14,7 +14,7 @@ from .selfmod import (
     restart_self,
     write_core_file,
 )
-from .session import compact_tool, cron_tools, stop_self
+from .session import compact_tool, compact_messages, cron_tools, stop_self
 from .coding import search_codebase, patch_file, read_source
 from .watchdog import get_health_problems
 
@@ -29,6 +29,7 @@ __all__ = [
     "restart_self",
     "write_core_file",
     "compact_tool",
+    "compact_messages",
     "cron_tools",
     "stop_self",
     "get_health_problems",

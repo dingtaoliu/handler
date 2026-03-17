@@ -237,6 +237,41 @@ class EventStore:
             ).fetchall()
             return [r["conversation_id"] for r in rows]
 
+    def list_web_conversations(self) -> list[dict]:
+        """Return web conversations with metadata, newest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.id,
+                    c.created_at,
+                    COUNT(m.id) AS message_count,
+                    MAX(m.ts) AS last_ts,
+                    (SELECT content FROM messages
+                     WHERE conversation_id = c.id AND compacted_at IS NULL
+                     ORDER BY ts DESC LIMIT 1) AS last_content,
+                    (SELECT role FROM messages
+                     WHERE conversation_id = c.id AND compacted_at IS NULL
+                     ORDER BY ts DESC LIMIT 1) AS last_role
+                FROM conversations c
+                LEFT JOIN messages m ON m.conversation_id = c.id AND m.compacted_at IS NULL
+                WHERE c.channel = 'web'
+                GROUP BY c.id
+                ORDER BY last_ts DESC NULLS LAST
+                """
+            ).fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "created_at": r["created_at"],
+                    "message_count": r["message_count"] or 0,
+                    "last_ts": r["last_ts"],
+                    "last_content": (r["last_content"] or "")[:120],
+                    "last_role": r["last_role"],
+                }
+                for r in rows
+            ]
+
     def get_last_message_ts(self, conversation_id: str) -> str | None:
         """Return the timestamp of the most recent active message, or None."""
         with self._connect() as conn:

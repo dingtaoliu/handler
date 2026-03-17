@@ -1,14 +1,15 @@
-"""Session and scheduling tools: compact_tool, cron_tools, stop_self."""
+"""Session and scheduling tools: compact_messages, compact_tool, cron_tools, stop_self."""
 
 from __future__ import annotations
 
 import logging
 import signal
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from agents import function_tool
+from openai import AsyncOpenAI
 
+from ..types import RunContext
 from ..utils import parse_interval as _parse_interval, next_run_from_now as _next_run_from_now
 
 if TYPE_CHECKING:
@@ -45,32 +46,98 @@ def stop_self() -> str:
     )
 
 
-def compact_tool(
-    store: EventStore,
-    get_conversation_id: Callable[[], str | None],
+async def compact_messages(
+    store: "EventStore",
+    conversation_id: str,
+    messages: list[dict],
+    model: str,
     keep_recent: int,
-    do_compact: Callable[[str, list[dict]], Awaitable[int]],
+) -> int:
+    """Summarize messages[:-keep_recent] via a bare LLM call and persist the result.
+
+    Standalone function used by both the compact_conversation tool and
+    Agent's auto-compaction logic, with no closure coupling to Agent.
+    """
+    to_compact = messages[:-keep_recent]
+    if not to_compact:
+        return 0
+
+    existing_summary = store.get_latest_summary(conversation_id)
+
+    parts = []
+    if existing_summary:
+        parts.append(f"## Prior Summary\n{existing_summary}")
+    parts.append("## Conversation")
+    for m in to_compact:
+        parts.append(f"{m['role'].capitalize()}: {m['content']}")
+    user_content = "\n\n".join(parts)
+
+    system_prompt = (
+        "You are a conversation summarizer. Produce a concise but complete summary that preserves:\n"
+        "- All facts, decisions, and conclusions reached\n"
+        "- Key numbers, dates, names, and values mentioned\n"
+        "- Any tasks or follow-ups\n"
+        "- The user's goals and context\n\n"
+        "If a prior summary is provided, incorporate it so the output covers the full conversation history.\n"
+        "Be dense and factual. This summary replaces the original messages in the context window."
+    )
+
+    logger.info(
+        f"[compact] summarizing {len(to_compact)} messages "
+        f"(prior summary: {'yes' if existing_summary else 'no'})"
+    )
+    client = AsyncOpenAI()
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    summary = response.choices[0].message.content or ""
+    store.store_compaction(conversation_id, summary, len(to_compact))
+
+    if response.usage:
+        store.record_token_usage(
+            conversation_id=conversation_id,
+            model=model,
+            input_tokens=response.usage.prompt_tokens,
+            output_tokens=response.usage.completion_tokens,
+            trigger="compaction",
+        )
+
+    logger.info(
+        f"[compact] done: {len(to_compact)} messages → {len(summary)} char summary"
+    )
+    return len(to_compact)
+
+
+def compact_tool(
+    store: "EventStore",
+    run_ctx: RunContext,
+    model: str,
+    keep_recent: int,
 ):
-    """Create a compact_conversation tool wired to the agent's compaction logic."""
+    """Create a compact_conversation tool wired to the shared RunContext."""
 
     @function_tool
     async def compact_conversation() -> str:
         """Summarize and compress older messages to free up context space."""
-        cid = get_conversation_id()
+        cid = run_ctx.conversation_id
         if not cid:
             return "No active conversation to compact."
         active = store.get_messages(cid)
         if len(active) <= keep_recent:
             return f"Not enough messages to compact (only {len(active)} active)."
-        n = await do_compact(cid, active)
+        n = await compact_messages(store, cid, active, model, keep_recent)
         return f"Compacted {n} messages into a summary."
 
     return compact_conversation
 
 
 def cron_tools(
-    store: EventStore,
-    get_conversation_id: Callable[[], str | None],
+    store: "EventStore",
+    run_ctx: RunContext,
 ) -> list:
     """Create tools for the agent to manage cron jobs."""
 
@@ -89,7 +156,7 @@ def cron_tools(
         except ValueError as e:
             return str(e)
         next_run = _next_run_from_now(schedule)
-        cid = get_conversation_id() or ""
+        cid = run_ctx.conversation_id or ""
         job_id = store.add_cron_job(
             name=name,
             type=type,

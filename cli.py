@@ -6,12 +6,8 @@ import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
-_PACKAGE_DIR = Path(__file__).resolve().parent
-_DATA_DIR = _PACKAGE_DIR / "data"
-_PID_PATH = _DATA_DIR / "handler.pid"
-_LOG_PATH = _DATA_DIR / "handler.log"
+from .paths import PACKAGE_DIR as _PACKAGE_DIR, DATA_DIR as _DATA_DIR, PID_PATH as _PID_PATH, LOG_PATH as _LOG_PATH
 
 
 def _read_pid() -> tuple[int | None, bool]:

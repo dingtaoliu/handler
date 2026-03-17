@@ -10,12 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-from pathlib import Path
+
+from ..paths import PID_PATH as _PID_PATH, LOG_PATH as _LOG_PATH
 
 logger = logging.getLogger("handler.actions.watchdog")
-
-_PACKAGE_DIR = Path(__file__).resolve().parent.parent
-_PROJECT_ROOT = _PACKAGE_DIR.parent
 
 
 def _check_watchdog_active(backend: str) -> str:
@@ -56,7 +54,7 @@ def get_health_problems() -> list[str]:
     Returns an empty list if everything is healthy. Called automatically
     during system prompt assembly — only problems are shown to the agent.
     """
-    from ..watchdog import load_scheduler_config, _PID_PATH, _LOG_PATH
+    from ..watchdog import load_scheduler_config
 
     problems: list[str] = []
 

@@ -327,7 +327,53 @@ body.light .badge-blue { background: #dbeafe; color: #1d4ed8; }
 }
 
 /* ── Chat ── */
-.chat-layout { flex-direction: column !important; }
+.tab-pane.active.chat-layout { flex-direction: row !important; }
+
+#conv-list-panel {
+    width: 220px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--panel);
+}
+
+#conv-list {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.conv-item {
+    cursor: pointer;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s;
+}
+.conv-item:hover { background: var(--hover); }
+.conv-item.active { background: var(--active-bg, rgba(59,130,246,0.12)); border-left: 3px solid var(--primary); padding-left: 9px; }
+
+.conv-ts {
+    font-size: 11px;
+    color: var(--text-dim, #888);
+    margin-bottom: 3px;
+}
+
+.conv-preview {
+    font-size: 12px;
+    color: var(--text);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+#chat-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+}
 
 #messages {
     flex: 1;
