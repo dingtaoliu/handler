@@ -9,7 +9,14 @@ Autonomous personal agent framework. You own the event loop, Handler provides co
 
 ## Install
 
-Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
+First, install [uv](https://docs.astral.sh/uv/getting-started/installation/) (handles Python and dependencies):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv python install 3.12
+```
+
+Then install Handler:
 
 ```bash
 uv tool install git+https://github.com/dannyliu/handler.git
