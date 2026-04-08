@@ -71,6 +71,25 @@ def _init() -> None:
     os.environ[env_var] = key
     os.environ["HANDLER_AGENT"] = backend
     print(f"\nSaved to {_ENV_PATH}")
+
+    # Optional: Google credentials for Gmail / Drive
+    print()
+    print("─" * 42)
+    print("Google integration (Gmail, Drive) — optional")
+    print("Paste the path to your desktop.json OAuth file, or press Enter to skip.")
+    print()
+    raw = _prompt("Path to desktop.json: ")
+    if raw:
+        src = Path(raw).expanduser().resolve()
+        if not src.exists():
+            print(f"File not found: {src} — skipping Google setup.")
+        else:
+            dest = _DATA_DIR / "credentials" / "desktop.json"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src.read_bytes())
+            dest.chmod(0o600)
+            print(f"Saved to {dest}")
+
     print("─" * 42)
     print()
 
