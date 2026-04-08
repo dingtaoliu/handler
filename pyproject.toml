@@ -35,6 +35,9 @@ handler = "handler.cli:cli"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"handler.channels" = ["static/*"]
+
 [project.optional-dependencies]
 dev = [
     "pyright>=1.1.408",
