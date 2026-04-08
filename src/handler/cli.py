@@ -114,7 +114,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         return
 
     _PID_PATH.unlink(missing_ok=True)
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     log_file = open(_LOG_PATH, "a")
     subprocess.Popen(
