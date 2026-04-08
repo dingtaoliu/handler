@@ -13,11 +13,11 @@ handler run                # run in foreground (dev mode)
 handler logs               # tail recent log output
 ```
 
-Requires `.env` with `OPENAI_API_KEY`. Optional: `TELEGRAM_BOT_TOKEN`.
+Requires `OPENAI_API_KEY` — set it in `~/.handler/.env` or as an environment variable. Optional: `TELEGRAM_BOT_TOKEN`. Override workspace with `HANDLER_DATA_DIR`.
 
 ## Architecture
 
-Two-loop design: Handler owns the outer event loop (channels → store → agent → response), OpenAI Agents SDK owns the inner reasoning loop (LLM → tool calls → repeat).
+Two-loop design: Handler owns the outer event loop (channels → store → agent → response), the agent backend owns the inner reasoning loop (LLM → tool calls → repeat). The Claude backend uses the Claude Agent SDK (`claude_agent_sdk`) with tools exposed via an in-process MCP server. The OpenAI backend uses the OpenAI Agents SDK Runner.
 
 ### Core modules
 
@@ -27,17 +27,18 @@ Two-loop design: Handler owns the outer event loop (channels → store → agent
 | **Paths** | `paths.py` | Centralized path constants — every module imports from here instead of recomputing paths locally. |
 | **Agent** | `agent.py` | Inner reasoning loop — wraps OpenAI Agents SDK, manages compaction (auto-summarize when >100k input tokens), tracks token usage per turn. |
 | **EventStore** | `event_store.py` | SQLite persistence — conversations, messages, summaries, cron jobs, token usage, audit log. Self-contained, no handler imports. |
-| **Memory** | `memory.py` | Agent-controlled knowledge — markdown files in `data/memory/` with an index for prompt scaling. Self-contained, no handler imports. |
-| **AgentContext** | `context.py` | System prompt assembly — layers: system config → identity → persona → compaction summary → memory → health checks. |
+| **Memory** | `memory/` | Agent-controlled knowledge — markdown files in `data/memory/` with an index.md for prompt inclusion. Self-contained, no handler imports. |
+| **AgentContext** | `context/` | System prompt assembly — layers: system config → identity → persona → compaction summary → memory → health checks. |
 | **Types** | `types.py` | `Event`, `Message`, and `RunContext` — shared data types across all modules. |
 
 ### Component docs
 
 Subfolders have their own CLAUDE.md with detailed documentation:
 
-- `actions/CLAUDE.md` — tool system, factory pattern, self-modification safety
+- `context/CLAUDE.md` — **full breakdown of what the LLM sees** (system prompt, messages, tools, token budget)
+- `tools/CLAUDE.md` — tool system, factory pattern, self-modification safety
 - `channels/CLAUDE.md` — channel ABC, web/telegram/scheduler/gmail details
-- `watchdog/CLAUDE.md` — liveness probe, rollback strategy, auto-configuration
+- `watchdog/CLAUDE.md` — liveness probe, release auto-update, rollback strategy, auto-configuration
 
 ### Request flow
 
@@ -62,13 +63,14 @@ EventStore, Memory, and Types have zero handler imports — they are leaf depend
 ## Key Conventions
 
 - **Model**: `gpt-5.4-2026-03-05` (set in `__main__.py`)
-- **Config on disk**: `data/config/{system,identity,persona}.md` — plain text, not YAML
-- **Memory on disk**: `data/memory/*.md` — managed by `Memory` class, indexed for prompt scaling
-- **Database**: `data/handler.db` (SQLite)
-- **Logs**: `data/logs/handler-YYYY-MM-DD.log` (daily files)
-- **PID file**: `data/handler.pid`
+- **Workspace**: `~/.handler/` by default; override with `HANDLER_DATA_DIR` env var
+- **Config on disk**: `~/.handler/config/{system,identity,persona}.md` — plain text, not YAML
+- **Memory on disk**: `~/.handler/memory/*.md` — managed by `Memory` class, indexed via `~/.handler/memory/index.md`
+- **Database**: `~/.handler/handler.db` (SQLite)
+- **Logs**: `~/.handler/logs/handler-YYYY-MM-DD.log` (daily files)
+- **PID file**: `~/.handler/handler.pid`
+- **Watchdog config**: `~/.handler/scheduler.json` — backend choice plus release auto-update state
 - **Paths**: all defined in `paths.py` — do not recompute `Path(__file__)` in other modules
-- **Runtime data dir** (`data/`) is gitignored
 
 ## File Structure
 
@@ -78,31 +80,33 @@ handler/
 ├── cli.py               # CLI: start, stop, restart, status, run, logs
 ├── paths.py             # centralized path constants (DATA_DIR, PID_PATH, etc.)
 ├── agent.py             # Agent — LLM reasoning + compaction
-├── context.py           # AgentContext — system prompt builder
+├── context/             # AgentContext — system prompt builder (see context/CLAUDE.md)
 ├── environment.py       # Environment + Channel ABC
 ├── event_store.py       # EventStore — SQLite persistence
-├── memory.py            # Memory — agent knowledge files + index
+├── memory/              # Memory — agent knowledge files + index (see memory/CLAUDE.md)
 ├── types.py             # Event, Message, RunContext dataclasses
 ├── utils.py             # schedule parsing helpers
-├── actions/             # tools (see actions/CLAUDE.md)
-│   ├── builtin.py       # read_file, write_file, write_and_run, run_python, run_shell, web_search, memory_tools
-│   ├── selfmod.py       # mark_stable, restart_self, write_core_file
-│   ├── coding.py        # search_codebase, patch_file, read_source
-│   ├── session.py       # compact_messages, compact_tool, cron_tools, stop_self
+├── tools/               # tools (see tools/CLAUDE.md)
+│   ├── builtin.py       # read_file, write_file, shell, web_search, memory_tool
+│   ├── selfmod.py       # _git_checkpoint helper for guarded edits
+│   ├── coding.py        # search_codebase, edit_file
+│   ├── session.py       # compact_messages, compact_tool, cron_tool
+│   ├── gmail.py         # gmail tool (search, read, draft_reply via action param)
+│   ├── gdrive.py        # google_drive tool (list, read, create/update docs & sheets)
 │   └── watchdog.py      # get_health_problems (non-tool health check)
 ├── channels/            # event sources/sinks (see channels/CLAUDE.md)
 │   ├── web.py           # FastAPI chat UI (chat endpoints only)
 │   ├── admin.py         # Admin API router (memory, config, cron, logs, files, tools)
 │   ├── telegram.py      # Telegram bot (per-chat conversations)
 │   ├── scheduler.py     # session expiry + cron job execution
-│   ├── gmail.py         # Gmail tools (search, read, draft reply)
 │   └── static/          # web UI assets
 ├── watchdog/            # liveness probe (see watchdog/CLAUDE.md)
-│   ├── core.py          # PID checks, restart, import test, rollback
-│   └── backends.py      # launchd, systemd, crontab installers
-└── data/                # runtime (gitignored)
+│   ├── core.py          # PID checks, release updates, restart, import test, rollback
+│   └── backends.py      # launchd, systemd, crontab installers + scheduler config
+~/.handler/              # workspace (outside repo, works with pip install)
+    ├── .env             # OPENAI_API_KEY, TELEGRAM_BOT_TOKEN, etc.
     ├── config/          # system.md, identity.md, persona.md
-    ├── memory/          # agent's persistent memory files + .index.json
+    ├── memory/          # agent's persistent memory files + index.md
     ├── credentials/     # Gmail OAuth (desktop.json, token.json)
     ├── uploads/         # file uploads from web UI
     ├── logs/            # daily log files (handler-YYYY-MM-DD.log)

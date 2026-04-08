@@ -1,0 +1,249 @@
+"""Handler entry point. Run with: python -m handler"""
+
+import asyncio
+import json
+import logging
+import os
+import signal
+
+from dotenv import load_dotenv
+
+from .agent import BaseAgent, OpenAIAgent, OpenAIManualAgent, ClaudeAgent
+from .context import AgentContext
+from .event_store import EventStore
+from .memory import Memory
+from .environment import Environment
+from .paths import DATA_DIR, CONFIG_DIR, MEMORY_DIR, PID_PATH, LOG_DIR, get_log_path
+from .types import RunContext
+from .channels import WebChannel, TelegramChannel, SchedulerChannel
+from .tools import (
+    read_file,
+    write_file,
+    shell,
+    web_search,
+    compact_tool,
+    cron_tool,
+    memory_tool,
+    search_codebase,
+    edit_file,
+    gmail_tool,
+    gdrive_tool,
+)
+from .watchdog import install_watchdog, load_scheduler_config, detect_scheduler_backends
+
+load_dotenv(DATA_DIR / ".env")  # workspace env (~/.handler/.env)
+load_dotenv()  # fallback: search from cwd upward
+
+logger = logging.getLogger("handler")
+
+KEEP_RECENT = 10
+
+_AGENT_MAP = {
+    "openai": OpenAIAgent,
+    "openai-manual": OpenAIManualAgent,
+    "claude": ClaudeAgent,
+}
+
+_DEFAULT_MODELS = {
+    "openai": "gpt-5.4-2026-03-05",
+    "openai-manual": "gpt-5.4-2026-03-05",
+    "claude": "claude-opus-4-6",
+}
+
+_AGENT_CONFIG_PATH = CONFIG_DIR / "agent.json"
+
+
+def _normalize_agent_config(backend: str | None, model: str | None) -> dict[str, str]:
+    resolved_backend = (backend or os.environ.get("HANDLER_AGENT", "openai")).strip()
+    if resolved_backend not in _AGENT_MAP:
+        resolved_backend = "openai"
+
+    resolved_model = (model or "").strip() or _DEFAULT_MODELS[resolved_backend]
+    return {"backend": resolved_backend, "model": resolved_model}
+
+
+def _load_agent_config() -> dict:
+    """Load agent backend/model from config file, falling back to env var."""
+    if _AGENT_CONFIG_PATH.exists():
+        try:
+            data = json.loads(_AGENT_CONFIG_PATH.read_text())
+            return _normalize_agent_config(
+                data.get("backend"),
+                data.get("model"),
+            )
+        except Exception:
+            pass
+    return _normalize_agent_config(None, None)
+
+
+def _save_agent_config(backend: str, model: str) -> None:
+    """Persist agent config to disk."""
+    config = _normalize_agent_config(backend, model)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _AGENT_CONFIG_PATH.write_text(json.dumps(config, indent=2))
+
+
+def _write_pid() -> None:
+    PID_PATH.write_text(str(os.getpid()))
+
+
+def _remove_pid() -> None:
+    try:
+        PID_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+_file_handler = logging.FileHandler(
+    get_log_path(),
+    mode="a",
+    encoding="utf-8",
+)
+_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+)
+logging.getLogger().addHandler(_file_handler)
+
+
+def main():
+    _write_pid()
+
+    # Auto-detect and install watchdog if not already configured
+    config = load_scheduler_config()
+    if config:
+        try:
+            install_watchdog(config["backend"])
+        except Exception as e:
+            logger.warning(f"watchdog install failed (non-fatal): {e}")
+    else:
+        try:
+            result = detect_scheduler_backends()
+            recommendation = result.get("recommendation")
+            if recommendation and recommendation != "none":
+                install_watchdog(recommendation)
+                logger.info(f"watchdog auto-configured: backend='{recommendation}'")
+            else:
+                logger.info(
+                    "no suitable watchdog backend found — running without watchdog"
+                )
+        except Exception as e:
+            logger.warning(f"watchdog auto-detection failed (non-fatal): {e}")
+
+    mem = Memory(memory_dir=MEMORY_DIR)
+    context = AgentContext(config_dir=CONFIG_DIR, memory_dir=MEMORY_DIR, memory=mem)
+    store = EventStore(db_path=str(DATA_DIR / "handler.db"))
+    run_ctx = RunContext()
+
+    agent_cfg = _load_agent_config()
+    backend = agent_cfg["backend"]
+    model = agent_cfg["model"]
+    agent_ref: dict[str, BaseAgent | None] = {"current": None}
+
+    def _get_agent() -> BaseAgent:
+        agent = agent_ref["current"]
+        if agent is None:
+            raise RuntimeError("agent not initialized")
+        return agent
+
+    tools = [
+        compact_tool(run_ctx, _get_agent),
+        read_file,
+        write_file,
+        shell,
+        web_search,
+        search_codebase,
+        edit_file,
+        cron_tool(store, run_ctx),
+    ]
+
+    tools.append(memory_tool(mem))
+
+    # Gmail (requires credentials/desktop.json + token.json)
+    try:
+        tools.append(gmail_tool())
+        print("Gmail tool loaded")
+    except Exception as e:
+        print(f"Gmail tool not available: {e}")
+
+    # Google Drive (requires credentials/desktop.json + drive_token.json)
+    try:
+        tools.append(gdrive_tool())
+        print("Google Drive tool loaded")
+    except Exception as e:
+        print(f"Google Drive tool not available: {e}")
+
+    def _build_agent(b: str, m: str):
+        AgentClass = _AGENT_MAP.get(b, OpenAIAgent)
+        return AgentClass(
+            context=context,
+            store=store,
+            run_ctx=run_ctx,
+            tools=tools,
+            model=m,
+            keep_recent=KEEP_RECENT,
+        )
+
+    agent = _build_agent(backend, model)
+    agent_ref["current"] = agent
+    env = Environment(agent, store)
+
+    def swap_agent(new_backend: str, new_model: str) -> None:
+        """Rebuild the agent and hot-swap it on the environment."""
+        _save_agent_config(new_backend, new_model)
+        next_agent = _build_agent(new_backend, new_model)
+        agent_ref["current"] = next_agent
+        env.agent = next_agent
+        logger.info(f"agent swapped: backend={new_backend}, model={new_model}")
+
+    env.add_channel(
+        WebChannel(
+            store,
+            memory=mem,
+            config_dir=CONFIG_DIR,
+            tools=tools,
+            agent_config_loader=_load_agent_config,
+            agent_swapper=swap_agent,
+        )
+    )
+    env.add_channel(SchedulerChannel(store))
+
+    telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if telegram_token:
+        env.add_channel(TelegramChannel(telegram_token))
+
+    if context.is_configured:
+        print("Starting Handler at http://localhost:8000")
+    else:
+        print("Starting Handler (first run — onboarding) at http://localhost:8000")
+
+    asyncio.run(_run(env))
+
+
+async def _run(env: Environment) -> None:
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+
+    env_task = asyncio.create_task(env.run())
+    await stop.wait()
+    logger.info("Shutdown signal received, stopping...")
+    env_task.cancel()
+    try:
+        await env_task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _remove_pid()
+
+
+if __name__ == "__main__":
+    main()
