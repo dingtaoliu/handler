@@ -7,18 +7,15 @@ voice messages. Sends a typing indicator while the agent is processing.
 
 import asyncio
 import logging
-from pathlib import Path
 
 from ..environment import Channel
+from ..paths import UPLOAD_DIR as _UPLOAD_DIR
 from ..types import Event
 
 logger = logging.getLogger("handler.channels.telegram")
 
 # Telegram limits
 MAX_MESSAGE_LENGTH = 4096
-
-_PACKAGE_DIR = Path(__file__).resolve().parent.parent
-_UPLOAD_DIR = _PACKAGE_DIR / "data" / "uploads"
 
 
 class TelegramChannel(Channel):
