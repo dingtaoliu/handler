@@ -108,6 +108,8 @@ def _read_pid() -> tuple[int | None, bool]:
 
 def cmd_start(args: argparse.Namespace) -> None:
     _init()
+    first_run = not (_DATA_DIR / "config" / "identity.md").exists()
+
     pid, alive = _read_pid()
     if alive:
         print(f"Handler is already running (PID {pid})")
@@ -132,7 +134,10 @@ def cmd_start(args: argparse.Namespace) -> None:
         pid, alive = _read_pid()
         if alive:
             print(f"Handler started (PID {pid})")
-            print("Web UI: http://localhost:8000")
+            if first_run:
+                print("Web UI: http://localhost:8000  ← open this to set up your agent")
+            else:
+                print("Web UI: http://localhost:8000")
             return
 
     print("Handler may have failed to start. Check: handler logs")
