@@ -70,6 +70,36 @@ def _token_path(user_id: str | None = None, conversation_id: str | None = None) 
             return str(legacy)
     return str(_TOKEN_PATH)
 
+
+def _auth_user_context(run_ctx=None) -> tuple[str, str]:
+    user_id = run_ctx.user_id if run_ctx else None
+    user = get_user(user_id)
+    return user.id, user.display_name
+
+
+def _missing_credentials_message(run_ctx=None) -> str:
+    user_id, display_name = _auth_user_context(run_ctx)
+    return (
+        f"Gmail is available but Google OAuth is not configured yet for {display_name}.\n\n"
+        f"1. Save your Google OAuth desktop client JSON to: {_CREDENTIALS_PATH}\n"
+        f"   You can also run `handler init` and provide desktop.json there.\n"
+        f"2. Authorize Gmail for this user on the server:\n\n"
+        f"  handler auth gmail --console --user {user_id}\n\n"
+        "If the server has a browser session, you can omit --console."
+    )
+
+
+def _oauth_required_message(auth_url: str, run_ctx=None) -> str:
+    user_id, display_name = _auth_user_context(run_ctx)
+    return (
+        f"Gmail authentication is required for {display_name}.\n\n"
+        f"Run this on the server:\n\n"
+        f"  handler auth gmail --console --user {user_id}\n\n"
+        f"If you have a browser on the server, you can omit --console.\n"
+        f"Or open this URL to complete the OAuth flow:\n{auth_url}"
+    )
+
+
 _HELP_TEXT = """\
 gmail — search, read, draft replies, and manage labels & filters.
 
@@ -320,16 +350,7 @@ def _save_attachments(msg: EmailMessage, gmail_id: str) -> list[tuple[str, str]]
 
 
 def gmail_tool(run_ctx=None):
-    """Create a single gmail tool. Authenticates per-user on first call.
-
-    Raises FileNotFoundError if desktop.json credentials are not set up.
-    """
-    if not _CREDENTIALS_PATH.exists():
-        raise FileNotFoundError(
-            f"Gmail credentials not found at {_CREDENTIALS_PATH}. "
-            "Download OAuth client JSON from Google Cloud Console → "
-            "APIs & Services → Credentials, and save it there."
-        )
+    """Create a single gmail tool. Authenticates per-user on first call."""
 
     def _creds():
         conversation_id = run_ctx.conversation_id if run_ctx else None
@@ -364,7 +385,9 @@ def gmail_tool(run_ctx=None):
                 f"Do NOT repeat this query without page_token or you will get the same results.\n"
             )
         else:
-            header = f"ALL RESULTS: {len(messages)} email(s) for: {query} (no more pages)\n"
+            header = (
+                f"ALL RESULTS: {len(messages)} email(s) for: {query} (no more pages)\n"
+            )
 
         output_lines = [header]
 
@@ -464,18 +487,24 @@ def gmail_tool(run_ctx=None):
 
     def _action_list_drafts(max_results: int) -> str:
         svc = _build_service(_creds())
-        results = svc.users().drafts().list(
-            userId="me", maxResults=min(max_results, 100)
-        ).execute()
+        results = (
+            svc.users()
+            .drafts()
+            .list(userId="me", maxResults=min(max_results, 100))
+            .execute()
+        )
         drafts = results.get("drafts", [])
         if not drafts:
             return "No drafts found."
 
         lines = [f"Found {len(drafts)} draft(s):\n"]
         for d in drafts:
-            detail = svc.users().drafts().get(
-                userId="me", id=d["id"], format="metadata"
-            ).execute()
+            detail = (
+                svc.users()
+                .drafts()
+                .get(userId="me", id=d["id"], format="metadata")
+                .execute()
+            )
             msg_headers = {
                 h["name"]: h["value"]
                 for h in detail.get("message", {}).get("payload", {}).get("headers", [])
@@ -484,16 +513,14 @@ def gmail_tool(run_ctx=None):
             to = msg_headers.get("To", "")
             date = msg_headers.get("Date", "")
             lines.append(
-                f"---\n"
-                f"Draft ID: {d['id']}\n"
-                f"To: {to}\n"
-                f"Date: {date}\n"
-                f"Subject: {subject}"
+                f"---\nDraft ID: {d['id']}\nTo: {to}\nDate: {date}\nSubject: {subject}"
             )
         logger.info(f"gmail list_drafts: {len(drafts)} drafts")
         return "\n".join(lines)
 
-    def _action_draft_reply(gmail_id: str, body: str, cc: str, reply_all: bool, draft_id: str) -> str:
+    def _action_draft_reply(
+        gmail_id: str, body: str, cc: str, reply_all: bool, draft_id: str
+    ) -> str:
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
 
@@ -509,7 +536,14 @@ def gmail_tool(run_ctx=None):
                 userId="me",
                 id=gmail_id,
                 format="metadata",
-                metadataHeaders=["Subject", "From", "To", "Cc", "Reply-To", "Message-ID"],
+                metadataHeaders=[
+                    "Subject",
+                    "From",
+                    "To",
+                    "Cc",
+                    "Reply-To",
+                    "Message-ID",
+                ],
             )
             .execute()
         )
@@ -531,7 +565,9 @@ def gmail_tool(run_ctx=None):
             for field in ("To", "Cc"):
                 val = headers.get(field, "")
                 if val:
-                    all_recipients.extend(a.strip() for a in val.split(",") if a.strip())
+                    all_recipients.extend(
+                        a.strip() for a in val.split(",") if a.strip()
+                    )
             # Also include the original sender
             if reply_to:
                 all_recipients.append(reply_to)
@@ -804,14 +840,10 @@ def gmail_tool(run_ctx=None):
                 return _HELP_TEXT
             try:
                 _creds()  # validate auth early, before dispatching
+            except FileNotFoundError:
+                return _missing_credentials_message(run_ctx)
             except OAuthRequired as e:
-                cid = run_ctx.conversation_id if run_ctx else None
-                user_flag = f" --user {cid}" if cid else ""
-                return (
-                    f"Gmail authorization required. Run this on the server to authorize:\n\n"
-                    f"  handler auth gmail --console{user_flag}\n\n"
-                    f"Or open this URL in any browser:\n{e.url}"
-                )
+                return _oauth_required_message(e.url, run_ctx)
             if action == "search":
                 if not query:
                     return "Missing required field: query."

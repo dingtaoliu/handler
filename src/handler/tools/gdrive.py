@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import sys
+from pathlib import Path
 
 from agents import function_tool
 
@@ -65,6 +66,36 @@ def _token_path(user_id: str | None = None, conversation_id: str | None = None) 
         if legacy.exists():
             return str(legacy)
     return str(_TOKEN_PATH)
+
+
+def _auth_user_context(run_ctx=None) -> tuple[str, str]:
+    user_id = run_ctx.user_id if run_ctx else None
+    user = get_user(user_id)
+    return user.id, user.display_name
+
+
+def _missing_credentials_message(run_ctx=None) -> str:
+    user_id, display_name = _auth_user_context(run_ctx)
+    return (
+        f"Google Drive is available but Google OAuth is not configured yet for {display_name}.\n\n"
+        f"1. Save your Google OAuth desktop client JSON to: {_CREDENTIALS_PATH}\n"
+        f"   You can also run `handler init` and provide desktop.json there.\n"
+        f"2. Authorize Google Drive for this user on the server:\n\n"
+        f"  handler auth gdrive --console --user {user_id}\n\n"
+        "If the server has a browser session, you can omit --console."
+    )
+
+
+def _oauth_required_message(auth_url: str, run_ctx=None) -> str:
+    user_id, display_name = _auth_user_context(run_ctx)
+    return (
+        f"Google Drive authentication is required for {display_name}.\n\n"
+        f"Run this on the server:\n\n"
+        f"  handler auth gdrive --console --user {user_id}\n\n"
+        f"If you have a browser on the server, you can omit --console.\n"
+        f"Or open this URL to complete the OAuth flow:\n{auth_url}"
+    )
+
 
 _HELP_TEXT = """\
 google_drive — manage Google Drive files, Docs, and Sheets.
@@ -173,16 +204,7 @@ def _build_docs_service(creds):
 
 
 def gdrive_tool(run_ctx=None):
-    """Create a single google_drive tool. Authenticates per-user on first call.
-
-    Raises FileNotFoundError if desktop.json credentials are not set up.
-    """
-    if not _CREDENTIALS_PATH.exists():
-        raise FileNotFoundError(
-            f"Google credentials not found at {_CREDENTIALS_PATH}. "
-            "Download OAuth client JSON from Google Cloud Console → "
-            "APIs & Services → Credentials, and save it there."
-        )
+    """Create a single google_drive tool. Authenticates per-user on first call."""
 
     def _creds():
         conversation_id = run_ctx.conversation_id if run_ctx else None
@@ -236,10 +258,14 @@ def gdrive_tool(run_ctx=None):
     def _action_read(file_id: str) -> str:
         drive_svc = _build_drive_service(_creds())
 
-        meta = drive_svc.files().get(
-            fileId=file_id,
-            fields="id, name, mimeType, modifiedTime, webViewLink",
-        ).execute()
+        meta = (
+            drive_svc.files()
+            .get(
+                fileId=file_id,
+                fields="id, name, mimeType, modifiedTime, webViewLink",
+            )
+            .execute()
+        )
         mime = meta.get("mimeType", "")
         name = meta.get("name", "unknown")
 
@@ -252,9 +278,14 @@ def gdrive_tool(run_ctx=None):
 
         if mime == "application/vnd.google-apps.document":
             docs_svc = _build_docs_service(_creds())
-            doc = docs_svc.documents().get(
-                documentId=file_id, includeTabsContent=True,
-            ).execute()
+            doc = (
+                docs_svc.documents()
+                .get(
+                    documentId=file_id,
+                    includeTabsContent=True,
+                )
+                .execute()
+            )
             tabs = doc.get("tabs", [])
             parts = []
             for tab in tabs:
@@ -276,24 +307,28 @@ def gdrive_tool(run_ctx=None):
             content = "\n\n".join(parts) if parts else "(empty document)"
             if len(content) > 10000:
                 content = content[:7000] + "\n\n[...truncated...]\n\n" + content[-3000:]
-            logger.info(f"google_drive read: doc {file_id} ({len(tabs)} tabs, {len(content)} chars)")
+            logger.info(
+                f"google_drive read: doc {file_id} ({len(tabs)} tabs, {len(content)} chars)"
+            )
             return header + content
 
         if mime == "application/vnd.google-apps.spreadsheet":
             sheets_svc = _build_sheets_service(_creds())
-            spreadsheet = sheets_svc.spreadsheets().get(
-                spreadsheetId=file_id
-            ).execute()
+            spreadsheet = sheets_svc.spreadsheets().get(spreadsheetId=file_id).execute()
             sheet_names = [
-                s["properties"]["title"]
-                for s in spreadsheet.get("sheets", [])
+                s["properties"]["title"] for s in spreadsheet.get("sheets", [])
             ]
             parts = []
             for sname in sheet_names[:10]:
-                result = sheets_svc.spreadsheets().values().get(
-                    spreadsheetId=file_id,
-                    range=f"'{sname}'",
-                ).execute()
+                result = (
+                    sheets_svc.spreadsheets()
+                    .values()
+                    .get(
+                        spreadsheetId=file_id,
+                        range=f"'{sname}'",
+                    )
+                    .execute()
+                )
                 rows = result.get("values", [])
                 if rows:
                     parts.append(f"## Sheet: {sname}\n")
@@ -307,12 +342,16 @@ def gdrive_tool(run_ctx=None):
 
         if mime.startswith("application/vnd.google-apps."):
             try:
-                content = drive_svc.files().export(
-                    fileId=file_id, mimeType="text/plain"
-                ).execute()
+                content = (
+                    drive_svc.files()
+                    .export(fileId=file_id, mimeType="text/plain")
+                    .execute()
+                )
                 if isinstance(content, bytes):
                     content = content.decode("utf-8", errors="replace")
-                logger.info(f"google_drive read: exported {file_id} ({len(content)} chars)")
+                logger.info(
+                    f"google_drive read: exported {file_id} ({len(content)} chars)"
+                )
                 return header + content
             except Exception:
                 return header + "(Unsupported Google Workspace file type.)"
@@ -328,9 +367,11 @@ def gdrive_tool(run_ctx=None):
         if content:
             docs_svc.documents().batchUpdate(
                 documentId=doc_id,
-                body={"requests": [
-                    {"insertText": {"location": {"index": 1}, "text": content}},
-                ]},
+                body={
+                    "requests": [
+                        {"insertText": {"location": {"index": 1}, "text": content}},
+                    ]
+                },
             ).execute()
 
         link = f"https://docs.google.com/document/d/{doc_id}/edit"
@@ -339,9 +380,11 @@ def gdrive_tool(run_ctx=None):
 
     def _action_create_sheet(title: str, data: str) -> str:
         sheets_svc = _build_sheets_service(_creds())
-        spreadsheet = sheets_svc.spreadsheets().create(
-            body={"properties": {"title": title}}
-        ).execute()
+        spreadsheet = (
+            sheets_svc.spreadsheets()
+            .create(body={"properties": {"title": title}})
+            .execute()
+        )
         sheet_id = spreadsheet["spreadsheetId"]
 
         if data:
@@ -367,16 +410,21 @@ def gdrive_tool(run_ctx=None):
             end_index = doc["body"]["content"][-1]["endIndex"]
             requests = []
             if end_index > 2:
-                requests.append({
-                    "deleteContentRange": {
-                        "range": {"startIndex": 1, "endIndex": end_index - 1},
+                requests.append(
+                    {
+                        "deleteContentRange": {
+                            "range": {"startIndex": 1, "endIndex": end_index - 1},
+                        }
                     }
-                })
-            requests.append({
-                "insertText": {"location": {"index": 1}, "text": content},
-            })
+                )
+            requests.append(
+                {
+                    "insertText": {"location": {"index": 1}, "text": content},
+                }
+            )
             docs_svc.documents().batchUpdate(
-                documentId=file_id, body={"requests": requests},
+                documentId=file_id,
+                body={"requests": requests},
             ).execute()
         else:
             # Append: insert at the end of the document
@@ -384,9 +432,16 @@ def gdrive_tool(run_ctx=None):
             end_index = doc["body"]["content"][-1]["endIndex"]
             docs_svc.documents().batchUpdate(
                 documentId=file_id,
-                body={"requests": [
-                    {"insertText": {"location": {"index": end_index - 1}, "text": "\n" + content}},
-                ]},
+                body={
+                    "requests": [
+                        {
+                            "insertText": {
+                                "location": {"index": end_index - 1},
+                                "text": "\n" + content,
+                            }
+                        },
+                    ]
+                },
             ).execute()
 
         link = f"https://docs.google.com/document/d/{file_id}/edit"
@@ -398,7 +453,7 @@ def gdrive_tool(run_ctx=None):
         items = json.loads(replacements)
 
         if not isinstance(items, list):
-            return "Error: replacements must be a JSON list of {\"find\": \"...\", \"replace\": \"...\"} objects."
+            return 'Error: replacements must be a JSON list of {"find": "...", "replace": "..."} objects.'
 
         requests = []
         for item in items:
@@ -406,19 +461,26 @@ def gdrive_tool(run_ctx=None):
             replace = item.get("replace", "")
             if not find:
                 continue
-            requests.append({
-                "replaceAllText": {
-                    "containsText": {"text": find, "matchCase": True},
-                    "replaceText": replace,
+            requests.append(
+                {
+                    "replaceAllText": {
+                        "containsText": {"text": find, "matchCase": True},
+                        "replaceText": replace,
+                    }
                 }
-            })
+            )
 
         if not requests:
             return "No valid replacements provided."
 
-        result = docs_svc.documents().batchUpdate(
-            documentId=file_id, body={"requests": requests},
-        ).execute()
+        result = (
+            docs_svc.documents()
+            .batchUpdate(
+                documentId=file_id,
+                body={"requests": requests},
+            )
+            .execute()
+        )
 
         total = sum(
             r.get("replaceAllText", {}).get("occurrencesChanged", 0)
@@ -428,7 +490,9 @@ def gdrive_tool(run_ctx=None):
         logger.info(f"google_drive edit_doc: {file_id} {total} occurrences changed")
         return f"Document edited: {total} occurrence(s) replaced across {len(requests)} find-and-replace(s).\nID: {file_id}\nLink: {link}"
 
-    def _action_update_sheet(file_id: str, data: str, sheet_name: str, start_cell: str) -> str:
+    def _action_update_sheet(
+        file_id: str, data: str, sheet_name: str, start_cell: str
+    ) -> str:
         sheets_svc = _build_sheets_service(_creds())
         rows = json.loads(data)
 
@@ -436,12 +500,17 @@ def gdrive_tool(run_ctx=None):
             return "Error: data must be a JSON list of lists."
 
         range_str = f"'{sheet_name}'!{start_cell}"
-        result = sheets_svc.spreadsheets().values().update(
-            spreadsheetId=file_id,
-            range=range_str,
-            valueInputOption="USER_ENTERED",
-            body={"values": rows},
-        ).execute()
+        result = (
+            sheets_svc.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=file_id,
+                range=range_str,
+                valueInputOption="USER_ENTERED",
+                body={"values": rows},
+            )
+            .execute()
+        )
 
         updated = result.get("updatedCells", 0)
         link = f"https://docs.google.com/spreadsheets/d/{file_id}/edit"
@@ -453,9 +522,11 @@ def gdrive_tool(run_ctx=None):
 
         sheets_svc.spreadsheets().batchUpdate(
             spreadsheetId=file_id,
-            body={"requests": [
-                {"addSheet": {"properties": {"title": sheet_name}}},
-            ]},
+            body={
+                "requests": [
+                    {"addSheet": {"properties": {"title": sheet_name}}},
+                ]
+            },
         ).execute()
 
         if data:
@@ -476,12 +547,18 @@ def gdrive_tool(run_ctx=None):
         docs_svc = _build_docs_service(_creds())
 
         # Create the new tab
-        result = docs_svc.documents().batchUpdate(
-            documentId=file_id,
-            body={"requests": [
-                {"addDocumentTab": {"tabProperties": {"title": title}}},
-            ]},
-        ).execute()
+        result = (
+            docs_svc.documents()
+            .batchUpdate(
+                documentId=file_id,
+                body={
+                    "requests": [
+                        {"addDocumentTab": {"tabProperties": {"title": title}}},
+                    ]
+                },
+            )
+            .execute()
+        )
 
         # Get the new tab ID from the response
         tab_id = result["replies"][0]["addDocumentTab"]["tabProperties"]["tabId"]
@@ -489,25 +566,35 @@ def gdrive_tool(run_ctx=None):
         if content:
             docs_svc.documents().batchUpdate(
                 documentId=file_id,
-                body={"requests": [
-                    {"insertText": {
-                        "location": {"index": 1, "tabId": tab_id},
-                        "text": content,
-                    }},
-                ]},
+                body={
+                    "requests": [
+                        {
+                            "insertText": {
+                                "location": {"index": 1, "tabId": tab_id},
+                                "text": content,
+                            }
+                        },
+                    ]
+                },
             ).execute()
 
         link = f"https://docs.google.com/document/d/{file_id}/edit?tab={tab_id}"
-        logger.info(f"google_drive add_doc_tab: {file_id} tab={title!r} tab_id={tab_id}")
+        logger.info(
+            f"google_drive add_doc_tab: {file_id} tab={title!r} tab_id={tab_id}"
+        )
         return f"Tab '{title}' added.\nTab ID: {tab_id}\nID: {file_id}\nLink: {link}"
 
     def _action_download(file_id: str) -> str:
         drive_svc = _build_drive_service(_creds())
 
-        meta = drive_svc.files().get(
-            fileId=file_id,
-            fields="id, name, mimeType",
-        ).execute()
+        meta = (
+            drive_svc.files()
+            .get(
+                fileId=file_id,
+                fields="id, name, mimeType",
+            )
+            .execute()
+        )
         name = meta.get("name", file_id)
         mime = meta.get("mimeType", "")
 
@@ -521,16 +608,20 @@ def gdrive_tool(run_ctx=None):
         }
 
         if mime in workspace_export:
-            content = drive_svc.files().export(
-                fileId=file_id, mimeType="application/pdf"
-            ).execute()
+            content = (
+                drive_svc.files()
+                .export(fileId=file_id, mimeType="application/pdf")
+                .execute()
+            )
             filename = f"{file_id}_{name}.pdf"
         else:
             content = drive_svc.files().get_media(fileId=file_id).execute()
             filename = f"{file_id}_{name}"
 
         # Sanitize filename
-        safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename).strip()
+        safe_name = "".join(
+            c if c.isalnum() or c in "._- " else "_" for c in filename
+        ).strip()
         dest = GDRIVE_UPLOAD_DIR / safe_name
         dest.write_bytes(content if isinstance(content, bytes) else content.encode())
 
@@ -575,14 +666,10 @@ def gdrive_tool(run_ctx=None):
                 return _HELP_TEXT
             try:
                 _creds()
+            except FileNotFoundError:
+                return _missing_credentials_message(run_ctx)
             except OAuthRequired as e:
-                cid = run_ctx.conversation_id if run_ctx else None
-                user_flag = f" --user {cid}" if cid else ""
-                return (
-                    f"Google Drive authorization required. Run this on the server to authorize:\n\n"
-                    f"  handler auth gdrive --console{user_flag}\n\n"
-                    f"Or open this URL in any browser:\n{e.url}"
-                )
+                return _oauth_required_message(e.url, run_ctx)
             if action == "list":
                 return _action_list(query, max_results)
             if action == "read":

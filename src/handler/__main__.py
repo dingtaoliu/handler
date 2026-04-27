@@ -173,19 +173,11 @@ def main():
 
     tools.append(memory_tool(mem, run_ctx))
 
-    # Gmail (requires credentials/desktop.json)
-    try:
-        tools.append(gmail_tool(run_ctx))
-        print("Gmail tool loaded")
-    except Exception as e:
-        print(f"Gmail tool not available: {e}")
+    tools.append(gmail_tool(run_ctx))
+    print("Gmail tool loaded")
 
-    # Google Drive (requires credentials/desktop.json)
-    try:
-        tools.append(gdrive_tool(run_ctx))
-        print("Google Drive tool loaded")
-    except Exception as e:
-        print(f"Google Drive tool not available: {e}")
+    tools.append(gdrive_tool(run_ctx))
+    print("Google Drive tool loaded")
 
     def _build_agent(b: str, m: str) -> BaseAgent:
         kwargs = dict(
