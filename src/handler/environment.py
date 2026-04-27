@@ -42,13 +42,28 @@ class Environment:
         self.store = store
         self.queue: asyncio.Queue[Event] = asyncio.Queue()
         self.channels: dict[str, Channel] = {}
+        self._channel_tasks: dict[str, asyncio.Task[None]] = {}
 
     def add_channel(self, channel: Channel) -> None:
         self.channels[channel.name] = channel
 
+    def _on_channel_task_done(self, channel_name: str, task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.info(f"channel stopped: {channel_name}")
+        except Exception:
+            logger.exception(f"channel crashed: {channel_name}")
+
     async def run(self) -> None:
         for channel in self.channels.values():
-            asyncio.create_task(channel.start(self.queue))
+            task = asyncio.create_task(channel.start(self.queue))
+            self._channel_tasks[channel.name] = task
+            task.add_done_callback(
+                lambda done_task, name=channel.name: self._on_channel_task_done(
+                    name, done_task
+                )
+            )
             logger.info(f"started channel: {channel.name}")
 
         logger.info(f"environment running ({len(self.channels)} channel(s))")
