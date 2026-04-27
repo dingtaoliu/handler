@@ -7,10 +7,12 @@ voice messages. Sends a typing indicator while the agent is processing.
 
 import asyncio
 import logging
+from pathlib import Path
 
 from ..environment import Channel
 from ..paths import UPLOAD_DIR as _UPLOAD_DIR
 from ..types import Event
+from ..users import resolve_household_user_from_telegram
 
 logger = logging.getLogger("handler.channels.telegram")
 
@@ -179,6 +181,11 @@ class TelegramChannel(Channel):
         chat_id = update.message.chat_id
         user = update.message.from_user
         conversation_id = f"telegram:{chat_id}"
+        household_user = resolve_household_user_from_telegram(
+            user.id,
+            username=user.username,
+            first_name=user.first_name,
+        )
 
         if self.allowed_user_ids is not None and user.id not in self.allowed_user_ids:
             logger.warning(f"telegram blocked unauthorized user {user.id} (@{user.username})")
@@ -187,7 +194,7 @@ class TelegramChannel(Channel):
 
         logger.info(
             f"telegram message from {user.username or user.id} "
-            f"(chat {chat_id}): {content[:100]}"
+            f"(chat {chat_id}, household={household_user.id if household_user else 'unresolved'}): {content[:100]}"
         )
 
         # Send typing indicator while processing
@@ -198,7 +205,7 @@ class TelegramChannel(Channel):
             event_data = {
                 "content": content,
                 "chat_id": chat_id,
-                "user_id": user.id,
+                "telegram_user_id": user.id,
                 "username": user.username,
                 "first_name": user.first_name,
             }
@@ -209,6 +216,7 @@ class TelegramChannel(Channel):
                 source="telegram",
                 data=event_data,
                 conversation_id=conversation_id,
+                user_id=household_user.id if household_user else None,
                 _response_future=future,
             )
             queue = self.queue

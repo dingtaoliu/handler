@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
 
 from .paths import DATA_DIR, USERS_DIR, LEGACY_CREDENTIALS_DIR, LEGACY_MEMORY_DIR
@@ -40,6 +40,7 @@ def slugify_user_id(value: str) -> str:
 class HouseholdUser:
     id: str
     display_name: str
+    telegram_user_ids: tuple[str, ...] = ()
 
     @property
     def slug(self) -> str:
@@ -88,9 +89,23 @@ def list_household_users() -> list[HouseholdUser]:
             continue
         user_id = slugify_user_id(str(raw.get("id", "")))
         display_name = str(raw.get("display_name", "")).strip() or user_id
-        users.append(HouseholdUser(id=user_id, display_name=display_name))
+        telegram_user_ids = tuple(
+            str(value).strip()
+            for value in raw.get("telegram_user_ids", [])
+            if str(value).strip()
+        )
+        users.append(
+            HouseholdUser(
+                id=user_id,
+                display_name=display_name,
+                telegram_user_ids=telegram_user_ids,
+            )
+        )
     if not users:
-        users = [HouseholdUser(**item) for item in _DEFAULT_USERS]
+        users = [
+            HouseholdUser(id=item["id"], display_name=item["display_name"])
+            for item in _DEFAULT_USERS
+        ]
     return users
 
 
@@ -109,6 +124,47 @@ def get_household_user(user_id: str | None) -> HouseholdUser:
         if user.id == slug:
             return user
     raise KeyError(slug)
+
+
+def resolve_household_user_from_telegram(
+    telegram_user_id: int | str | None,
+    *,
+    username: str | None = None,
+    first_name: str | None = None,
+) -> HouseholdUser | None:
+    """Resolve a household user from Telegram sender metadata.
+
+    Resolution order:
+    - explicit telegram_user_ids entries in users.json
+    - exact normalized username/first-name matches against household user ids/names
+    """
+
+    sender_id = str(telegram_user_id).strip() if telegram_user_id is not None else ""
+    for user in list_household_users():
+        if sender_id and sender_id in user.telegram_user_ids:
+            return user
+
+    candidates: list[str] = []
+    if username:
+        candidates.append(slugify_user_id(username))
+    if first_name:
+        try:
+            candidates.append(slugify_user_id(first_name))
+        except ValueError:
+            pass
+
+    if not candidates:
+        return None
+
+    for user in list_household_users():
+        aliases = {user.id}
+        aliases.update(
+            slugify_user_id(part) for part in user.display_name.split() if part.strip()
+        )
+        if any(candidate in aliases for candidate in candidates):
+            return user
+
+    return None
 
 
 def bootstrap_household_layout() -> None:
@@ -143,4 +199,7 @@ def bootstrap_household_layout() -> None:
 
 
 def serialize_users() -> list[dict[str, str]]:
-    return [asdict(user) for user in list_household_users()]
+    return [
+        {"id": user.id, "display_name": user.display_name}
+        for user in list_household_users()
+    ]
