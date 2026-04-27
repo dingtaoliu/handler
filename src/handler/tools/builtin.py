@@ -14,6 +14,7 @@ from ..paths import (
     PACKAGE_DIR as _PACKAGE_DIR,
     PROJECT_ROOT as _PROJECT_ROOT,
     SHELL_LOG_DIR as _SHELL_LOG_DIR,
+    UPLOAD_DIR as _UPLOAD_DIR,
 )
 
 logger = logging.getLogger("handler.tools.builtin")
@@ -200,6 +201,27 @@ def shell(command: str, timeout: int = 60) -> str:
 
 
 web_search = WebSearchTool()
+
+
+@function_tool
+def list_files(subdir: str = "") -> str:
+    """List files available locally in the uploads directory. Call this before searching Google Drive when the user references a file by name.
+
+    Args:
+        subdir: Optional subdirectory to list within uploads (e.g. 'gmail', 'gdrive'). Leave empty to list all top-level uploads.
+    """
+    base = (_UPLOAD_DIR / subdir).resolve() if subdir else _UPLOAD_DIR.resolve()
+    if not base.exists():
+        return "No uploaded files found."
+    files = sorted(f for f in base.iterdir() if f.is_file() and not f.name.startswith("."))
+    if not files:
+        return "No uploaded files found."
+    lines = []
+    for f in files:
+        size_kb = f.stat().st_size / 1024
+        mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"{f.name}  |  {size_kb:.1f} KB  |  {mtime}  |  {f}")
+    return f"Local uploads ({len(files)} file(s)):\n" + "\n".join(lines)
 
 
 def memory_tool(mem):

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import email as email_lib
+import json
 import logging
 import os
 import re
@@ -19,8 +20,6 @@ from email.message import Message as EmailMessage
 from pathlib import Path
 
 from agents import function_tool
-
-import json
 
 from ..paths import DATA_DIR as _DATA_DIR, GMAIL_UPLOAD_DIR
 
@@ -40,14 +39,19 @@ gmail — search, read, draft replies, and manage labels & filters.
 
 Actions:
   search        — Search Gmail using Gmail query syntax.
-                  Params: query (required), max_results (default 10).
+                  Params: query (required), max_results (default 10, up to 500), page_token (optional).
+                  If results include a page_token, pass it to fetch the next page.
                   Query examples: "from:bank subject:statement", "after:2025/01/01 is:unread",
                   "has:attachment filename:pdf", "in:inbox from:github".
     read          — Read a specific email by its Gmail ID (from search results).
                                     Params: gmail_id (required), download_attachments (optional, default false).
                                     If download_attachments is true, attachments are saved to data/uploads/gmail/ and local paths are returned.
   draft_reply   — Draft a reply to an email. Saved in Gmail Drafts — nothing is sent.
-                  Params: gmail_id (required), body (required).
+                  Params: gmail_id (required), body (required), cc (optional, comma-separated),
+                  reply_all (optional bool, default false — if true, replies to all original recipients),
+                  draft_id (optional — if provided, updates that existing draft instead of creating a new one).
+  list_drafts   — List existing Gmail drafts with their IDs and subjects.
+                  Params: max_results (default 10).
   list_labels   — List all Gmail labels (system and user-created).
   create_label  — Create a new label.
                   Params: label_name (required).
@@ -124,18 +128,17 @@ def _build_service(creds):
 
 
 def _clean_body(body_plain: str | None, body_html: str | None) -> str:
-    """Clean email body for LLM consumption. Prefers HTML → plain text conversion."""
-    import html2text
+    """Clean email body for LLM consumption. Prefers plain text; strips HTML as fallback."""
+    from bs4 import BeautifulSoup
 
     text = ""
-    if body_html:
-        h = html2text.HTML2Text()
-        h.ignore_links = False
-        h.ignore_images = True
-        h.body_width = 0
-        text = h.handle(body_html)
-    elif body_plain:
+    if body_plain:
         text = body_plain
+    elif body_html:
+        soup = BeautifulSoup(body_html, "html.parser")
+        for tag in soup(["script", "style", "head", "blockquote"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
 
     if not text:
         return ""
@@ -159,16 +162,6 @@ def _clean_body(body_plain: str | None, body_html: str | None) -> str:
         text,
         flags=re.DOTALL,
     )
-
-    # Shorten long URLs
-    def _shorten(m):
-        url = m.group(0)
-        if len(url) > 60:
-            domain = re.search(r"https?://([^/]+)", url)
-            return f"[link: {domain.group(1)}]" if domain else "[link]"
-        return url
-
-    text = re.sub(r'https?://[^\s<>"{}|\\^`\[\]]+', _shorten, text)
 
     # Remove unsubscribe/footer boilerplate
     text = re.sub(r"(?im)\n.*unsubscribe.*$", "", text)
@@ -290,20 +283,36 @@ def gmail_tool():
     """
     creds = _get_credentials()
 
-    def _action_search(query: str, max_results: int) -> str:
+    def _action_search(query: str, max_results: int, page_token: str) -> str:
         svc = _build_service(creds)
-        results = (
-            svc.users()
-            .messages()
-            .list(userId="me", q=query, maxResults=min(max_results, 50))
-            .execute()
-        )
+        list_kwargs: dict = {
+            "userId": "me",
+            "q": query,
+            "maxResults": min(max_results, 500),
+        }
+        if page_token:
+            list_kwargs["pageToken"] = page_token
+
+        results = svc.users().messages().list(**list_kwargs).execute()
         messages = results.get("messages", [])
+        next_page_token = results.get("nextPageToken")
+
         if not messages:
             return f"No emails found for: {query}"
 
         batch_svc = _build_service(creds)
-        output_lines = [f"Found {len(messages)} email(s) for: {query}\n"]
+
+        # Pagination status header — placed first so it's never missed
+        if next_page_token:
+            header = (
+                f"PARTIAL RESULTS: showing {len(messages)} emails (more exist).\n"
+                f"NEXT ACTION: call search again with page_token={next_page_token!r} to get the next page.\n"
+                f"Do NOT repeat this query without page_token or you will get the same results.\n"
+            )
+        else:
+            header = f"ALL RESULTS: {len(messages)} email(s) for: {query} (no more pages)\n"
+
+        output_lines = [header]
 
         for msg_stub in messages:
             msg = (
@@ -335,7 +344,10 @@ def gmail_tool():
                 f"Preview: {snippet[:200]}"
             )
 
-        logger.info(f"gmail search: query={query!r} results={len(messages)}")
+        logger.info(
+            f"gmail search: query={query!r} results={len(messages)} "
+            f"has_more={next_page_token is not None}"
+        )
         return "\n".join(output_lines)
 
     def _action_read(gmail_id: str, download_attachments: bool) -> str:
@@ -396,10 +408,45 @@ def gmail_tool():
         )
         return output
 
-    def _action_draft_reply(gmail_id: str, body: str) -> str:
+    def _action_list_drafts(max_results: int) -> str:
+        svc = _build_service(creds)
+        results = svc.users().drafts().list(
+            userId="me", maxResults=min(max_results, 100)
+        ).execute()
+        drafts = results.get("drafts", [])
+        if not drafts:
+            return "No drafts found."
+
+        lines = [f"Found {len(drafts)} draft(s):\n"]
+        for d in drafts:
+            detail = svc.users().drafts().get(
+                userId="me", id=d["id"], format="metadata"
+            ).execute()
+            msg_headers = {
+                h["name"]: h["value"]
+                for h in detail.get("message", {}).get("payload", {}).get("headers", [])
+            }
+            subject = _decode_mime_header(msg_headers.get("Subject", "(no subject)"))
+            to = msg_headers.get("To", "")
+            date = msg_headers.get("Date", "")
+            lines.append(
+                f"---\n"
+                f"Draft ID: {d['id']}\n"
+                f"To: {to}\n"
+                f"Date: {date}\n"
+                f"Subject: {subject}"
+            )
+        logger.info(f"gmail list_drafts: {len(drafts)} drafts")
+        return "\n".join(lines)
+
+    def _action_draft_reply(gmail_id: str, body: str, cc: str, reply_all: bool, draft_id: str) -> str:
+        from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
 
         svc = _build_service(creds)
+
+        # Get my own email address for reply-all exclusion
+        my_email = svc.users().getProfile(userId="me").execute().get("emailAddress", "")
 
         orig = (
             svc.users()
@@ -408,7 +455,7 @@ def gmail_tool():
                 userId="me",
                 id=gmail_id,
                 format="metadata",
-                metadataHeaders=["Subject", "From", "To", "Message-ID"],
+                metadataHeaders=["Subject", "From", "To", "Cc", "Reply-To", "Message-ID"],
             )
             .execute()
         )
@@ -418,41 +465,95 @@ def gmail_tool():
         subject = headers.get("Subject", "")
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
-        reply_to = headers.get("From", "")
         message_id = headers.get("Message-ID", "")
         thread_id = orig.get("threadId", "")
 
-        msg = MIMEText(body)
-        msg["To"] = reply_to
+        # Reply-To overrides From if present
+        reply_to = headers.get("Reply-To") or headers.get("From", "")
+
+        if reply_all:
+            # Collect all original recipients except ourselves
+            all_recipients: list[str] = []
+            for field in ("To", "Cc"):
+                val = headers.get(field, "")
+                if val:
+                    all_recipients.extend(a.strip() for a in val.split(",") if a.strip())
+            # Also include the original sender
+            if reply_to:
+                all_recipients.append(reply_to)
+            # Deduplicate and exclude self
+            seen: set[str] = set()
+            to_addrs: list[str] = []
+            cc_addrs: list[str] = []
+            first = True
+            for addr in all_recipients:
+                lower = addr.lower()
+                if my_email.lower() in lower or lower in seen:
+                    continue
+                seen.add(lower)
+                if first:
+                    to_addrs.append(addr)
+                    first = False
+                else:
+                    cc_addrs.append(addr)
+            # Merge explicit cc param
+            if cc:
+                for addr in (a.strip() for a in cc.split(",") if a.strip()):
+                    if addr.lower() not in seen:
+                        cc_addrs.append(addr)
+                        seen.add(addr.lower())
+            to_str = ", ".join(to_addrs)
+            cc_str = ", ".join(cc_addrs)
+        else:
+            to_str = reply_to
+            cc_str = cc
+
+        msg = MIMEMultipart()
+        msg["To"] = to_str
         msg["Subject"] = subject
+        if cc_str:
+            msg["Cc"] = cc_str
         if message_id:
             msg["In-Reply-To"] = message_id
             msg["References"] = message_id
+        msg.attach(MIMEText(body, "plain"))
 
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+        message_body = {"raw": raw, "threadId": thread_id}
 
-        draft = (
-            svc.users()
-            .drafts()
-            .create(
-                userId="me",
-                body={
-                    "message": {
-                        "raw": raw,
-                        "threadId": thread_id,
-                    }
-                },
+        if draft_id:
+            draft = (
+                svc.users()
+                .drafts()
+                .update(
+                    userId="me",
+                    id=draft_id,
+                    body={"message": message_body},
+                )
+                .execute()
             )
-            .execute()
-        )
+            action_word = "updated"
+        else:
+            draft = (
+                svc.users()
+                .drafts()
+                .create(
+                    userId="me",
+                    body={"message": message_body},
+                )
+                .execute()
+            )
+            action_word = "saved"
 
-        logger.info(f"gmail draft_reply: draft_id={draft['id']} replying to {gmail_id}")
-        return (
-            f"Draft saved (ID: {draft['id']})\n"
-            f"To: {reply_to}\n"
-            f"Subject: {subject}\n\n"
-            f"Open Gmail Drafts to review and send."
+        logger.info(
+            f"gmail draft_reply: draft_id={draft['id']} replying to {gmail_id} "
+            f"reply_all={reply_all} updated={bool(draft_id)}"
         )
+        result = f"Draft {action_word} (ID: {draft['id']})\nTo: {to_str}\n"
+        if cc_str:
+            result += f"Cc: {cc_str}\n"
+        result += f"Subject: {subject}\n\nOpen Gmail Drafts to review and send."
+        return result
 
     # --- Label actions ---
 
@@ -614,27 +715,35 @@ def gmail_tool():
         gmail_id: str = "",
         download_attachments: bool = False,
         body: str = "",
+        cc: str = "",
+        reply_all: bool = False,
+        draft_id: str = "",
         label_name: str = "",
         label_id: str = "",
         filter_id: str = "",
         filter_criteria: str = "",
         filter_actions: str = "",
         max_results: int = 10,
+        page_token: str = "",
     ) -> str:
         """Gmail: search, read, draft replies, and manage labels & filters. Call with action='help' for detailed usage.
 
         Args:
-            action:          One of: help, search, read, draft_reply, list_labels, create_label, update_label, delete_label, list_filters, create_filter, delete_filter.
+            action:          One of: help, search, read, draft_reply, list_drafts, list_labels, create_label, update_label, delete_label, list_filters, create_filter, delete_filter.
             query:           (search) Gmail search query.
             gmail_id:        (read, draft_reply) Gmail message ID from search results.
             download_attachments: (read) If true, save all attachments to data/uploads/ and return their local paths.
             body:            (draft_reply) Plain-text reply body.
+            cc:              (draft_reply) Comma-separated addresses to CC.
+            reply_all:       (draft_reply) If true, reply to all original recipients (To + Cc), excluding yourself.
+            draft_id:        (draft_reply) If provided, updates this existing draft instead of creating a new one.
             label_name:      (create_label, update_label) Label name.
             label_id:        (update_label, delete_label) Label ID.
             filter_id:       (delete_filter) Filter ID.
             filter_criteria: (create_filter) JSON criteria, e.g. '{"from": "news@example.com"}'.
             filter_actions:  (create_filter) JSON actions, e.g. '{"addLabelIds": ["Label_1"], "archive": true}'.
-            max_results:     (search) Max results. Default 10.
+            max_results:     (search) Max results (up to 500). Default 10.
+            page_token:      (search) Pagination token from a previous search to fetch the next page of results.
         """
         try:
             if action == "help":
@@ -642,7 +751,7 @@ def gmail_tool():
             if action == "search":
                 if not query:
                     return "Missing required field: query."
-                return _action_search(query, max_results)
+                return _action_search(query, max_results, page_token)
             if action == "read":
                 if not gmail_id:
                     return "Missing required field: gmail_id."
@@ -650,7 +759,9 @@ def gmail_tool():
             if action == "draft_reply":
                 if not gmail_id or not body:
                     return "Missing required fields: gmail_id, body."
-                return _action_draft_reply(gmail_id, body)
+                return _action_draft_reply(gmail_id, body, cc, reply_all, draft_id)
+            if action == "list_drafts":
+                return _action_list_drafts(max_results)
             if action == "list_labels":
                 return _action_list_labels()
             if action == "create_label":

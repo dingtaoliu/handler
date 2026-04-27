@@ -8,6 +8,7 @@ MCP server; the SDK handles the tool-calling loop automatically.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import anthropic
@@ -24,7 +25,6 @@ from claude_agent_sdk.types import (
     TextBlock,
 )
 
-from ..tools.watchdog import get_health_problems
 from ..context import AgentContext
 from ..event_store import EventStore
 from ..types import RunContext
@@ -39,15 +39,33 @@ logger = logging.getLogger("handler.agent.claude")
 # ---------------------------------------------------------------------------
 
 
+def _extract_defaults(tool_obj: Any) -> dict[str, Any]:
+    """Extract parameter defaults from a tool's params_json_schema."""
+    props = tool_obj.params_json_schema.get("properties", {})
+    return {
+        name: prop["default"]
+        for name, prop in props.items()
+        if "default" in prop
+    }
+
+
 def _make_mcp_tool(tool_obj: Any):
     """Convert a handler Tool or OpenAI FunctionTool to a Claude Agent SDK MCP tool."""
     name = tool_obj.name
     desc = tool_obj.description
+    defaults = _extract_defaults(tool_obj)
+
+    # Build schema with optional params removed from required
     schema = _clean_schema(tool_obj.params_json_schema)
+    if defaults and "required" in schema:
+        schema = dict(schema)
+        schema["required"] = [p for p in schema["required"] if p not in defaults]
 
     async def _fn(args: dict[str, Any]) -> dict[str, Any]:
+        # Fill in any missing optional params with their defaults
+        full_args = {**defaults, **args}
         try:
-            result = await invoke_tool(tool_obj, name, "sdk-call", args)
+            result = await invoke_tool(tool_obj, name, "sdk-call", full_args)
             return {"content": [{"type": "text", "text": result}]}
         except Exception as e:
             logger.error(f"tool {name} raised: {e}", exc_info=True)
@@ -64,12 +82,14 @@ def _make_mcp_tool(tool_obj: Any):
 # ---------------------------------------------------------------------------
 
 
+COMPACTION_MODEL = "claude-haiku-4-5-20251001"
+
+
 async def _compact_with_claude(
     client: anthropic.AsyncAnthropic,
     store: EventStore,
     conversation_id: str,
     messages: list[dict],
-    model: str,
     keep_recent: int,
 ) -> int:
     """Summarize messages[:-keep_recent] using the Claude API and persist."""
@@ -103,8 +123,8 @@ async def _compact_with_claude(
     )
 
     response = await client.messages.create(
-        model=model,
-        max_tokens=4096,
+        model=COMPACTION_MODEL,
+        max_tokens=16384,
         system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
     )
@@ -116,7 +136,7 @@ async def _compact_with_claude(
 
     store.record_token_usage(
         conversation_id=conversation_id,
-        model=model,
+        model=COMPACTION_MODEL,
         input_tokens=response.usage.input_tokens,
         output_tokens=response.usage.output_tokens,
         trigger="compaction",
@@ -145,7 +165,7 @@ class ClaudeAgent(BaseAgent):
         run_ctx: RunContext,
         tools: list | None = None,
         model: str = "claude-opus-4-6",
-        max_turns: int = 20,
+        max_turns: int | None = 50,
         compact_token_threshold: int = 100_000,
         keep_recent: int = 10,
     ):
@@ -182,12 +202,6 @@ class ClaudeAgent(BaseAgent):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _get_health_problems(self) -> list[str]:
-        try:
-            return get_health_problems()
-        except Exception:
-            return []
-
     async def compact_conversation(self, conversation_id: str) -> int:
         active = self.store.get_messages(conversation_id)
         if len(active) <= self.keep_recent:
@@ -197,7 +211,6 @@ class ClaudeAgent(BaseAgent):
             self.store,
             conversation_id,
             active,
-            self.model,
             self.keep_recent,
         )
 
@@ -262,7 +275,7 @@ class ClaudeAgent(BaseAgent):
 
         return prompt
 
-    def _build_options(self, system: str, max_turns: int) -> ClaudeAgentOptions:
+    def _build_options(self, system: str, max_turns: int | None) -> ClaudeAgentOptions:
         """Build ClaudeAgentOptions for an SDK query."""
         return ClaudeAgentOptions(
             system_prompt=system,
@@ -278,7 +291,7 @@ class ClaudeAgent(BaseAgent):
         self,
         system: str,
         messages: list[dict],
-        max_turns: int,
+        max_turns: int | None = None,
     ) -> tuple[str, int, int]:
         """Run the Claude Agent SDK loop.
 
@@ -309,6 +322,9 @@ class ClaudeAgent(BaseAgent):
                     f"tokens: in={total_in:,}, out={total_out:,}"
                 )
 
+        # Strip SDK citation markers (e.g. citeturn0fetch0, citeturn1search2)
+        final_text = re.sub(r"cite\w+", "", final_text).strip()
+
         return final_text, total_in, total_out
 
     # ------------------------------------------------------------------
@@ -319,12 +335,11 @@ class ClaudeAgent(BaseAgent):
         self.run_ctx.conversation_id = conversation_id
         summary = self.store.get_latest_summary(conversation_id)
         token_brief = self.store.get_token_cost_brief()
-        health_problems = self._get_health_problems()
         instructions = self.context.build(
             summary=summary,
             token_brief=token_brief,
-            health_problems=health_problems,
         )
+        logger.info(f"[system_prompt]\n{instructions}\n[/system_prompt]")
         logger.info(
             f"agent.run: conversation={conversation_id}, messages={len(messages)}"
         )
@@ -405,7 +420,6 @@ class ClaudeAgent(BaseAgent):
             _, total_in, total_out = await self._run_sdk(
                 system=instructions,
                 messages=messages,
-                max_turns=5,
             )
         except Exception as e:
             logger.error(f"[session] end_session failed: {e}", exc_info=True)

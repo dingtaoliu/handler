@@ -1,18 +1,14 @@
-"""Scheduler channel: session expiry + in-process cron job execution.
+"""Scheduler channel: in-process cron job execution.
 
-Runs two background loops:
-  1. Session expiry — checks every 15 minutes, expires after 4h idle
-  2. Cron job executor — checks every 30 seconds, runs due jobs directly
-
-The external watchdog (handler/watchdog/) is now liveness-only: it just
-checks if the handler is alive and restarts it if dead. All job execution
-happens here, in-process.
+Runs a background loop that checks every 30 seconds for due jobs and
+executes them directly. The external watchdog (handler/watchdog/) is
+liveness-only: it just checks if the handler is alive and restarts it
+if dead.
 """
 
 import asyncio
 import logging
 import subprocess
-from datetime import datetime, timedelta, timezone
 
 from ..environment import Channel
 from ..types import Event
@@ -23,68 +19,25 @@ logger = logging.getLogger("handler.channels.scheduler")
 
 
 class SchedulerChannel(Channel):
-    """Background scheduler: session expiry + cron job execution."""
+    """Background scheduler: cron job execution."""
 
     name = "scheduler"
 
     def __init__(
         self,
         store: EventStore,
-        session_timeout: timedelta = timedelta(hours=4),
         job_check_interval: float = 30.0,
     ):
         self.store = store
-        self.session_timeout = session_timeout
         self.job_check_interval = job_check_interval
         self.queue: asyncio.Queue[Event] | None = None
 
     async def start(self, queue: asyncio.Queue) -> None:
         self.queue = queue
-        # Run both loops concurrently
-        await asyncio.gather(
-            self._session_expiry_loop(),
-            self._job_executor_loop(),
-        )
+        await self._job_executor_loop()
 
     async def deliver(self, event: Event, response: str) -> None:
         pass  # fire-and-forget
-
-    # ------------------------------------------------------------------
-    # Session expiry
-    # ------------------------------------------------------------------
-
-    async def _session_expiry_loop(self) -> None:
-        """Check for stale sessions every 15 minutes."""
-        while True:
-            await asyncio.sleep(15 * 60)
-            try:
-                await self._check_all_sessions()
-            except Exception as e:
-                logger.error(f"session expiry check failed: {e}", exc_info=True)
-
-    async def _check_all_sessions(self) -> None:
-        now = datetime.now(timezone.utc)
-        for cid in self.store.get_active_conversations():
-            last_ts = self.store.get_last_message_ts(cid)
-            if not last_ts:
-                continue
-            last_time = datetime.fromisoformat(last_ts).replace(tzinfo=timezone.utc)
-            elapsed = now - last_time
-            if elapsed >= self.session_timeout:
-                logger.info(
-                    f"[scheduler] session {cid} idle for {elapsed}, pushing expiry event"
-                )
-                queue = self.queue
-                if queue is None:
-                    raise RuntimeError("scheduler queue not initialized")
-                await queue.put(
-                    Event(
-                        type="session_expiry",
-                        source="scheduler",
-                        conversation_id=cid,
-                        data={"idle_seconds": int(elapsed.total_seconds())},
-                    )
-                )
 
     # ------------------------------------------------------------------
     # Cron job execution

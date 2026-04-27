@@ -112,10 +112,8 @@ def _build_schema(func: Callable) -> dict[str, Any]:
 
         properties[name] = prop
 
-        # Params with defaults are still listed as required to match
-        # the openai-agents SDK behavior (strict mode).  But if we want
-        # optional semantics we can check param.default != inspect.Parameter.empty.
-        required.append(name)
+        if param.default is inspect.Parameter.empty:
+            required.append(name)
 
     return {
         "type": "object",

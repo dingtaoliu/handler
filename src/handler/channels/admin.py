@@ -86,7 +86,7 @@ def create_admin_router(
 
     @router.put("/agent")
     async def agent_update(body: _AgentBody):
-        valid_backends = ["openai", "openai-manual", "claude"]
+        valid_backends = ["openai", "openai-manual", "claude", "anthropic"]
         if body.backend not in valid_backends:
             return JSONResponse(
                 {"error": f"invalid backend, must be one of: {valid_backends}"},

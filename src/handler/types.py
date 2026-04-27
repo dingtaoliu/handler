@@ -96,6 +96,52 @@ def messages_to_openai(messages: list[dict]) -> list[ChatCompletionMessageParam]
     return result
 
 
+def messages_to_anthropic(messages: list[dict]) -> list[dict]:
+    """Convert stored messages to Anthropic Messages API format.
+
+    Text-only messages pass through unchanged. Image references are resolved
+    to base64-encoded source blocks.
+
+    Used by AnthropicProvider (Chat Completions-style manual loop).
+    """
+    result: list[dict] = []
+    for msg in messages:
+        content = msg["content"]
+        if isinstance(content, list):
+            blocks = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    blocks.append({"type": "text", "text": block["text"]})
+                elif block.get("type") == "image":
+                    try:
+                        data = Path(block["path"]).read_bytes()
+                        b64 = base64.b64encode(data).decode("ascii")
+                        blocks.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": block.get("media_type", "image/jpeg"),
+                                    "data": b64,
+                                },
+                            }
+                        )
+                    except Exception as e:
+                        logger.warning(f"failed to read image {block.get('path')}: {e}")
+                        blocks.append(
+                            {
+                                "type": "text",
+                                "text": f"[Image unavailable: {block.get('path')}]",
+                            }
+                        )
+            result.append({"role": msg["role"], "content": blocks})
+        else:
+            result.append({"role": msg["role"], "content": content})
+    return result
+
+
 def messages_to_openai_responses(messages: list[dict]) -> list[ResponseInputItemParam]:
     """Convert stored messages to OpenAI Responses API multi-modal format.
 

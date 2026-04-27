@@ -62,10 +62,6 @@ class Environment:
 
     async def _handle(self, event: Event) -> None:
         try:
-            if event.type == "session_expiry":
-                await self._handle_session_expiry(event)
-                return
-
             response = await self._process(event)
             channel = self.channels.get(event.source)
             if channel:
@@ -113,17 +109,6 @@ class Environment:
                 await push_channel.push_message(cid, "assistant", response)
             except Exception:
                 logger.warning("web push failed", exc_info=True)
-
-    async def _handle_session_expiry(self, event: Event) -> None:
-        """End an expired session: let the agent persist to memory, then compact."""
-        cid = event.conversation_id
-        if not cid:
-            return
-        active = self.store.get_messages(cid)
-        if not active:
-            return
-        logger.info(f"[session] ending expired session {cid}")
-        await self.agent.end_session(cid)
 
     async def _process(self, event: Event) -> str:
         cid = event.conversation_id or f"{event.source}:default"

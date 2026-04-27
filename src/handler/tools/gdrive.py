@@ -24,7 +24,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/spreadsheets",
 ]
-from ..paths import DATA_DIR as _DATA_DIR
+from ..paths import DATA_DIR as _DATA_DIR, GDRIVE_UPLOAD_DIR
 
 _CREDENTIALS_PATH = _DATA_DIR / "credentials" / "desktop.json"
 _TOKEN_PATH = _DATA_DIR / "credentials" / "drive_token.json"
@@ -52,7 +52,11 @@ Actions:
   add_sheet_tab  — Add a new tab to an existing spreadsheet and optionally write data.
                    Params: file_id, sheet_name (name for new tab), data (optional JSON list of lists).
   add_doc_tab    — Add a new tab to an existing Google Doc and optionally write content.
-                   Params: file_id, title (tab name), content (optional text to write to the new tab)."""
+                   Params: file_id, title (tab name), content (optional text to write to the new tab).
+  download       — Download any Drive file to local disk and return the saved path.
+                   Google Workspace files (Docs, Sheets, Slides) are exported to PDF.
+                   All other files are downloaded as-is.
+                   Params: file_id. Use read_file on the returned path to extract text."""
 
 
 def _get_credentials():
@@ -443,6 +447,46 @@ def gdrive_tool():
         logger.info(f"google_drive add_doc_tab: {file_id} tab={title!r} tab_id={tab_id}")
         return f"Tab '{title}' added.\nTab ID: {tab_id}\nID: {file_id}\nLink: {link}"
 
+    def _action_download(file_id: str) -> str:
+        drive_svc = _build_drive_service(creds)
+
+        meta = drive_svc.files().get(
+            fileId=file_id,
+            fields="id, name, mimeType",
+        ).execute()
+        name = meta.get("name", file_id)
+        mime = meta.get("mimeType", "")
+
+        GDRIVE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Google Workspace types must be exported — use PDF for all
+        workspace_export = {
+            "application/vnd.google-apps.document": "application/pdf",
+            "application/vnd.google-apps.spreadsheet": "application/pdf",
+            "application/vnd.google-apps.presentation": "application/pdf",
+        }
+
+        if mime in workspace_export:
+            content = drive_svc.files().export(
+                fileId=file_id, mimeType="application/pdf"
+            ).execute()
+            filename = f"{file_id}_{name}.pdf"
+        else:
+            content = drive_svc.files().get_media(fileId=file_id).execute()
+            filename = f"{file_id}_{name}"
+
+        # Sanitize filename
+        safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename).strip()
+        dest = GDRIVE_UPLOAD_DIR / safe_name
+        dest.write_bytes(content if isinstance(content, bytes) else content.encode())
+
+        logger.info(f"google_drive download: {file_id} → {dest} ({len(content)} bytes)")
+        return (
+            f"Downloaded: {name}\n"
+            f"Saved to: {dest.resolve()}\n"
+            f"Use read_file to extract text content."
+        )
+
     @function_tool
     def google_drive(
         action: str,
@@ -460,8 +504,8 @@ def gdrive_tool():
         """Google Drive: manage files, docs, and sheets. Call with action='help' for detailed usage.
 
         Args:
-            action:       One of: help, list, read, create_doc, create_sheet, update_doc, edit_doc, update_sheet, add_sheet_tab, add_doc_tab.
-            query:        (list) Drive search query. Leave empty for recent files.
+            action:       One of: help, list, read, download, create_doc, create_sheet, update_doc, edit_doc, update_sheet, add_sheet_tab, add_doc_tab.
+            query:        (list only) Drive search query. Pass "" for all other actions — it is ignored.
             file_id:      (read, update_doc, edit_doc, update_sheet, add_sheet_tab) Google Drive file ID.
             title:        (create_doc, create_sheet) Title for new document/spreadsheet.
             content:      (create_doc, update_doc) Text content.
@@ -509,6 +553,10 @@ def gdrive_tool():
                 if not file_id or not title:
                     return "Missing required fields: file_id, title."
                 return _action_add_doc_tab(file_id, title, content)
+            if action == "download":
+                if not file_id:
+                    return "Missing required field: file_id."
+                return _action_download(file_id)
             return f"Unknown action '{action}'. Use action='help' for usage."
         except json.JSONDecodeError as e:
             return f"Error: invalid JSON — {e}"

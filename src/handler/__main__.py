@@ -8,7 +8,8 @@ import signal
 
 from dotenv import load_dotenv
 
-from .agent import BaseAgent, OpenAIAgent, OpenAIManualAgent, ClaudeAgent
+from .agent import BaseAgent, OpenAIAgent, ClaudeAgent, ManualAgent
+from .agent.providers import OpenAIProvider, AnthropicProvider
 from .context import AgentContext
 from .event_store import EventStore
 from .memory import Memory
@@ -19,6 +20,7 @@ from .channels import WebChannel, TelegramChannel, SchedulerChannel
 from .tools import (
     read_file,
     write_file,
+    list_files,
     shell,
     web_search,
     compact_tool,
@@ -38,16 +40,18 @@ logger = logging.getLogger("handler")
 
 KEEP_RECENT = 10
 
-_AGENT_MAP = {
-    "openai": OpenAIAgent,
-    "openai-manual": OpenAIManualAgent,
-    "claude": ClaudeAgent,
-}
+_VALID_BACKENDS = {"openai", "openai-manual", "claude", "anthropic"}
 
 _DEFAULT_MODELS = {
     "openai": "gpt-5.4-2026-03-05",
     "openai-manual": "gpt-5.4-2026-03-05",
     "claude": "claude-opus-4-6",
+    "anthropic": "claude-opus-4-6",
+}
+
+_MANUAL_PROVIDERS = {
+    "openai-manual": OpenAIProvider,
+    "anthropic": AnthropicProvider,
 }
 
 _AGENT_CONFIG_PATH = CONFIG_DIR / "agent.json"
@@ -55,7 +59,7 @@ _AGENT_CONFIG_PATH = CONFIG_DIR / "agent.json"
 
 def _normalize_agent_config(backend: str | None, model: str | None) -> dict[str, str]:
     resolved_backend = (backend or os.environ.get("HANDLER_AGENT", "openai")).strip()
-    if resolved_backend not in _AGENT_MAP:
+    if resolved_backend not in _VALID_BACKENDS:
         resolved_backend = "openai"
 
     resolved_model = (model or "").strip() or _DEFAULT_MODELS[resolved_backend]
@@ -157,6 +161,7 @@ def main():
         compact_tool(run_ctx, _get_agent),
         read_file,
         write_file,
+        list_files,
         shell,
         web_search,
         search_codebase,
@@ -180,9 +185,8 @@ def main():
     except Exception as e:
         print(f"Google Drive tool not available: {e}")
 
-    def _build_agent(b: str, m: str):
-        AgentClass = _AGENT_MAP.get(b, OpenAIAgent)
-        return AgentClass(
+    def _build_agent(b: str, m: str) -> BaseAgent:
+        kwargs = dict(
             context=context,
             store=store,
             run_ctx=run_ctx,
@@ -190,6 +194,11 @@ def main():
             model=m,
             keep_recent=KEEP_RECENT,
         )
+        if b == "claude":
+            return ClaudeAgent(**kwargs)
+        if b in _MANUAL_PROVIDERS:
+            return ManualAgent(provider=_MANUAL_PROVIDERS[b](m), **kwargs)
+        return OpenAIAgent(**kwargs)
 
     agent = _build_agent(backend, model)
     agent_ref["current"] = agent

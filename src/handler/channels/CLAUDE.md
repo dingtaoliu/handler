@@ -38,9 +38,8 @@ Per-chat conversation isolation. Handles text, photos, documents, and voice mess
 
 ## Scheduler channel
 
-Two background loops running concurrently:
-1. **Session expiry** — every 15 minutes, checks for conversations idle > 4 hours
-2. **Cron executor** — every 30 seconds, runs due jobs (shell commands or prompt injection)
+One background loop:
+1. **Cron executor** — every 30 seconds, runs due jobs (shell commands or prompt injection)
 
 ## Gmail
 

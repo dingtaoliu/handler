@@ -13,6 +13,7 @@ from ..types import (
     image_path_to_base64_url,
     messages_to_openai,
     messages_to_openai_responses,
+    messages_to_anthropic,
 )
 
 logger = logging.getLogger("handler.agent.base")
@@ -24,6 +25,7 @@ __all__ = [
     "image_path_to_base64_url",
     "messages_to_openai",
     "messages_to_openai_responses",
+    "messages_to_anthropic",
 ]
 
 
@@ -43,7 +45,7 @@ class BaseAgent(ABC):
         run_ctx: RunContext,
         tools: list | None = None,
         model: str = "",
-        max_turns: int = 20,
+        max_turns: int | None = 50,
         compact_token_threshold: int = 100_000,
         keep_recent: int = 10,
     ):

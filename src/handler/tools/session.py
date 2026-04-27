@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("handler.tools.session")
 
 
+COMPACTION_MODEL = "gpt-4o-mini"
+
+
 class _CompactingAgent(Protocol):
     async def compact_conversation(self, conversation_id: str) -> int: ...
 
@@ -28,7 +31,6 @@ async def compact_messages(
     store: "EventStore",
     conversation_id: str,
     messages: list[dict],
-    model: str,
     keep_recent: int,
 ) -> int:
     """Summarize messages[:-keep_recent] via a bare LLM call and persist the result.
@@ -66,7 +68,7 @@ async def compact_messages(
     )
     client = AsyncOpenAI()
     response = await client.chat.completions.create(
-        model=model,
+        model=COMPACTION_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
@@ -78,7 +80,7 @@ async def compact_messages(
     if response.usage:
         store.record_token_usage(
             conversation_id=conversation_id,
-            model=model,
+            model=COMPACTION_MODEL,
             input_tokens=response.usage.prompt_tokens,
             output_tokens=response.usage.completion_tokens,
             trigger="compaction",

@@ -16,7 +16,7 @@ const themeToggleEl = document.getElementById('theme-toggle');
 function applyTheme(theme) {
     const isLight = theme === 'light';
     document.body.classList.toggle('light', isLight);
-    themeToggleEl.textContent = isLight ? 'Dark' : 'Light';
+    themeToggleEl.textContent = isLight ? '☾ Dark' : '☀ Light';
 }
 
 function getPreferredTheme() {
@@ -334,7 +334,7 @@ async function send() {
     let message = text;
     if (uploaded.length > 0) {
         const filePaths = uploaded.map(f => f.name + ' (path: ' + f.path + ')').join(', ');
-        message = (text ? text + '\n\n' : '') + 'Uploaded files: ' + filePaths + '\nUse the read_file tool to access them.';
+        message = (text ? text + '\n\n' : '') + 'Uploaded files: ' + filePaths;
     }
 
     // Collect images for API
@@ -344,8 +344,12 @@ async function send() {
     renderPendingImages();
 
     sendBtn.disabled = true;
-    const thinking = addMsg('assistant', 'Thinking...');
-    thinking.classList.add('thinking');
+    const thinking = document.createElement('div');
+    thinking.className = 'msg assistant thinking-msg';
+    thinking.innerHTML = '<div class="thinking-dots"><span></span><span></span><span></span></div>';
+    messagesEl.appendChild(thinking);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    _pendingThinking = thinking;
 
     try {
         const body = { message };
@@ -357,12 +361,8 @@ async function send() {
             body: JSON.stringify(body),
         });
         const data = await res.json();
-        if (_pendingThinking === thinking) {
-            thinking.remove();
-            _pendingThinking = null;
-        } else if (thinking.parentNode) {
-            thinking.remove();
-        }
+        if (thinking.parentNode) thinking.remove();
+        _pendingThinking = null;
         if (data.conversation_id && data.conversation_id !== _activeCid) {
             _activeCid = data.conversation_id;
             connectStream(_activeCid);
@@ -371,7 +371,8 @@ async function send() {
         if (!hasAssistantMessage(responseText)) addMsg('assistant', responseText);
         loadConversationList();
     } catch(e) {
-        thinking.remove();
+        if (thinking.parentNode) thinking.remove();
+        _pendingThinking = null;
         addMsg('assistant', 'Error: ' + e.message);
     }
     sendBtn.disabled = false;
@@ -591,6 +592,7 @@ const _defaultModels = {
     'openai': 'gpt-5.4-2026-03-05',
     'openai-manual': 'gpt-5.4-2026-03-05',
     'claude': 'claude-opus-4-6',
+    'anthropic': 'claude-opus-4-6',
 };
 
 async function loadConfig() {

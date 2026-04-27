@@ -3,6 +3,7 @@
 from .builtin import (
     read_file,
     write_file,
+    list_files,
     shell,
     web_search,
     memory_tool,
@@ -16,6 +17,7 @@ from .gdrive import gdrive_tool
 __all__ = [
     "read_file",
     "write_file",
+    "list_files",
     "shell",
     "web_search",
     "compact_tool",

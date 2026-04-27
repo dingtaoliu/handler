@@ -61,6 +61,8 @@ class TelegramChannel(Channel):
             await updater.start_polling(allowed_updates=Update.ALL_TYPES)
             try:
                 await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                pass
             finally:
                 await updater.stop()
                 await app.stop()

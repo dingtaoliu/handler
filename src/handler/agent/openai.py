@@ -16,7 +16,6 @@ from agents.items import TResponseInputItem
 from agents.run_context import RunContextWrapper
 
 from ..tools.session import compact_messages
-from ..tools.watchdog import get_health_problems
 from ..context import AgentContext
 from ..event_store import EventStore
 from ..types import RunContext
@@ -85,13 +84,6 @@ class OpenAIAgent(BaseAgent):
         )
         self._hooks = LoggingHooks()
 
-    def _get_health_problems(self) -> list[str]:
-        """Fetch health problems (best-effort). Called before building the prompt."""
-        try:
-            return get_health_problems()
-        except Exception:
-            return []
-
     async def compact_conversation(self, conversation_id: str) -> int:
         active = self.store.get_messages(conversation_id)
         if len(active) <= self.keep_recent:
@@ -100,7 +92,6 @@ class OpenAIAgent(BaseAgent):
             self.store,
             conversation_id,
             active,
-            self.model,
             self.keep_recent,
         )
 
@@ -172,11 +163,9 @@ class OpenAIAgent(BaseAgent):
         self.run_ctx.conversation_id = conversation_id
         summary = self.store.get_latest_summary(conversation_id)
         token_brief = self.store.get_token_cost_brief()
-        health_problems = self._get_health_problems()
         instructions = self.context.build(
             summary=summary,
             token_brief=token_brief,
-            health_problems=health_problems,
         )
         logger.info(
             f"agent.run: conversation={conversation_id}, messages={len(messages)}"
@@ -234,7 +223,6 @@ class OpenAIAgent(BaseAgent):
                     self.store,
                     conversation_id,
                     active,
-                    self.model,
                     self.keep_recent,
                 )
 
