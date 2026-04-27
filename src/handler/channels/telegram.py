@@ -23,8 +23,9 @@ class TelegramChannel(Channel):
 
     name = "telegram"
 
-    def __init__(self, token: str):
+    def __init__(self, token: str, allowed_user_ids: set[int] | None = None):
         self.token = token
+        self.allowed_user_ids = allowed_user_ids  # None = open to all
         self.queue: asyncio.Queue[Event] | None = None
         self._app = None  # set in start()
 
@@ -178,6 +179,11 @@ class TelegramChannel(Channel):
         chat_id = update.message.chat_id
         user = update.message.from_user
         conversation_id = f"telegram:{chat_id}"
+
+        if self.allowed_user_ids is not None and user.id not in self.allowed_user_ids:
+            logger.warning(f"telegram blocked unauthorized user {user.id} (@{user.username})")
+            await update.message.reply_text("Sorry, you're not authorized to use this bot.")
+            return
 
         logger.info(
             f"telegram message from {user.username or user.id} "

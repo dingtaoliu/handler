@@ -171,16 +171,16 @@ def main():
 
     tools.append(memory_tool(mem))
 
-    # Gmail (requires credentials/desktop.json + token.json)
+    # Gmail (requires credentials/desktop.json)
     try:
-        tools.append(gmail_tool())
+        tools.append(gmail_tool(run_ctx))
         print("Gmail tool loaded")
     except Exception as e:
         print(f"Gmail tool not available: {e}")
 
-    # Google Drive (requires credentials/desktop.json + drive_token.json)
+    # Google Drive (requires credentials/desktop.json)
     try:
-        tools.append(gdrive_tool())
+        tools.append(gdrive_tool(run_ctx))
         print("Google Drive tool loaded")
     except Exception as e:
         print(f"Google Drive tool not available: {e}")
@@ -226,7 +226,13 @@ def main():
 
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if telegram_token:
-        env.add_channel(TelegramChannel(telegram_token))
+        allowed_raw = os.environ.get("TELEGRAM_ALLOWED_USERS", "").strip()
+        allowed_ids = (
+            {int(uid) for uid in allowed_raw.split(",") if uid.strip()}
+            if allowed_raw
+            else None
+        )
+        env.add_channel(TelegramChannel(telegram_token, allowed_user_ids=allowed_ids))
 
     if context.is_configured:
         print("Starting Handler at http://localhost:8000")

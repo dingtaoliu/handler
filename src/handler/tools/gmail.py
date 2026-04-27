@@ -19,6 +19,8 @@ from email.header import decode_header
 from email.message import Message as EmailMessage
 from pathlib import Path
 
+import sys
+
 from agents import function_tool
 
 from ..paths import DATA_DIR as _DATA_DIR, GMAIL_UPLOAD_DIR
@@ -33,6 +35,29 @@ SCOPES = [
 ]
 _CREDENTIALS_PATH = _DATA_DIR / "credentials" / "desktop.json"
 _TOKEN_PATH = _DATA_DIR / "credentials" / "token.json"
+
+
+class OAuthRequired(Exception):
+    def __init__(self, url: str):
+        self.url = url
+        super().__init__(url)
+
+
+def _is_headless() -> bool:
+    if os.environ.get("HANDLER_AUTH_CONSOLE"):
+        return True
+    if not sys.stdout.isatty():
+        return True
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        return True
+    return False
+
+
+def _token_path(conversation_id: str | None) -> str:
+    if conversation_id:
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", conversation_id)
+        return str(_CREDENTIALS_PATH.parent / f"gmail_token_{safe}.json")
+    return str(_TOKEN_PATH)
 
 _HELP_TEXT = """\
 gmail — search, read, draft replies, and manage labels & filters.
@@ -73,15 +98,18 @@ Actions:
                   Params: filter_id (required)."""
 
 
-def _get_credentials():
-    """Authenticate and return OAuth credentials."""
+def _get_credentials(conversation_id: str | None = None):
+    """Authenticate and return OAuth credentials.
+
+    Raises OAuthRequired (with auth URL) when running headless and no token exists.
+    """
     import google.auth.exceptions
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     creds_path = str(_CREDENTIALS_PATH)
-    token_path = str(_TOKEN_PATH)
+    token_path = _token_path(conversation_id)
 
     if not os.path.exists(creds_path):
         raise FileNotFoundError(
@@ -101,12 +129,14 @@ def _get_credentials():
             try:
                 creds.refresh(Request())
             except google.auth.exceptions.RefreshError:
-                logger.warning("Token refresh failed, re-authenticating...")
-                if os.path.exists(token_path):
-                    os.remove(token_path)
+                logger.warning("Gmail token refresh failed, re-authenticating...")
+                os.remove(token_path)
                 creds = None
         if not creds or not creds.valid:
             flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+            if _is_headless():
+                auth_url, _ = flow.authorization_url(prompt="consent")
+                raise OAuthRequired(auth_url)
             creds = flow.run_local_server(port=0)
         with open(token_path, "w") as f:
             f.write(creds.to_json())
@@ -275,16 +305,25 @@ def _save_attachments(msg: EmailMessage, gmail_id: str) -> list[tuple[str, str]]
 # --- Tool factory ---
 
 
-def gmail_tool():
-    """Create a single gmail tool. Authenticates on first call.
+def gmail_tool(run_ctx=None):
+    """Create a single gmail tool. Authenticates per-user on first call.
 
-    Returns a single @function_tool.
-    Raises FileNotFoundError if credentials are not set up.
+    Raises FileNotFoundError if desktop.json credentials are not set up.
     """
-    creds = _get_credentials()
+    if not _CREDENTIALS_PATH.exists():
+        raise FileNotFoundError(
+            f"Gmail credentials not found at {_CREDENTIALS_PATH}. "
+            "Download OAuth client JSON from Google Cloud Console → "
+            "APIs & Services → Credentials, and save it there."
+        )
+
+    def _creds():
+        conversation_id = run_ctx.conversation_id if run_ctx else None
+        return _get_credentials(conversation_id)
 
     def _action_search(query: str, max_results: int, page_token: str) -> str:
-        svc = _build_service(creds)
+        creds = _creds()
+        svc = _build_service(_creds())
         list_kwargs: dict = {
             "userId": "me",
             "q": query,
@@ -409,7 +448,7 @@ def gmail_tool():
         return output
 
     def _action_list_drafts(max_results: int) -> str:
-        svc = _build_service(creds)
+        svc = _build_service(_creds())
         results = svc.users().drafts().list(
             userId="me", maxResults=min(max_results, 100)
         ).execute()
@@ -443,7 +482,7 @@ def gmail_tool():
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
 
-        svc = _build_service(creds)
+        svc = _build_service(_creds())
 
         # Get my own email address for reply-all exclusion
         my_email = svc.users().getProfile(userId="me").execute().get("emailAddress", "")
@@ -558,7 +597,7 @@ def gmail_tool():
     # --- Label actions ---
 
     def _action_list_labels() -> str:
-        svc = _build_service(creds)
+        svc = _build_service(_creds())
         results = svc.users().labels().list(userId="me").execute()
         labels = results.get("labels", [])
         if not labels:
@@ -582,7 +621,7 @@ def gmail_tool():
         return "\n\n".join(parts)
 
     def _action_create_label(label_name: str) -> str:
-        svc = _build_service(creds)
+        svc = _build_service(_creds())
         label = (
             svc.users()
             .labels()
@@ -600,7 +639,7 @@ def gmail_tool():
         return f"Label created.\nName: {label['name']}\nID: {label['id']}"
 
     def _action_update_label(label_id: str, label_name: str) -> str:
-        svc = _build_service(creds)
+        svc = _build_service(_creds())
         label = (
             svc.users()
             .labels()
@@ -615,7 +654,7 @@ def gmail_tool():
         return f"Label renamed.\nName: {label['name']}\nID: {label['id']}"
 
     def _action_delete_label(label_id: str) -> str:
-        svc = _build_service(creds)
+        svc = _build_service(_creds())
         svc.users().labels().delete(userId="me", id=label_id).execute()
         logger.info(f"gmail delete_label: {label_id}")
         return f"Label deleted (ID: {label_id})."
@@ -623,7 +662,7 @@ def gmail_tool():
     # --- Filter actions ---
 
     def _action_list_filters() -> str:
-        svc = _build_service(creds)
+        svc = _build_service(_creds())
         results = svc.users().settings().filters().list(userId="me").execute()
         filters = results.get("filter", [])
         if not filters:
@@ -658,7 +697,7 @@ def gmail_tool():
         return "\n".join(lines)
 
     def _action_create_filter(filter_criteria: str, filter_actions: str) -> str:
-        svc = _build_service(creds)
+        svc = _build_service(_creds())
         criteria = json.loads(filter_criteria)
         actions = json.loads(filter_actions)
 
@@ -700,7 +739,7 @@ def gmail_tool():
         )
 
     def _action_delete_filter(filter_id: str) -> str:
-        svc = _build_service(creds)
+        svc = _build_service(_creds())
         svc.users().settings().filters().delete(
             userId="me",
             id=filter_id,
@@ -748,6 +787,16 @@ def gmail_tool():
         try:
             if action == "help":
                 return _HELP_TEXT
+            try:
+                _creds()  # validate auth early, before dispatching
+            except OAuthRequired as e:
+                cid = run_ctx.conversation_id if run_ctx else None
+                user_flag = f" --user {cid}" if cid else ""
+                return (
+                    f"Gmail authorization required. Run this on the server to authorize:\n\n"
+                    f"  handler auth gmail --console{user_flag}\n\n"
+                    f"Or open this URL in any browser:\n{e.url}"
+                )
             if action == "search":
                 if not query:
                     return "Missing required field: query."

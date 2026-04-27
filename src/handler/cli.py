@@ -211,6 +211,46 @@ def cmd_restart(args: argparse.Namespace) -> None:
     cmd_start(args)
 
 
+def cmd_auth(args: argparse.Namespace) -> None:
+    """Run OAuth flow for Gmail or Google Drive interactively."""
+    from dotenv import load_dotenv
+
+    load_dotenv(_ENV_PATH)
+    load_dotenv()
+
+    service = args.service
+    console = args.console
+    user = args.user or None
+
+    creds_path = _DATA_DIR / "credentials" / "desktop.json"
+    if not creds_path.exists():
+        print(f"Error: credentials not found at {creds_path}")
+        print("Download OAuth client JSON from Google Cloud Console → APIs & Services → Credentials")
+        sys.exit(1)
+
+    import re
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    if service == "gmail":
+        from .tools.gmail import SCOPES, _token_path
+    else:
+        from .tools.gdrive import SCOPES, _token_path
+
+    token_path = _token_path(user)
+    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
+
+    print(f"Authorizing {service}{f' for user {user}' if user else ''}...")
+    if console:
+        creds = flow.run_console()
+    else:
+        creds = flow.run_local_server(port=0)
+
+    Path(token_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(token_path).write_text(creds.to_json())
+    print(f"Token saved to {token_path}")
+    print("Authorization complete. Restart handler to pick up the new token.")
+
+
 def cmd_logs(args: argparse.Namespace) -> None:
     if not _LOG_PATH.exists():
         print("No log file found")
@@ -249,6 +289,11 @@ def cli() -> None:
         "-n", "--lines", type=int, default=50, help="Number of lines (default: 50)"
     )
 
+    auth_parser = sub.add_parser("auth", help="Authorize Gmail or Google Drive")
+    auth_parser.add_argument("service", choices=["gmail", "gdrive"], help="Service to authorize")
+    auth_parser.add_argument("--console", action="store_true", help="Use console flow (headless/remote)")
+    auth_parser.add_argument("--user", metavar="CONVERSATION_ID", help="Authorize for a specific user (e.g. telegram:123456)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -267,6 +312,8 @@ def cli() -> None:
         cmd_run(args)
     elif args.command == "logs":
         cmd_logs(args)
+    elif args.command == "auth":
+        cmd_auth(args)
 
 
 if __name__ == "__main__":
