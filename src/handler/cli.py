@@ -227,7 +227,15 @@ def cmd_auth(args: argparse.Namespace) -> None:
         try:
             user = get_user(user).id
         except KeyError:
-            valid_users = ", ".join(user.id for user in list_users())
+            valid_users = ", ".join(
+                sorted(
+                    {
+                        candidate
+                        for known_user in list_users()
+                        for candidate in (known_user.id, *known_user.aliases)
+                    }
+                )
+            )
             print(f"Error: unknown user '{user}'")
             print(f"Valid user ids: {valid_users}")
             sys.exit(1)
@@ -316,7 +324,7 @@ def cli() -> None:
     auth_parser.add_argument(
         "--user",
         metavar="USER_ID",
-        help="Authorize for a specific shared-instance user (for example: danny or zhijian-zhu)",
+        help="Authorize for a specific shared-instance user (for example: danny or zhijian)",
     )
 
     args = parser.parse_args()

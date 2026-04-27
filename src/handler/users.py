@@ -22,7 +22,11 @@ _USERS_FILE = DATA_DIR / "users.json"
 _DEFAULT_USER_ID = "danny"
 _DEFAULT_USERS = [
     {"id": "danny", "display_name": "Danny Liu"},
-    {"id": "zhijian-zhu", "display_name": "Zhijian Zhu"},
+    {
+        "id": "zhijian-zhu",
+        "display_name": "Zhijian Zhu",
+        "aliases": ["zhijian"],
+    },
 ]
 
 DEFAULT_USER_ID = _DEFAULT_USER_ID
@@ -41,6 +45,7 @@ class InstanceUser:
     id: str
     display_name: str
     telegram_user_ids: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
 
     @property
     def slug(self) -> str:
@@ -89,6 +94,14 @@ def list_users() -> list[InstanceUser]:
             continue
         user_id = slugify_user_id(str(raw.get("id", "")))
         display_name = str(raw.get("display_name", "")).strip() or user_id
+        aliases = {
+            slugify_user_id(str(value))
+            for value in raw.get("aliases", [])
+            if str(value).strip()
+        }
+        name_parts = [part for part in display_name.split() if part.strip()]
+        if name_parts:
+            aliases.add(slugify_user_id(name_parts[0]))
         telegram_user_ids = tuple(
             str(value).strip()
             for value in raw.get("telegram_user_ids", [])
@@ -99,6 +112,7 @@ def list_users() -> list[InstanceUser]:
                 id=user_id,
                 display_name=display_name,
                 telegram_user_ids=telegram_user_ids,
+                aliases=tuple(sorted(alias for alias in aliases if alias != user_id)),
             )
         )
     if not users:
@@ -121,7 +135,7 @@ def get_user(user_id: str | None) -> InstanceUser:
         return get_default_user()
     slug = slugify_user_id(user_id)
     for user in list_users():
-        if user.id == slug:
+        if slug == user.id or slug in user.aliases:
             return user
     raise KeyError(slug)
 
@@ -158,6 +172,7 @@ def resolve_user_from_telegram(
 
     for user in list_users():
         aliases = {user.id}
+        aliases.update(user.aliases)
         aliases.update(
             slugify_user_id(part) for part in user.display_name.split() if part.strip()
         )
@@ -199,7 +214,4 @@ def bootstrap_user_layout() -> None:
 
 
 def serialize_users() -> list[dict[str, str]]:
-    return [
-        {"id": user.id, "display_name": user.display_name}
-        for user in list_users()
-    ]
+    return [{"id": user.id, "display_name": user.display_name} for user in list_users()]
