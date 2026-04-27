@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..users import get_household_user
+from ..users import get_user
 
 if TYPE_CHECKING:
     from ..memory import Memory
@@ -194,7 +194,7 @@ class AgentContext:
 
         if user_id:
             try:
-                user = get_household_user(user_id)
+                user = get_user(user_id)
                 profile = self._read(user.profile_path)
                 if profile:
                     sections.append(f"# Active User\nYou are currently helping {user.display_name}.\n\n{profile}")

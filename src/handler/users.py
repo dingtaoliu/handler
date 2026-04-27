@@ -1,8 +1,8 @@
-"""Household user registry and per-user path helpers.
+"""Shared-instance user registry and per-user path helpers.
 
 The current multi-user model is intentionally simple:
 - shared config and uploads remain global under ~/.handler/
-- each conversation is bound to exactly one household user
+- each conversation is bound to exactly one user
 - each user gets their own profile, memory, and credentials directories
 """
 
@@ -37,7 +37,7 @@ def slugify_user_id(value: str) -> str:
 
 
 @dataclass(frozen=True)
-class HouseholdUser:
+class InstanceUser:
     id: str
     display_name: str
     telegram_user_ids: tuple[str, ...] = ()
@@ -82,8 +82,8 @@ def _load_users_file() -> list[dict]:
     return data
 
 
-def list_household_users() -> list[HouseholdUser]:
-    users: list[HouseholdUser] = []
+def list_users() -> list[InstanceUser]:
+    users: list[InstanceUser] = []
     for raw in _load_users_file():
         if not isinstance(raw, dict):
             continue
@@ -95,7 +95,7 @@ def list_household_users() -> list[HouseholdUser]:
             if str(value).strip()
         )
         users.append(
-            HouseholdUser(
+            InstanceUser(
                 id=user_id,
                 display_name=display_name,
                 telegram_user_ids=telegram_user_ids,
@@ -103,44 +103,44 @@ def list_household_users() -> list[HouseholdUser]:
         )
     if not users:
         users = [
-            HouseholdUser(id=item["id"], display_name=item["display_name"])
+            InstanceUser(id=item["id"], display_name=item["display_name"])
             for item in _DEFAULT_USERS
         ]
     return users
 
 
-def get_default_user() -> HouseholdUser:
-    for user in list_household_users():
+def get_default_user() -> InstanceUser:
+    for user in list_users():
         if user.id == _DEFAULT_USER_ID:
             return user
-    return list_household_users()[0]
+    return list_users()[0]
 
 
-def get_household_user(user_id: str | None) -> HouseholdUser:
+def get_user(user_id: str | None) -> InstanceUser:
     if not user_id:
         return get_default_user()
     slug = slugify_user_id(user_id)
-    for user in list_household_users():
+    for user in list_users():
         if user.id == slug:
             return user
     raise KeyError(slug)
 
 
-def resolve_household_user_from_telegram(
+def resolve_user_from_telegram(
     telegram_user_id: int | str | None,
     *,
     username: str | None = None,
     first_name: str | None = None,
-) -> HouseholdUser | None:
-    """Resolve a household user from Telegram sender metadata.
+) -> InstanceUser | None:
+    """Resolve a user from Telegram sender metadata.
 
     Resolution order:
     - explicit telegram_user_ids entries in users.json
-    - exact normalized username/first-name matches against household user ids/names
+    - exact normalized username/first-name matches against user ids/names
     """
 
     sender_id = str(telegram_user_id).strip() if telegram_user_id is not None else ""
-    for user in list_household_users():
+    for user in list_users():
         if sender_id and sender_id in user.telegram_user_ids:
             return user
 
@@ -156,7 +156,7 @@ def resolve_household_user_from_telegram(
     if not candidates:
         return None
 
-    for user in list_household_users():
+    for user in list_users():
         aliases = {user.id}
         aliases.update(
             slugify_user_id(part) for part in user.display_name.split() if part.strip()
@@ -167,7 +167,7 @@ def resolve_household_user_from_telegram(
     return None
 
 
-def bootstrap_household_layout() -> None:
+def bootstrap_user_layout() -> None:
     """Ensure the users registry and directories exist.
 
     Existing single-user data is not moved here aggressively. The migration path is:
@@ -175,7 +175,7 @@ def bootstrap_household_layout() -> None:
     - Danny's memory and credentials are copied lazily on startup for compatibility
     """
 
-    users = list_household_users()
+    users = list_users()
     for user in users:
         user.memory_dir.mkdir(parents=True, exist_ok=True)
         user.credentials_dir.mkdir(parents=True, exist_ok=True)
@@ -201,5 +201,5 @@ def bootstrap_household_layout() -> None:
 def serialize_users() -> list[dict[str, str]]:
     return [
         {"id": user.id, "display_name": user.display_name}
-        for user in list_household_users()
+        for user in list_users()
     ]

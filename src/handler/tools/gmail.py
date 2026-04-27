@@ -24,7 +24,7 @@ import sys
 from agents import function_tool
 
 from ..paths import DATA_DIR as _DATA_DIR, GMAIL_UPLOAD_DIR
-from ..users import get_default_user, get_household_user
+from ..users import get_default_user, get_user
 
 logger = logging.getLogger("handler.tools.gmail")
 
@@ -56,7 +56,7 @@ def _is_headless() -> bool:
 
 def _user_credentials_dir(user_id: str | None) -> Path:
     if user_id:
-        return get_household_user(user_id).credentials_dir
+        return get_user(user_id).credentials_dir
     return get_default_user().credentials_dir
 
 

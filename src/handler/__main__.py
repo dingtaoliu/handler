@@ -16,7 +16,7 @@ from .memory import Memory
 from .environment import Environment
 from .paths import DATA_DIR, CONFIG_DIR, MEMORY_DIR, PID_PATH, LOG_DIR, get_log_path
 from .types import RunContext
-from .users import bootstrap_household_layout
+from .users import bootstrap_user_layout
 from .channels import WebChannel, TelegramChannel, SchedulerChannel
 from .tools import (
     read_file,
@@ -142,7 +142,7 @@ def main():
         except Exception as e:
             logger.warning(f"watchdog auto-detection failed (non-fatal): {e}")
 
-    bootstrap_household_layout()
+    bootstrap_user_layout()
     mem = Memory(memory_dir=MEMORY_DIR)
     context = AgentContext(config_dir=CONFIG_DIR, memory_dir=MEMORY_DIR, memory=mem)
     store = EventStore(db_path=str(DATA_DIR / "handler.db"))

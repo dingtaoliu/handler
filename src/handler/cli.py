@@ -292,7 +292,7 @@ def cli() -> None:
     auth_parser = sub.add_parser("auth", help="Authorize Gmail or Google Drive")
     auth_parser.add_argument("service", choices=["gmail", "gdrive"], help="Service to authorize")
     auth_parser.add_argument("--console", action="store_true", help="Use console flow (headless/remote)")
-    auth_parser.add_argument("--user", metavar="USER_ID", help="Authorize for a specific household user (for example: danny or zhijian-zhu)")
+    auth_parser.add_argument("--user", metavar="USER_ID", help="Authorize for a specific shared-instance user (for example: danny or zhijian-zhu)")
 
     args = parser.parse_args()
 

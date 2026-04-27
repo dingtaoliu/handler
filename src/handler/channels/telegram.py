@@ -12,7 +12,7 @@ from pathlib import Path
 from ..environment import Channel
 from ..paths import UPLOAD_DIR as _UPLOAD_DIR
 from ..types import Event
-from ..users import resolve_household_user_from_telegram
+from ..users import resolve_user_from_telegram
 
 logger = logging.getLogger("handler.channels.telegram")
 
@@ -181,7 +181,7 @@ class TelegramChannel(Channel):
         chat_id = update.message.chat_id
         user = update.message.from_user
         conversation_id = f"telegram:{chat_id}"
-        household_user = resolve_household_user_from_telegram(
+        resolved_user = resolve_user_from_telegram(
             user.id,
             username=user.username,
             first_name=user.first_name,
@@ -194,7 +194,7 @@ class TelegramChannel(Channel):
 
         logger.info(
             f"telegram message from {user.username or user.id} "
-            f"(chat {chat_id}, household={household_user.id if household_user else 'unresolved'}): {content[:100]}"
+            f"(chat {chat_id}, user={resolved_user.id if resolved_user else 'unresolved'}): {content[:100]}"
         )
 
         # Send typing indicator while processing
@@ -216,7 +216,7 @@ class TelegramChannel(Channel):
                 source="telegram",
                 data=event_data,
                 conversation_id=conversation_id,
-                user_id=household_user.id if household_user else None,
+                user_id=resolved_user.id if resolved_user else None,
                 _response_future=future,
             )
             queue = self.queue

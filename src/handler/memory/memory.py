@@ -15,7 +15,7 @@ import logging
 import re
 from pathlib import Path
 
-from ..users import get_household_user
+from ..users import get_user
 
 logger = logging.getLogger("handler.memory")
 
@@ -49,7 +49,7 @@ class Memory:
 
     def _resolve_dir(self, user_id: str | None = None) -> Path:
         if user_id:
-            path = get_household_user(user_id).memory_dir
+            path = get_user(user_id).memory_dir
             path.mkdir(parents=True, exist_ok=True)
             return path
         self.memory_dir.mkdir(parents=True, exist_ok=True)
