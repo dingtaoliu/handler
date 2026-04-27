@@ -17,7 +17,7 @@ import logging
 import sqlite3
 from pathlib import Path
 
-from .users import DEFAULT_USER_ID, LEGACY_USER_ID_ALIASES
+from .users import DEFAULT_USER_ID
 
 logger = logging.getLogger("handler.event_store")
 
@@ -149,13 +149,6 @@ class EventStore:
             "UPDATE token_usage SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
             (DEFAULT_USER_ID,),
         )
-
-        for legacy_user_id, canonical_user_id in LEGACY_USER_ID_ALIASES.items():
-            for table in ("conversations", "events", "cron_jobs", "token_usage"):
-                conn.execute(
-                    f"UPDATE {table} SET user_id = ? WHERE user_id = ?",
-                    (canonical_user_id, legacy_user_id),
-                )
 
         # Migrate old event_log → events table
         try:

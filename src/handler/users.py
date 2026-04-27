@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,18 +20,13 @@ logger = logging.getLogger("handler.users")
 
 _USERS_FILE = DATA_DIR / "users.json"
 _DEFAULT_USER_ID = "danny"
-_LEGACY_USER_ID_ALIASES = {"zhijian-zhu": "zhijian"}
+_DISALLOWED_ALIASES = {"zhijian-zhu"}
 _DEFAULT_USERS = [
     {"id": "danny", "display_name": "Danny Liu"},
-    {
-        "id": "zhijian",
-        "display_name": "Zhijian Zhu",
-        "aliases": ["zhijian-zhu"],
-    },
+    {"id": "zhijian", "display_name": "Zhijian Zhu"},
 ]
 
 DEFAULT_USER_ID = _DEFAULT_USER_ID
-LEGACY_USER_ID_ALIASES = dict(_LEGACY_USER_ID_ALIASES)
 
 
 def slugify_user_id(value: str) -> str:
@@ -41,11 +35,6 @@ def slugify_user_id(value: str) -> str:
     if not slug:
         raise ValueError("user id cannot be empty")
     return slug
-
-
-def canonicalize_user_id(value: str) -> str:
-    """Map legacy persisted user ids to the current canonical id."""
-    return _LEGACY_USER_ID_ALIASES.get(slugify_user_id(value), slugify_user_id(value))
 
 
 @dataclass(frozen=True)
@@ -98,22 +87,22 @@ def _load_users_file() -> list[dict]:
     for raw in data:
         if not isinstance(raw, dict):
             continue
-        canonical_id = canonicalize_user_id(str(raw.get("id", "")))
+        user_id = slugify_user_id(str(raw.get("id", "")))
         aliases = {
             slugify_user_id(str(value))
             for value in raw.get("aliases", [])
             if str(value).strip()
         }
-        legacy_id = slugify_user_id(str(raw.get("id", "")))
-        if legacy_id != canonical_id:
-            aliases.add(legacy_id)
-            changed = True
 
         normalized.append(
             {
                 **raw,
-                "id": canonical_id,
-                "aliases": sorted(alias for alias in aliases if alias != canonical_id),
+                "id": user_id,
+                "aliases": sorted(
+                    alias
+                    for alias in aliases
+                    if alias != user_id and alias not in _DISALLOWED_ALIASES
+                ),
             }
         )
         changed = changed or normalized[-1] != raw
@@ -123,48 +112,15 @@ def _load_users_file() -> list[dict]:
     return normalized
 
 
-def _migrate_legacy_user_dir(legacy_user_id: str, canonical_user_id: str) -> None:
-    legacy_dir = USERS_DIR / legacy_user_id
-    canonical_dir = USERS_DIR / canonical_user_id
-    if not legacy_dir.exists() or legacy_dir == canonical_dir:
-        return
-
-    if not canonical_dir.exists():
-        legacy_dir.rename(canonical_dir)
-        return
-
-    for src in sorted(legacy_dir.rglob("*")):
-        rel = src.relative_to(legacy_dir)
-        dst = canonical_dir / rel
-        if src.is_dir():
-            dst.mkdir(parents=True, exist_ok=True)
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.exists():
-            logger.warning(
-                "keeping canonical user file during legacy user-dir migration: %s",
-                dst,
-            )
-            continue
-        shutil.move(str(src), str(dst))
-
-    for path in sorted(legacy_dir.rglob("*"), reverse=True):
-        if path.is_dir():
-            path.rmdir()
-    legacy_dir.rmdir()
-
-
 def list_users() -> list[InstanceUser]:
     users: list[InstanceUser] = []
     for raw in _load_users_file():
         if not isinstance(raw, dict):
             continue
-        user_id = canonicalize_user_id(str(raw.get("id", "")))
+        user_id = slugify_user_id(str(raw.get("id", "")))
         display_name = str(raw.get("display_name", "")).strip() or user_id
         aliases = {
-            canonicalize_user_id(str(value))
-            if slugify_user_id(str(value)) in _LEGACY_USER_ID_ALIASES.values()
-            else slugify_user_id(str(value))
+            slugify_user_id(str(value))
             for value in raw.get("aliases", [])
             if str(value).strip()
         }
@@ -181,7 +137,13 @@ def list_users() -> list[InstanceUser]:
                 id=user_id,
                 display_name=display_name,
                 telegram_user_ids=telegram_user_ids,
-                aliases=tuple(sorted(alias for alias in aliases if alias != user_id)),
+                aliases=tuple(
+                    sorted(
+                        alias
+                        for alias in aliases
+                        if alias != user_id and alias not in _DISALLOWED_ALIASES
+                    )
+                ),
             )
         )
     if not users:
@@ -202,7 +164,7 @@ def get_default_user() -> InstanceUser:
 def get_user(user_id: str | None) -> InstanceUser:
     if not user_id:
         return get_default_user()
-    slug = canonicalize_user_id(user_id)
+    slug = slugify_user_id(user_id)
     for user in list_users():
         if slug == user.id or slug in user.aliases:
             return user
@@ -258,9 +220,6 @@ def bootstrap_user_layout() -> None:
     - shared config/uploads stay in their legacy locations
     - Danny's memory and credentials are copied lazily on startup for compatibility
     """
-
-    for legacy_user_id, canonical_user_id in _LEGACY_USER_ID_ALIASES.items():
-        _migrate_legacy_user_dir(legacy_user_id, canonical_user_id)
 
     users = list_users()
     for user in users:
