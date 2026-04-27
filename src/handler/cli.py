@@ -214,6 +214,7 @@ def cmd_restart(args: argparse.Namespace) -> None:
 def cmd_auth(args: argparse.Namespace) -> None:
     """Run OAuth flow for Gmail or Google Drive interactively."""
     from dotenv import load_dotenv
+    from .users import get_user, list_users
 
     load_dotenv(_ENV_PATH)
     load_dotenv()
@@ -222,10 +223,21 @@ def cmd_auth(args: argparse.Namespace) -> None:
     console = args.console
     user = args.user or None
 
+    if user is not None:
+        try:
+            user = get_user(user).id
+        except KeyError:
+            valid_users = ", ".join(user.id for user in list_users())
+            print(f"Error: unknown user '{user}'")
+            print(f"Valid user ids: {valid_users}")
+            sys.exit(1)
+
     creds_path = _DATA_DIR / "credentials" / "desktop.json"
     if not creds_path.exists():
         print(f"Error: credentials not found at {creds_path}")
-        print("Download OAuth client JSON from Google Cloud Console → APIs & Services → Credentials")
+        print(
+            "Download OAuth client JSON from Google Cloud Console → APIs & Services → Credentials"
+        )
         sys.exit(1)
 
     import re
@@ -241,7 +253,12 @@ def cmd_auth(args: argparse.Namespace) -> None:
 
     print(f"Authorizing {service}{f' for user {user}' if user else ''}...")
     if console:
-        creds = flow.run_console()
+        auth_url, _ = flow.authorization_url(prompt="consent")
+        print("Open this URL in your browser and complete the Google sign-in flow:")
+        print(auth_url)
+        code = _prompt("Authorization code: ")
+        creds = flow.fetch_token(code=code)
+        creds = flow.credentials
     else:
         creds = flow.run_local_server(port=0)
 
@@ -290,9 +307,17 @@ def cli() -> None:
     )
 
     auth_parser = sub.add_parser("auth", help="Authorize Gmail or Google Drive")
-    auth_parser.add_argument("service", choices=["gmail", "gdrive"], help="Service to authorize")
-    auth_parser.add_argument("--console", action="store_true", help="Use console flow (headless/remote)")
-    auth_parser.add_argument("--user", metavar="USER_ID", help="Authorize for a specific shared-instance user (for example: danny or zhijian-zhu)")
+    auth_parser.add_argument(
+        "service", choices=["gmail", "gdrive"], help="Service to authorize"
+    )
+    auth_parser.add_argument(
+        "--console", action="store_true", help="Use console flow (headless/remote)"
+    )
+    auth_parser.add_argument(
+        "--user",
+        metavar="USER_ID",
+        help="Authorize for a specific shared-instance user (for example: danny or zhijian-zhu)",
+    )
 
     args = parser.parse_args()
 
