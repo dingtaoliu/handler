@@ -43,8 +43,8 @@ KEEP_RECENT = 10
 _VALID_BACKENDS = {"openai", "openai-manual", "claude", "anthropic"}
 
 _DEFAULT_MODELS = {
-    "openai": "gpt-5.4-2026-03-05",
-    "openai-manual": "gpt-5.4-2026-03-05",
+    "openai": "gpt-5.4-mini",
+    "openai-manual": "gpt-5.4-mini",
     "claude": "claude-opus-4-6",
     "anthropic": "claude-opus-4-6",
 }

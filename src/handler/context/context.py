@@ -66,7 +66,40 @@ commitments, deadlines, and todos — do not assume they will be in context next
 Prefer fixing problems over asking the user for help.
 - For Google Drive and Gmail, call the tool with action='help' first to see available actions.
 - When a required tool does not exist (e.g. calendar integration), say exactly what is missing \
-and propose the closest available workaround."""
+and propose the closest available workaround.
+
+## Data layout
+
+Workspace root: `~/.handler/` (overridable via `HANDLER_DATA_DIR`).
+
+```
+~/.handler/
+  .env                  # API keys and env vars
+  handler.db            # SQLite — all persistent state
+  handler.pid           # PID of running process
+  config/
+    system.md           # system prompt (this layer)
+    identity.md         # role/mission
+    persona.md          # communication style
+    agent.json          # backend + model selection
+  memory/               # agent memory files (*.md) + index.md
+  uploads/              # user-uploaded files; gmail/ and gdrive/ subdirs
+  credentials/          # OAuth: desktop.json (client), token.json (gmail),
+                        #   drive_token.json (gdrive); per-user tokens named
+                        #   gmail_token_<conversation_id>.json
+  logs/                 # daily log files: handler-YYYY-MM-DD.log
+  shell_logs/           # shell() output logs
+```
+
+Database schema (`handler.db`):
+- `conversations(id, channel, created_at)` — one row per conversation; id format: `web`, `telegram:<chat_id>`
+- `messages(id, conversation_id, role, content, ts, compacted_at)` — full message history
+- `summaries(id, conversation_id, ts, content, message_count)` — compaction summaries
+- `cron_jobs(id, name, type, schedule, payload, conversation_id, enabled, one_shot, last_run, next_run, notify_channel)`
+- `token_usage(id, conversation_id, ts, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, trigger)`
+- `events(id, ts, event_type, conversation_id, source, data)` — audit log
+
+Use `shell('sqlite3 ~/.handler/handler.db "<query>"')` to inspect or debug."""
 
 ONBOARDING_IDENTITY = """\
 You are a setup assistant. This is the first time the user is configuring their agent.
