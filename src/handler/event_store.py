@@ -17,6 +17,8 @@ import logging
 import sqlite3
 from pathlib import Path
 
+from .users import DEFAULT_USER_ID
+
 logger = logging.getLogger("handler.event_store")
 
 _MULTIMODAL_PREFIX = "__handler_multimodal__:"
@@ -41,6 +43,7 @@ class EventStore:
                     ts TEXT DEFAULT (datetime('now')),
                     event_type TEXT NOT NULL,
                     conversation_id TEXT DEFAULT '',
+                    user_id TEXT DEFAULT '',
                     source TEXT DEFAULT '',
                     data TEXT NOT NULL DEFAULT '{}'
                 );
@@ -52,6 +55,7 @@ class EventStore:
 
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY,
+                    user_id TEXT DEFAULT '',
                     channel TEXT DEFAULT '',
                     created_at TEXT DEFAULT (datetime('now'))
                 );
@@ -81,6 +85,7 @@ class EventStore:
                     schedule TEXT NOT NULL,
                     payload TEXT NOT NULL DEFAULT '',
                     conversation_id TEXT DEFAULT '',
+                    user_id TEXT DEFAULT '',
                     notify_channel TEXT DEFAULT '',
                     enabled INTEGER DEFAULT 1,
                     one_shot INTEGER DEFAULT 0,
@@ -92,6 +97,7 @@ class EventStore:
                 CREATE TABLE IF NOT EXISTS token_usage (
                     id INTEGER PRIMARY KEY,
                     conversation_id TEXT,
+                    user_id TEXT DEFAULT '',
                     ts TEXT DEFAULT (datetime('now')),
                     model TEXT,
                     input_tokens INTEGER,
@@ -118,6 +124,31 @@ class EventStore:
             )
         except Exception:
             pass
+
+        for table in ("events", "conversations", "cron_jobs", "token_usage"):
+            try:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN user_id TEXT DEFAULT ''"
+                )
+            except Exception:
+                pass
+
+        conn.execute(
+            "UPDATE conversations SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
+            (DEFAULT_USER_ID,),
+        )
+        conn.execute(
+            "UPDATE events SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
+            (DEFAULT_USER_ID,),
+        )
+        conn.execute(
+            "UPDATE cron_jobs SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
+            (DEFAULT_USER_ID,),
+        )
+        conn.execute(
+            "UPDATE token_usage SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
+            (DEFAULT_USER_ID,),
+        )
 
         # Migrate old event_log → events table
         try:
@@ -187,24 +218,56 @@ class EventStore:
         source: str,
         data: dict,
         conversation_id: str = "",
+        user_id: str = "",
     ):
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO events (event_type, source, conversation_id, data) "
-                "VALUES (?, ?, ?, ?)",
-                (event_type, source, conversation_id, json.dumps(data, default=str)),
+                "INSERT INTO events (event_type, source, conversation_id, user_id, data) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    event_type,
+                    source,
+                    conversation_id,
+                    user_id,
+                    json.dumps(data, default=str),
+                ),
             )
 
     # ------------------------------------------------------------------
     # Conversations & Messages
     # ------------------------------------------------------------------
 
-    def ensure_conversation(self, conversation_id: str, channel: str = ""):
+    def ensure_conversation(
+        self,
+        conversation_id: str,
+        channel: str = "",
+        user_id: str = "",
+    ):
         with self._connect() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO conversations (id, channel) VALUES (?, ?)",
-                (conversation_id, channel),
+                "INSERT OR IGNORE INTO conversations (id, user_id, channel) VALUES (?, ?, ?)",
+                (conversation_id, user_id or DEFAULT_USER_ID, channel),
             )
+            if channel:
+                conn.execute(
+                    "UPDATE conversations SET channel = ? WHERE id = ? AND (channel = '' OR channel IS NULL)",
+                    (channel, conversation_id),
+                )
+            if user_id:
+                conn.execute(
+                    "UPDATE conversations SET user_id = ? WHERE id = ?",
+                    (user_id, conversation_id),
+                )
+
+    def get_conversation_user(self, conversation_id: str) -> str:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if row and row["user_id"]:
+                return row["user_id"]
+            return DEFAULT_USER_ID
 
     @staticmethod
     def _is_multimodal_blocks(value: object) -> bool:
@@ -262,11 +325,13 @@ class EventStore:
                 (conversation_id, role, stored),
             )
             # Also record as an event
+            user_id = self.get_conversation_user(conversation_id)
             conn.execute(
-                "INSERT INTO events (event_type, conversation_id, data) VALUES (?, ?, ?)",
+                "INSERT INTO events (event_type, conversation_id, user_id, data) VALUES (?, ?, ?, ?)",
                 (
                     event_type,
                     conversation_id,
+                    user_id,
                     json.dumps({"role": role, "content": preview}),
                 ),
             )
@@ -317,6 +382,7 @@ class EventStore:
                 """
                 SELECT
                     c.id,
+                    c.user_id,
                     c.created_at,
                     COUNT(m.id) AS message_count,
                     MAX(m.ts) AS last_ts,
@@ -336,6 +402,7 @@ class EventStore:
             return [
                 {
                     "id": r["id"],
+                    "user_id": r["user_id"] or DEFAULT_USER_ID,
                     "created_at": r["created_at"],
                     "message_count": r["message_count"] or 0,
                     "last_ts": r["last_ts"],
@@ -354,6 +421,7 @@ class EventStore:
                 """
                 SELECT
                     c.id,
+                    c.user_id,
                     c.channel,
                     c.created_at,
                     COUNT(m.id) AS message_count,
@@ -373,6 +441,7 @@ class EventStore:
             return [
                 {
                     "id": r["id"],
+                    "user_id": r["user_id"] or DEFAULT_USER_ID,
                     "channel": r["channel"] or "",
                     "created_at": r["created_at"],
                     "message_count": r["message_count"] or 0,
@@ -460,13 +529,14 @@ class EventStore:
         next_run: str,
         payload: str = "",
         conversation_id: str = "",
+        user_id: str = "",
         one_shot: bool = False,
         notify_channel: str = "",
     ) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO cron_jobs (name, type, schedule, next_run, payload, conversation_id, one_shot, notify_channel) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO cron_jobs (name, type, schedule, next_run, payload, conversation_id, user_id, one_shot, notify_channel) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     type,
@@ -474,6 +544,7 @@ class EventStore:
                     next_run,
                     payload,
                     conversation_id,
+                    user_id or DEFAULT_USER_ID,
                     1 if one_shot else 0,
                     notify_channel,
                 ),
@@ -487,7 +558,7 @@ class EventStore:
         """Return enabled jobs whose next_run <= now."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, name, type, schedule, payload, conversation_id, one_shot, notify_channel "
+                "SELECT id, name, type, schedule, payload, conversation_id, user_id, one_shot, notify_channel "
                 "FROM cron_jobs WHERE enabled = 1 AND next_run <= datetime('now')"
             ).fetchall()
             return [dict(r) for r in rows]
@@ -502,7 +573,7 @@ class EventStore:
     def list_cron_jobs(self) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, name, type, schedule, payload, conversation_id, notify_channel, enabled, last_run, next_run "
+                "SELECT id, name, type, schedule, payload, conversation_id, user_id, notify_channel, enabled, last_run, next_run "
                 "FROM cron_jobs ORDER BY next_run ASC"
             ).fetchall()
             return [dict(r) for r in rows]
@@ -567,13 +638,15 @@ class EventStore:
     ) -> None:
         total = input_tokens + output_tokens
         cost = self._estimate_cost(model, input_tokens, output_tokens)
+        user_id = self.get_conversation_user(conversation_id)
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO token_usage "
-                "(conversation_id, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, trigger) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(conversation_id, user_id, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, trigger) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     conversation_id,
+                    user_id,
                     model,
                     input_tokens,
                     output_tokens,

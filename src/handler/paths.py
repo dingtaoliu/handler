@@ -24,6 +24,9 @@ SHELL_LOG_DIR = DATA_DIR / "shell_logs"
 UPLOAD_DIR = DATA_DIR / "uploads"
 GMAIL_UPLOAD_DIR = UPLOAD_DIR / "gmail"
 GDRIVE_UPLOAD_DIR = UPLOAD_DIR / "gdrive"
+USERS_DIR = DATA_DIR / "users"
+LEGACY_MEMORY_DIR = MEMORY_DIR
+LEGACY_CREDENTIALS_DIR = DATA_DIR / "credentials"
 
 # Keep LOG_PATH as a compatibility alias pointing at today's log
 LOG_PATH = LOG_DIR / f"handler-{date.today().isoformat()}.log"

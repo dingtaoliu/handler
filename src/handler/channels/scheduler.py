@@ -111,6 +111,7 @@ class SchedulerChannel(Channel):
                 type="cron_prompt",
                 source="scheduler",
                 conversation_id=cid,
+                user_id=job.get("user_id"),
                 data={
                     "content": job["payload"],
                     "cron_job_name": job["name"],
@@ -119,5 +120,5 @@ class SchedulerChannel(Channel):
             )
         )
         logger.info(
-            f"[job #{job['id']}] prompt pushed to queue (conversation={cid}, notify={notify or 'none'})"
+            f"[job #{job['id']}] prompt pushed to queue (conversation={cid}, user={job.get('user_id') or ''}, notify={notify or 'none'})"
         )

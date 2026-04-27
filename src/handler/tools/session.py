@@ -184,6 +184,7 @@ def cron_tool(
                 next_run=next_run,
                 payload=payload,
                 conversation_id=cid if type == "prompt" else "",
+                user_id=run_ctx.user_id or "",
                 notify_channel=notify_channel if type == "prompt" else "",
             )
             notify_msg = f", notify via {notify_channel}" if notify_channel else ""

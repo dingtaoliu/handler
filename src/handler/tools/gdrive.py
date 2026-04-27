@@ -20,6 +20,7 @@ import sys
 from agents import function_tool
 
 from ..paths import DATA_DIR as _DATA_DIR, GDRIVE_UPLOAD_DIR
+from ..users import get_default_user, get_household_user
 
 logger = logging.getLogger("handler.tools.gdrive")
 
@@ -49,10 +50,20 @@ def _is_headless() -> bool:
     return False
 
 
-def _token_path(conversation_id: str | None) -> str:
+def _user_credentials_dir(user_id: str | None) -> Path:
+    if user_id:
+        return get_household_user(user_id).credentials_dir
+    return get_default_user().credentials_dir
+
+
+def _token_path(user_id: str | None = None, conversation_id: str | None = None) -> str:
+    if user_id:
+        return str(_user_credentials_dir(user_id) / "gdrive_token.json")
     if conversation_id:
         safe = re.sub(r"[^a-zA-Z0-9_-]", "_", conversation_id)
-        return str(_CREDENTIALS_PATH.parent / f"gdrive_token_{safe}.json")
+        legacy = _CREDENTIALS_PATH.parent / f"gdrive_token_{safe}.json"
+        if legacy.exists():
+            return str(legacy)
     return str(_TOKEN_PATH)
 
 _HELP_TEXT = """\
@@ -85,7 +96,10 @@ Actions:
                    Params: file_id. Use read_file on the returned path to extract text."""
 
 
-def _get_credentials(conversation_id: str | None = None):
+def _get_credentials(
+    user_id: str | None = None,
+    conversation_id: str | None = None,
+):
     """Authenticate and return OAuth credentials for Drive, Docs, and Sheets.
 
     Raises OAuthRequired (with auth URL) when running headless and no token exists.
@@ -96,7 +110,7 @@ def _get_credentials(conversation_id: str | None = None):
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     creds_path = str(_CREDENTIALS_PATH)
-    token_path = _token_path(conversation_id)
+    token_path = _token_path(user_id=user_id, conversation_id=conversation_id)
 
     if not os.path.exists(creds_path):
         raise FileNotFoundError(
@@ -172,7 +186,8 @@ def gdrive_tool(run_ctx=None):
 
     def _creds():
         conversation_id = run_ctx.conversation_id if run_ctx else None
-        return _get_credentials(conversation_id)
+        user_id = run_ctx.user_id if run_ctx else None
+        return _get_credentials(user_id=user_id, conversation_id=conversation_id)
 
     def _action_list(query: str, max_results: int) -> str:
         svc = _build_drive_service(_creds())

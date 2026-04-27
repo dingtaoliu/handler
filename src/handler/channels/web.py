@@ -32,6 +32,7 @@ class _ImageData(BaseModel):
 class _ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
+    user_id: str | None = None
     images: list[_ImageData] | None = None
 
 
@@ -64,9 +65,9 @@ class WebChannel(Channel):
             agent_swapper=agent_swapper,
         )
 
-    def _new_conversation_id(self) -> str:
+    def _new_conversation_id(self, user_id: str | None = None) -> str:
         cid = "web-" + uuid.uuid4().hex[:12]
-        self.store.ensure_conversation(cid, channel="web")
+        self.store.ensure_conversation(cid, channel="web", user_id=user_id or "")
         return cid
 
     async def push_message(self, conversation_id: str, role: str, content: str) -> None:
@@ -119,9 +120,13 @@ class WebChannel(Channel):
         @app.get("/api/history")
         async def history(cid: str | None = None):
             if not cid:
-                return {"messages": [], "conversation_id": ""}
+                return {"messages": [], "conversation_id": "", "user_id": ""}
             messages = channel.store.get_messages(cid, include_compacted=True)
-            return {"messages": messages, "conversation_id": cid}
+            return {
+                "messages": messages,
+                "conversation_id": cid,
+                "user_id": channel.store.get_conversation_user(cid),
+            }
 
         @app.get("/api/stream")
         async def stream(cid: str):
@@ -158,9 +163,15 @@ class WebChannel(Channel):
         async def chat(req: _ChatRequest):
             conversation_id = req.conversation_id
             if not conversation_id:
-                conversation_id = channel._new_conversation_id()
+                conversation_id = channel._new_conversation_id(req.user_id)
             else:
-                channel.store.ensure_conversation(conversation_id, channel="web")
+                channel.store.ensure_conversation(
+                    conversation_id,
+                    channel="web",
+                    user_id=channel.store.get_conversation_user(conversation_id),
+                )
+
+            user_id = req.user_id or channel.store.get_conversation_user(conversation_id)
 
             # Save any uploaded images to disk and build image references
             images = None
@@ -186,6 +197,7 @@ class WebChannel(Channel):
                 source="web",
                 data=event_data,
                 conversation_id=conversation_id,
+                user_id=user_id,
                 _response_future=future,
             )
             queue = channel.queue
@@ -196,9 +208,17 @@ class WebChannel(Channel):
             await queue.put(event)
             try:
                 resp = await future
-                return {"response": resp, "conversation_id": conversation_id}
+                return {
+                    "response": resp,
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                }
             except Exception as e:
-                return {"error": str(e), "conversation_id": conversation_id}
+                return {
+                    "error": str(e),
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                }
 
         return app
 

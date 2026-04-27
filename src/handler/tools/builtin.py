@@ -224,7 +224,7 @@ def list_files(subdir: str = "") -> str:
     return f"Local uploads ({len(files)} file(s)):\n" + "\n".join(lines)
 
 
-def memory_tool(mem):
+def memory_tool(mem, run_ctx=None):
     """Create a single memory tool wired to the Memory instance."""
 
     @function_tool
@@ -263,13 +263,18 @@ def memory_tool(mem):
         if action == "save":
             if not topic or not content or not description:
                 return "Missing required fields: topic, content, description."
-            mode = mem.save(topic, content, description)
+            mode = mem.save(
+                topic,
+                content,
+                description,
+                user_id=run_ctx.user_id if run_ctx else None,
+            )
             return f"Memory {mode}: {topic}"
 
         if action == "read":
             if not topic:
                 return "Missing required field: topic."
-            text = mem.read(topic)
+            text = mem.read(topic, user_id=run_ctx.user_id if run_ctx else None)
             if not text:
                 return f"Topic not found: {topic}"
             logger.info(f"memory read: {topic} ({len(text)} chars)")
@@ -278,13 +283,19 @@ def memory_tool(mem):
         if action == "rewrite":
             if not topic or not content or not description:
                 return "Missing required fields: topic, content, description."
-            mode = mem.rewrite(topic, content, description, new_topic)
+            mode = mem.rewrite(
+                topic,
+                content,
+                description,
+                new_topic,
+                user_id=run_ctx.user_id if run_ctx else None,
+            )
             return f"Memory {mode}: {new_topic or topic}"
 
         if action == "delete":
             if not topic:
                 return "Missing required field: topic."
-            if mem.delete(topic):
+            if mem.delete(topic, user_id=run_ctx.user_id if run_ctx else None):
                 return f"Deleted topic: {topic}"
             return f"Topic not found: {topic}"
 

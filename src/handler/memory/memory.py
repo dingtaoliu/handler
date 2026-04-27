@@ -15,6 +15,8 @@ import logging
 import re
 from pathlib import Path
 
+from ..users import get_household_user
+
 logger = logging.getLogger("handler.memory")
 
 _INDEX_FILE = "index.md"
@@ -45,6 +47,14 @@ class Memory:
         self.memory_dir = memory_dir
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
+    def _resolve_dir(self, user_id: str | None = None) -> Path:
+        if user_id:
+            path = get_household_user(user_id).memory_dir
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        return self.memory_dir
+
     @property
     def _index_path(self) -> Path:
         return self.memory_dir / _INDEX_FILE
@@ -53,34 +63,37 @@ class Memory:
     # Index operations
     # ------------------------------------------------------------------
 
-    def _load_index(self) -> dict[str, str]:
+    def _load_index(self, user_id: str | None = None) -> dict[str, str]:
         """Parse index.md into {filename: description}."""
-        if not self._index_path.exists():
+        index_path = self._resolve_dir(user_id) / _INDEX_FILE
+        if not index_path.exists():
             return {}
         index = {}
-        for line in self._index_path.read_text().splitlines():
+        for line in index_path.read_text().splitlines():
             line = line.strip()
             m = re.match(r"^-\s+(\S+\.md):\s*(.*)$", line)
             if m:
                 index[m.group(1)] = m.group(2).strip()
         return index
 
-    def _save_index(self, index: dict[str, str]) -> None:
+    def _save_index(self, index: dict[str, str], user_id: str | None = None) -> None:
         """Write index.md from {filename: description}."""
         lines = []
         for filename, description in sorted(index.items()):
             lines.append(f"- {filename}: {description}")
-        self._index_path.write_text("\n".join(lines) + "\n" if lines else "")
+        index_path = self._resolve_dir(user_id) / _INDEX_FILE
+        index_path.write_text("\n".join(lines) + "\n" if lines else "")
 
     # ------------------------------------------------------------------
     # File operations
     # ------------------------------------------------------------------
 
-    def list_topics(self) -> list[dict]:
+    def list_topics(self, user_id: str | None = None) -> list[dict]:
         """Return metadata for all topics, sorted by name."""
-        index = self._load_index()
+        memory_dir = self._resolve_dir(user_id)
+        index = self._load_index(user_id)
         result = []
-        for f in sorted(self.memory_dir.glob("*.md")):
+        for f in sorted(memory_dir.glob("*.md")):
             if f.name == _INDEX_FILE:
                 continue
             result.append(
@@ -100,34 +113,40 @@ class Memory:
                 return stripped.removeprefix("# ")[:120]
         return Path(topic).stem.replace("_", " ")[:120]
 
-    def read(self, topic: str) -> str:
+    def read(self, topic: str, user_id: str | None = None) -> str:
         """Read the full content of a topic file."""
         filename = _validate_topic(topic)
-        path = self.memory_dir / filename
+        path = self._resolve_dir(user_id) / filename
         if not path.exists():
             return ""
         return path.read_text()
 
-    def write(self, topic: str, content: str) -> str:
+    def write(self, topic: str, content: str, user_id: str | None = None) -> str:
         """Backward-compatible full rewrite that preserves the existing description."""
         filename = _validate_topic(topic)
-        index = self._load_index()
+        index = self._load_index(user_id)
         description = index.get(filename) or self._derive_description(filename, content)
-        path = self.memory_dir / filename
+        path = self._resolve_dir(user_id) / filename
         path.write_text(content)
         index[filename] = description
-        self._save_index(index)
+        self._save_index(index, user_id)
         logger.info(f"memory write: {filename}")
         return "written"
 
-    def save(self, topic: str, content: str, description: str) -> str:
+    def save(
+        self,
+        topic: str,
+        content: str,
+        description: str,
+        user_id: str | None = None,
+    ) -> str:
         """Upsert a topic: create if new, append if existing. Updates index.
 
         Returns a status message.
         """
         filename = _validate_topic(topic)
-        path = self.memory_dir / filename
-        index = self._load_index()
+        path = self._resolve_dir(user_id) / filename
+        index = self._load_index(user_id)
 
         if path.exists():
             existing = path.read_text()
@@ -138,7 +157,7 @@ class Memory:
             mode = "created"
 
         index[filename] = description
-        self._save_index(index)
+        self._save_index(index, user_id)
         logger.info(f"memory save: {mode} {filename}")
         return mode
 
@@ -148,18 +167,20 @@ class Memory:
         content: str,
         description: str,
         new_topic: str = "",
+        user_id: str | None = None,
     ) -> str:
         """Full rewrite of a topic: replaces content, description, and optionally renames.
 
         Returns a status message.
         """
         filename = _validate_topic(topic)
-        path = self.memory_dir / filename
-        index = self._load_index()
+        memory_dir = self._resolve_dir(user_id)
+        path = memory_dir / filename
+        index = self._load_index(user_id)
 
         if new_topic and new_topic != topic:
             new_filename = _validate_topic(new_topic)
-            new_path = self.memory_dir / new_filename
+            new_path = memory_dir / new_filename
 
             # Write new file
             new_path.write_text(content)
@@ -170,26 +191,26 @@ class Memory:
             index.pop(filename, None)
 
             index[new_filename] = description
-            self._save_index(index)
+            self._save_index(index, user_id)
             logger.info(f"memory rewrite: renamed {filename} → {new_filename}")
             return f"rewritten and renamed to {new_filename}"
         else:
             path.write_text(content)
             index[filename] = description
-            self._save_index(index)
+            self._save_index(index, user_id)
             logger.info(f"memory rewrite: {filename}")
             return "rewritten"
 
-    def delete(self, topic: str) -> bool:
+    def delete(self, topic: str, user_id: str | None = None) -> bool:
         """Delete a topic file and its index entry. Returns True if deleted."""
         filename = _validate_topic(topic)
-        path = self.memory_dir / filename
+        path = self._resolve_dir(user_id) / filename
         if not path.exists():
             return False
         path.unlink()
-        index = self._load_index()
+        index = self._load_index(user_id)
         index.pop(filename, None)
-        self._save_index(index)
+        self._save_index(index, user_id)
         logger.info(f"memory delete: {filename}")
         return True
 
@@ -197,13 +218,13 @@ class Memory:
     # Prompt helper
     # ------------------------------------------------------------------
 
-    def build_prompt_section(self) -> str:
+    def build_prompt_section(self, user_id: str | None = None) -> str:
         """Build the memory section for the system prompt.
 
         Always includes the index only. Agent uses memory(action='read')
         to load full content on demand.
         """
-        index = self._load_index()
+        index = self._load_index(user_id)
 
         if not index:
             return (

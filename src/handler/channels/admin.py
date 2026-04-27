@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from ..event_store import EventStore
 from ..memory import _validate_topic
 from ..paths import UPLOAD_DIR, LOG_DIR, get_log_path, PROJECT_ROOT, PID_PATH
+from ..users import serialize_users, get_default_user
 
 logger = logging.getLogger("handler.channels.admin")
 
@@ -57,6 +58,10 @@ class _AgentBody(BaseModel):
     model: str
 
 
+class _ConversationBody(BaseModel):
+    user_id: str | None = None
+
+
 def create_admin_router(
     store: EventStore,
     memory=None,
@@ -71,6 +76,10 @@ def create_admin_router(
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     # --- Tokens ---
+
+    @router.get("/users")
+    async def users_list():
+        return {"users": serialize_users(), "default_user_id": get_default_user().id}
 
     @router.get("/tokens")
     async def tokens(days: int | None = None):
@@ -154,38 +163,38 @@ def create_admin_router(
     # --- Memory ---
 
     @router.get("/memory")
-    async def memory_list():
+    async def memory_list(user_id: str | None = None):
         if not memory:
             return {"files": []}
-        return {"files": memory.list_topics()}
+        return {"files": memory.list_topics(user_id=user_id), "user_id": user_id or get_default_user().id}
 
     @router.get("/memory/{name}")
-    async def memory_read(name: str):
+    async def memory_read(name: str, user_id: str | None = None):
         safe = _validate_md_filename(name)
         if not safe:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
         if not memory:
             return JSONResponse({"error": "memory not available"}, status_code=503)
-        return {"filename": safe, "content": memory.read(safe)}
+        return {"filename": safe, "content": memory.read(safe, user_id=user_id), "user_id": user_id or get_default_user().id}
 
     @router.put("/memory/{name}")
-    async def memory_write(name: str, body: _WriteBody):
+    async def memory_write(name: str, body: _WriteBody, user_id: str | None = None):
         safe = _validate_md_filename(name)
         if not safe:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
         if not memory:
             return JSONResponse({"error": "memory not available"}, status_code=503)
-        memory.write(safe, body.content)
-        return {"ok": True, "filename": safe}
+        memory.write(safe, body.content, user_id=user_id)
+        return {"ok": True, "filename": safe, "user_id": user_id or get_default_user().id}
 
     @router.delete("/memory/{name}")
-    async def memory_delete(name: str):
+    async def memory_delete(name: str, user_id: str | None = None):
         safe = _validate_md_filename(name)
         if not safe:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
         if not memory:
             return JSONResponse({"error": "memory not available"}, status_code=503)
-        return {"ok": memory.delete(safe)}
+        return {"ok": memory.delete(safe, user_id=user_id), "user_id": user_id or get_default_user().id}
 
     # --- Config ---
 
@@ -295,10 +304,11 @@ def create_admin_router(
         return {"conversations": store.list_web_conversations()}
 
     @router.post("/conversations")
-    async def conversations_new():
+    async def conversations_new(body: _ConversationBody):
         cid = "web-" + uuid.uuid4().hex[:12]
-        store.ensure_conversation(cid, channel="web")
-        return {"conversation_id": cid}
+        user_id = body.user_id or get_default_user().id
+        store.ensure_conversation(cid, channel="web", user_id=user_id)
+        return {"conversation_id": cid, "user_id": user_id}
 
     # --- Sessions (all channels) ---
 

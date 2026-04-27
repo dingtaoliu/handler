@@ -69,12 +69,15 @@ const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
 const pendingFilesEl = document.getElementById('pending-files');
+const userSelectEl = document.getElementById('user-select');
 const convSelectEl = document.getElementById('conv-select');
 let pendingUploads = [];
 let pendingImages = [];  // {data: base64, media_type: string, preview: objectURL}
 let _activeCid = null;  // current conversation id
+let _activeUserId = null;
 let _stream = null;
 let _pendingThinking = null;
+let _users = [];
 
 inputEl.addEventListener('input', function() {
     this.style.height = 'auto';
@@ -195,7 +198,56 @@ function connectStream(cid) {
     });
 }
 
+async function loadUsers() {
+    try {
+        const res = await fetch('/api/users');
+        const data = await res.json();
+        _users = data.users || [];
+        if (!_activeUserId) {
+            _activeUserId = data.default_user_id || (_users[0] && _users[0].id) || null;
+        }
+        renderUserSelect();
+    } catch (e) {
+        console.error('failed to load users', e);
+    }
+}
+
+function renderUserSelect() {
+    userSelectEl.innerHTML = '';
+    if (_users.length === 0) {
+        const opt = document.createElement('option');
+        opt.textContent = 'No users';
+        opt.disabled = true;
+        userSelectEl.appendChild(opt);
+        return;
+    }
+    for (const user of _users) {
+        const opt = document.createElement('option');
+        opt.value = user.id;
+        opt.textContent = user.display_name;
+        userSelectEl.appendChild(opt);
+    }
+    if (_activeUserId) userSelectEl.value = _activeUserId;
+}
+
+function getActiveUserId() {
+    return userSelectEl.value || _activeUserId || (_users[0] && _users[0].id) || '';
+}
+
+function getUserLabel(userId) {
+    const match = _users.find(u => u.id === userId);
+    return match ? match.display_name : (userId || 'Unknown user');
+}
+
+function onUserSelect(userId) {
+    _activeUserId = userId || null;
+    if (document.getElementById('tab-memory').classList.contains('active')) {
+        loadMemory();
+    }
+}
+
 async function loadHistory() {
+    await loadUsers();
     await loadConversationList();
     if (_convs.length > 0) {
         await selectConversation(_convs[0].id);
@@ -229,7 +281,7 @@ function renderConvSelect() {
             ? new Date(c.last_ts.replace(' ', 'T') + 'Z').toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})
             : '';
         const preview = c.last_content ? c.last_content.slice(0, 50) : '(empty)';
-        opt.textContent = (ts ? ts + ' — ' : '') + preview;
+        opt.textContent = '[' + getUserLabel(c.user_id) + '] ' + (ts ? ts + ' — ' : '') + preview;
         convSelectEl.appendChild(opt);
     }
     if (_activeCid) convSelectEl.value = _activeCid;
@@ -247,19 +299,27 @@ async function selectConversation(cid) {
     try {
         const res = await fetch('/api/history?cid=' + encodeURIComponent(cid));
         const data = await res.json();
+        _activeUserId = data.user_id || _activeUserId;
+        renderUserSelect();
         for (const msg of data.messages) addMsg(msg.role, msg.content);
     } catch(e) {}
     inputEl.focus();
 }
 
 async function newConversation() {
-    const res = await fetch('/api/conversations', { method: 'POST' });
+    const res = await fetch('/api/conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: getActiveUserId() }),
+    });
     const data = await res.json();
     _activeCid = data.conversation_id;
+    _activeUserId = data.user_id || getActiveUserId();
     messagesEl.innerHTML = '';
     await loadConversationList();
     convSelectEl.value = _activeCid;
     connectStream(_activeCid);
+    renderUserSelect();
     inputEl.focus();
 }
 
@@ -354,6 +414,7 @@ async function send() {
     try {
         const body = { message };
         if (_activeCid) body.conversation_id = _activeCid;
+        body.user_id = getActiveUserId();
         if (apiImages.length > 0) body.images = apiImages;
         const res = await fetch('/api/chat', {
             method: 'POST',
@@ -366,6 +427,10 @@ async function send() {
         if (data.conversation_id && data.conversation_id !== _activeCid) {
             _activeCid = data.conversation_id;
             connectStream(_activeCid);
+        }
+        if (data.user_id) {
+            _activeUserId = data.user_id;
+            renderUserSelect();
         }
         const responseText = data.error ? 'Error: ' + data.error : data.response;
         if (!hasAssistantMessage(responseText)) addMsg('assistant', responseText);
@@ -388,7 +453,8 @@ const memFilenameEl = document.getElementById('mem-filename');
 const memContentEl = document.getElementById('mem-content');
 
 async function loadMemory() {
-    const res = await fetch('/api/memory');
+    const uid = getActiveUserId();
+    const res = await fetch('/api/memory?user_id=' + encodeURIComponent(uid));
     const data = await res.json();
     _memFiles = data.files || [];
     renderMemList();
@@ -404,7 +470,7 @@ function renderMemList() {
         const el = document.createElement('div');
         el.className = 'file-item' + (_memSelected === f.filename ? ' active' : '');
         el.innerHTML = '<div class="file-name">' + esc(f.filename) + '</div>' +
-            '<div class="file-summary">' + esc(f.summary || '') + '</div>' +
+            '<div class="file-summary">' + esc(f.description || '') + '</div>' +
             '<div class="file-size">' + formatBytes(f.size) + '</div>';
         el.onclick = () => selectMemFile(f.filename);
         memListEl.appendChild(el);
@@ -414,7 +480,7 @@ function renderMemList() {
 async function selectMemFile(name) {
     _memSelected = name;
     renderMemList();
-    const res = await fetch('/api/memory/' + encodeURIComponent(name));
+    const res = await fetch('/api/memory/' + encodeURIComponent(name) + '?user_id=' + encodeURIComponent(getActiveUserId()));
     const data = await res.json();
     memFilenameEl.value = data.filename;
     memFilenameEl.readOnly = true;
@@ -436,12 +502,13 @@ async function saveMemFile() {
     const content = memContentEl.value;
     if (!name) { toast('Enter a filename'); return; }
     const fname = name.endsWith('.md') ? name : name + '.md';
-    const res = await fetch('/api/memory/' + encodeURIComponent(fname), {
+    const userId = getActiveUserId();
+    const saveRes = await fetch('/api/memory/' + encodeURIComponent(fname) + '?user_id=' + encodeURIComponent(userId), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content }),
     });
-    const data = await res.json();
+    const data = await saveRes.json();
     if (data.error) { toast('Error: ' + data.error); return; }
     toast('Saved ' + data.filename);
     _memSelected = data.filename;
@@ -454,7 +521,7 @@ async function deleteMemFile() {
     const name = memFilenameEl.value.trim() || _memSelected;
     if (!name) return;
     if (!confirm('Delete ' + name + '?')) return;
-    const res = await fetch('/api/memory/' + encodeURIComponent(name), { method: 'DELETE' });
+    const res = await fetch('/api/memory/' + encodeURIComponent(name) + '?user_id=' + encodeURIComponent(getActiveUserId()), { method: 'DELETE' });
     const data = await res.json();
     if (data.ok) {
         toast('Deleted ' + name);
@@ -728,13 +795,14 @@ async function loadSessions() {
         return;
     }
     el.innerHTML = buildTable(
-        ['Channel', 'Conversation ID', 'Messages', 'Last Active', 'Last Message'],
+        ['User', 'Channel', 'Conversation ID', 'Messages', 'Last Active', 'Last Message'],
         sessions.map(s => {
             const channel = s.channel || _inferChannel(s.id);
             const ts = s.last_ts
                 ? new Date(s.last_ts.replace(' ', 'T') + 'Z').toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})
                 : '—';
             return [
+                '<span style="font-size:12px">' + esc(getUserLabel(s.user_id)) + '</span>',
                 _channelBadge(channel),
                 '<code style="font-size:11px">' + esc(s.id) + '</code>',
                 String(s.message_count),
@@ -781,5 +849,5 @@ function buildTable(headers, rows, rawHtml = false) {
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
-switchTab('chat');
+loadUsers().finally(() => switchTab('chat'));
 

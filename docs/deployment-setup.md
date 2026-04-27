@@ -13,7 +13,9 @@ Both machines are on the same Tailscale network, so `macbook-server` resolves ov
 
 - Hostname: `macbook-server`
 - User: `dannyliu`
+- Repo: `~/repos/handler` (note: different from local `~/dev/repos/handler`)
 - Handler binary: `/Users/dannyliu/.local/share/uv/tools/handler/bin/handler`
+- uv binary: `~/.local/bin/uv` (not on PATH over SSH — use full path)
 - Data dir: `~/.handler/` (same as local default)
 - SSH key auth is set up from the dev machine (`~/.ssh/id_ed25519`)
 
@@ -40,16 +42,34 @@ scp ~/.handler/handler.db dannyliu@macbook-server:~/.handler/handler.db
 ssh dannyliu@macbook-server '/Users/dannyliu/.local/share/uv/tools/handler/bin/handler start'
 ```
 
-To do a full migration (config, memory, credentials, etc.):
+To do a full migration (config, memory, credentials, uploads, etc.):
 
 ```bash
+# Stop first — handler locks handler.db and scp -r on a running instance misses files
 ssh dannyliu@macbook-server '/Users/dannyliu/.local/share/uv/tools/handler/bin/handler stop'
-scp -r ~/.handler/ dannyliu@macbook-server:~/.handler/
+
+# Copy each subdirectory explicitly (avoid scp -r on the parent dir — nesting issues)
+scp ~/.handler/handler.db dannyliu@macbook-server:~/.handler/handler.db
+ssh dannyliu@macbook-server 'mkdir -p ~/.handler/memory ~/.handler/uploads ~/.handler/credentials ~/.handler/config'
+scp ~/.handler/memory/* dannyliu@macbook-server:~/.handler/memory/
+scp ~/.handler/uploads/* dannyliu@macbook-server:~/.handler/uploads/
+scp ~/.handler/credentials/* dannyliu@macbook-server:~/.handler/credentials/
+scp ~/.handler/config/identity.md ~/.handler/config/persona.md dannyliu@macbook-server:~/.handler/config/
+
 ssh dannyliu@macbook-server '/Users/dannyliu/.local/share/uv/tools/handler/bin/handler start'
 ```
 
-## Testing a new handler build on the server
+## Deploying a new build to the server
 
-1. Deploy the new build to the server (e.g. via `uv tool install` or `pip install`)
-2. Stop handler, copy updated data if needed, restart
-3. Hit `http://macbook-server:8000` from any Tailscale-connected device to verify
+```bash
+# Commit and push locally first, then:
+ssh dannyliu@macbook-server '
+  /Users/dannyliu/.local/share/uv/tools/handler/bin/handler stop &&
+  cd ~/repos/handler &&
+  git pull &&
+  ~/.local/bin/uv tool install . --force &&
+  /Users/dannyliu/.local/share/uv/tools/handler/bin/handler start
+'
+```
+
+Verify: `curl http://macbook-server:8000/api/chat -X POST -H "Content-Type: application/json" -d '{"message":"hi","conversation_id":null}'`

@@ -7,6 +7,7 @@ from typing import Protocol, cast
 
 from .types import Event
 from .event_store import EventStore
+from .users import DEFAULT_USER_ID
 
 logger = logging.getLogger("handler.environment")
 
@@ -56,7 +57,7 @@ class Environment:
             event = await self.queue.get()
             logger.info(
                 f"event: type={event.type} source={event.source} "
-                f"conversation={event.conversation_id}"
+                f"conversation={event.conversation_id} user={event.user_id or DEFAULT_USER_ID}"
             )
             await self._handle(event)
 
@@ -112,6 +113,7 @@ class Environment:
 
     async def _process(self, event: Event) -> str:
         cid = event.conversation_id or f"{event.source}:default"
+        user_id = event.user_id or self.store.get_conversation_user(cid)
         content = event.data.get("content", "")
         images = event.data.get("images")  # list of {"path": ..., "media_type": ...}
 
@@ -140,17 +142,17 @@ class Environment:
         else:
             store_content = content
 
-        self.store.ensure_conversation(cid, channel=event.source)
+        self.store.ensure_conversation(cid, channel=event.source, user_id=user_id)
         role = "system" if event.type == "cron_prompt" else "user"
         self.store.add_message(cid, role, store_content)
-        self.store.log_event(event.type, event.source, event.data)
+        self.store.log_event(event.type, event.source, event.data, cid, user_id)
 
         messages = self.store.get_messages(cid)
         response = await self.agent.run(cid, messages)
 
         self.store.add_message(cid, "assistant", response)
         self.store.log_event(
-            "agent_response", event.source, {"content": response[:500]}
+            "agent_response", event.source, {"content": response[:500]}, cid, user_id
         )
 
         return response

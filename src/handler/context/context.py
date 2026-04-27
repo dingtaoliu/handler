@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..users import get_household_user
+
 if TYPE_CHECKING:
     from ..memory import Memory
 
@@ -156,6 +158,7 @@ class AgentContext:
         self,
         summary: str | None = None,
         token_brief: str | None = None,
+        user_id: str | None = None,
     ) -> str:
         sections = []
 
@@ -189,12 +192,21 @@ class AgentContext:
         if persona:
             sections.append(f"# Persona\n{persona}")
 
+        if user_id:
+            try:
+                user = get_household_user(user_id)
+                profile = self._read(user.profile_path)
+                if profile:
+                    sections.append(f"# Active User\nYou are currently helping {user.display_name}.\n\n{profile}")
+            except KeyError:
+                logger.warning(f"unknown user_id in context build: {user_id}")
+
         if summary:
             sections.append(f"# Earlier Conversation\n{summary}")
 
         # Load memory index
         if self.memory is not None:
-            sections.append(self.memory.build_prompt_section())
+            sections.append(self.memory.build_prompt_section(user_id=user_id))
         else:
             index_path = self.memory_dir / "index.md"
             if index_path.exists():

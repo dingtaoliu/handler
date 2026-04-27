@@ -193,11 +193,12 @@ class RunContext:
     """Shared mutable context for the current agent run.
 
     Passed to Agent and tool factories so tools can read the current
-    conversation_id without coupling to Agent instance state.
+    request scope without coupling to Agent instance state.
     """
 
     def __init__(self) -> None:
         self.conversation_id: str | None = None
+        self.user_id: str | None = None
 
 
 @dataclass
@@ -206,5 +207,6 @@ class Event:
     source: str  # channel name
     data: dict = field(default_factory=dict)
     conversation_id: str | None = None
+    user_id: str | None = None
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     _response_future: Any = field(default=None, repr=False, compare=False)

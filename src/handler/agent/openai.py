@@ -102,9 +102,11 @@ class OpenAIAgent(BaseAgent):
             return
 
         self.run_ctx.conversation_id = conversation_id
+        self.run_ctx.user_id = self.store.get_conversation_user(conversation_id)
         instructions = self.context.build(
             summary=self.store.get_latest_summary(conversation_id),
             token_brief=self.store.get_token_cost_brief(),
+            user_id=self.run_ctx.user_id,
         )
         instructions += (
             "\n\n# SESSION ENDING\n"
@@ -161,11 +163,13 @@ class OpenAIAgent(BaseAgent):
 
     async def run(self, conversation_id: str, messages: list[dict]) -> str:
         self.run_ctx.conversation_id = conversation_id
+        self.run_ctx.user_id = self.store.get_conversation_user(conversation_id)
         summary = self.store.get_latest_summary(conversation_id)
         token_brief = self.store.get_token_cost_brief()
         instructions = self.context.build(
             summary=summary,
             token_brief=token_brief,
+            user_id=self.run_ctx.user_id,
         )
         logger.info(
             f"agent.run: conversation={conversation_id}, messages={len(messages)}"

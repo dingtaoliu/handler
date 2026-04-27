@@ -34,6 +34,7 @@
     <!-- Chat -->
     <div id="tab-chat" class="tab-pane chat-layout active">
       <div id="chat-topbar">
+        <select id="user-select" onchange="onUserSelect(this.value)"></select>
         <select id="conv-select" onchange="onConvSelect(this.value)"></select>
         <button class="btn-small btn-primary" onclick="newConversation()">+ New</button>
       </div>

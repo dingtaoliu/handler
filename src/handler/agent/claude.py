@@ -333,11 +333,13 @@ class ClaudeAgent(BaseAgent):
 
     async def run(self, conversation_id: str, messages: list[dict]) -> str:
         self.run_ctx.conversation_id = conversation_id
+        self.run_ctx.user_id = self.store.get_conversation_user(conversation_id)
         summary = self.store.get_latest_summary(conversation_id)
         token_brief = self.store.get_token_cost_brief()
         instructions = self.context.build(
             summary=summary,
             token_brief=token_brief,
+            user_id=self.run_ctx.user_id,
         )
         logger.info(f"[system_prompt]\n{instructions}\n[/system_prompt]")
         logger.info(
@@ -366,6 +368,8 @@ class ClaudeAgent(BaseAgent):
                 "conversation_id": conversation_id,
                 "input_messages": len(messages),
             },
+            conversation_id,
+            self.run_ctx.user_id or "",
         )
 
         # Auto-compact if needed
@@ -395,9 +399,11 @@ class ClaudeAgent(BaseAgent):
             return
 
         self.run_ctx.conversation_id = conversation_id
+        self.run_ctx.user_id = self.store.get_conversation_user(conversation_id)
         instructions = self.context.build(
             summary=self.store.get_latest_summary(conversation_id),
             token_brief=self.store.get_token_cost_brief(),
+            user_id=self.run_ctx.user_id,
         )
         instructions += (
             "\n\n# SESSION ENDING\n"
