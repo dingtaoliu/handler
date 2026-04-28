@@ -14,7 +14,15 @@ from .context import AgentContext
 from .event_store import EventStore
 from .memory import Memory
 from .environment import Environment
-from .paths import DATA_DIR, CONFIG_DIR, MEMORY_DIR, PID_PATH, LOG_DIR, get_log_path
+from .paths import (
+    DATA_DIR,
+    CONFIG_DIR,
+    MEMORY_DIR,
+    PID_PATH,
+    LOG_DIR,
+    ensure_scripts_dir_on_path,
+    get_log_path,
+)
 from .types import RunContext
 from .users import bootstrap_user_layout
 from .channels import WebChannel, TelegramChannel, SchedulerChannel
@@ -33,6 +41,8 @@ from .tools import (
     gdrive_tool,
 )
 from .watchdog import install_watchdog, load_scheduler_config, detect_scheduler_backends
+
+ensure_scripts_dir_on_path()
 
 load_dotenv(DATA_DIR / ".env")  # workspace env (~/.handler/.env)
 load_dotenv()  # fallback: search from cwd upward

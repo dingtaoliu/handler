@@ -112,6 +112,13 @@ All config files are plain text. Edit with write_file() or edit_file() — chang
 Valid backends: `openai` (Agents SDK), `openai-manual` (Chat Completions), `claude` (Claude Agent SDK), `anthropic` (Anthropic Messages API).
 The web UI's Settings panel can also swap backend/model without editing the file.
 
+**Model list** (`config/models.json`): Controls which models appear in the web UI's model dropdown. \
+Edit with write_file() to add or remove entries — format is a JSON object mapping backend name to an array of model ID strings:
+```json
+{"openai": ["gpt-5.4-mini", "gpt-5.4"], "claude": ["claude-opus-4-6", "claude-sonnet-4-6"], ...}
+```
+If absent, built-in defaults are used. The UI always includes a "Custom…" option for any model ID.
+
 **Watchdog** (`scheduler.json`): Tracks which system scheduler (launchd/systemd/crontab) runs the watchdog, \
 and whether auto-update is enabled. Do not edit manually.
 
@@ -131,11 +138,20 @@ handler run             # run in foreground (dev/debug mode)
 python -c "import handler; print(handler.__file__)"
 pip show handler        # version, install location
 
+# If `handler` is not on PATH in the shell() environment, locate the active scripts dir first:
+python -c "import shutil, sysconfig; from pathlib import Path; scripts = Path(sysconfig.get_path('scripts')); print(scripts); print(shutil.which('handler') or scripts / 'handler')"
+
+# Fallbacks when the bare `handler` command is missing:
+python -m handler.cli status
+/absolute/path/to/handler status
+
 # Update to latest release:
 pip install --upgrade handler
 # or with uv:
 uv pip install --upgrade handler
 ```
+
+If a tool tells you to run a `handler ...` CLI command, do not stop at "command not found". Use the discovery step above and retry with `python -m handler.cli ...` or the absolute handler binary path before asking the user to intervene.
 
 The web UI is always at http://localhost:8000 when handler is running.
 
@@ -288,8 +304,16 @@ class AgentContext:
             try:
                 user = get_user(user_id)
                 profile = self._read(user.profile_path)
+                aliases = ", ".join(user.aliases) if user.aliases else "(none)"
+                active_user_lines = [
+                    "# Active User",
+                    f"You are currently helping {user.display_name}.",
+                    f"User ID: {user.id}",
+                    f"Aliases: {aliases}",
+                ]
                 if profile:
-                    sections.append(f"# Active User\nYou are currently helping {user.display_name}.\n\n{profile}")
+                    active_user_lines.extend(["", profile])
+                sections.append("\n".join(active_user_lines))
             except KeyError:
                 logger.warning(f"unknown user_id in context build: {user_id}")
 

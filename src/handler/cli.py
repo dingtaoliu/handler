@@ -13,10 +13,14 @@ from .paths import (
     DATA_DIR as _DATA_DIR,
     PID_PATH as _PID_PATH,
     LOG_PATH as _LOG_PATH,
+    ensure_scripts_dir_on_path,
+    with_scripts_dir_on_path,
 )
 
 _RUN_DIR = Path.home()
 _ENV_PATH = _DATA_DIR / ".env"
+
+ensure_scripts_dir_on_path()
 
 
 _PROVIDERS = {
@@ -126,6 +130,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         stderr=subprocess.STDOUT,
         start_new_session=True,
         cwd=str(_RUN_DIR),
+        env=with_scripts_dir_on_path(),
     )
 
     # Wait for PID file
