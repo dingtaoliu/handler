@@ -11,5 +11,5 @@ from .providers.openai import OpenAIProvider
 class OpenAIManualAgent(ManualAgent):
     """ManualAgent pre-wired with OpenAIProvider."""
 
-    def __init__(self, model: str = "gpt-5.4-2026-03-05", **kwargs):
+    def __init__(self, model: str = "gpt-5.4-mini", **kwargs):
         super().__init__(provider=OpenAIProvider(model), model=model, **kwargs)

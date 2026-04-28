@@ -10,10 +10,30 @@ from pydantic import BaseModel
 
 from ..event_store import EventStore
 from ..memory import _validate_topic
-from ..paths import UPLOAD_DIR, LOG_DIR, get_log_path, PROJECT_ROOT, PID_PATH
+from ..paths import UPLOAD_DIR, LOG_DIR, get_log_path, PROJECT_ROOT, PID_PATH, MODELS_CONFIG_PATH
 from ..users import serialize_users, get_default_user
 
 logger = logging.getLogger("handler.channels.admin")
+
+import json as _json
+
+_DEFAULT_MODELS: dict[str, list[str]] = {
+    "openai": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.4-pro", "gpt-5.4-nano"],
+    "openai-manual": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.4-pro"],
+    "claude": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+    "anthropic": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+}
+
+
+def _load_models() -> dict[str, list[str]]:
+    if MODELS_CONFIG_PATH.exists():
+        try:
+            data = _json.loads(MODELS_CONFIG_PATH.read_text())
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return _DEFAULT_MODELS
 
 
 class _WriteBody(BaseModel):
@@ -90,7 +110,7 @@ def create_admin_router(
     @router.get("/agent")
     async def agent_config():
         if not agent_config_loader:
-            return {"backend": "openai", "model": "gpt-5.4-2026-03-05"}
+            return {"backend": "openai", "model": "gpt-5.4-mini"}
         return agent_config_loader()
 
     @router.put("/agent")
@@ -110,6 +130,13 @@ def create_admin_router(
         agent_swapper(body.backend, body.model.strip())
         logger.info(f"agent config updated: backend={body.backend}, model={body.model}")
         return {"ok": True, "backend": body.backend, "model": body.model}
+
+    # --- Model list ---
+
+    @router.get("/models")
+    async def get_models():
+        """Return per-backend model lists from models.json (falls back to built-in defaults)."""
+        return _load_models()
 
     # --- Upload ---
 

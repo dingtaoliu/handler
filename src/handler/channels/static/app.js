@@ -655,20 +655,66 @@ const configListEl = document.getElementById('config-file-list');
 const configFilenameLabel = document.getElementById('config-filename-label');
 const configContentEl = document.getElementById('config-content');
 
-const _defaultModels = {
-    'openai': 'gpt-5.4-2026-03-05',
-    'openai-manual': 'gpt-5.4-2026-03-05',
-    'claude': 'claude-opus-4-6',
-    'anthropic': 'claude-opus-4-6',
-};
+let _modelsByBackend = {};
+
+async function _loadModelList() {
+    try {
+        const res = await fetch('/api/models');
+        _modelsByBackend = await res.json();
+    } catch(e) {
+        _modelsByBackend = {};
+    }
+}
+
+function _populateModelDropdown(backend, selectedModel) {
+    const select = document.getElementById('agent-model');
+    const custom = document.getElementById('agent-model-custom');
+    const models = _modelsByBackend[backend] || [];
+
+    select.innerHTML = '';
+    for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        select.appendChild(opt);
+    }
+    const customOpt = document.createElement('option');
+    customOpt.value = '_custom';
+    customOpt.textContent = 'Custom…';
+    select.appendChild(customOpt);
+
+    if (selectedModel && models.includes(selectedModel)) {
+        select.value = selectedModel;
+        custom.style.display = 'none';
+        custom.value = '';
+    } else {
+        select.value = '_custom';
+        custom.style.display = '';
+        custom.value = selectedModel || '';
+    }
+}
+
+function onAgentModelChange() {
+    const select = document.getElementById('agent-model');
+    const custom = document.getElementById('agent-model-custom');
+    if (select.value === '_custom') {
+        custom.style.display = '';
+        custom.focus();
+    } else {
+        custom.style.display = 'none';
+        custom.value = '';
+    }
+}
 
 async function loadConfig() {
-    // Load agent config
+    // Load model list then agent config so dropdown is ready
+    await _loadModelList();
     try {
         const agentRes = await fetch('/api/agent');
         const agentData = await agentRes.json();
-        document.getElementById('agent-backend').value = agentData.backend || 'openai';
-        document.getElementById('agent-model').value = agentData.model || '';
+        const backend = agentData.backend || 'openai';
+        document.getElementById('agent-backend').value = backend;
+        _populateModelDropdown(backend, agentData.model || '');
     } catch(e) {}
 
     // Load config files
@@ -689,13 +735,16 @@ async function loadConfig() {
 
 function onAgentBackendChange() {
     const backend = document.getElementById('agent-backend').value;
-    document.getElementById('agent-model').value = _defaultModels[backend] || '';
+    const models = _modelsByBackend[backend] || [];
+    _populateModelDropdown(backend, models[0] || '');
 }
 
 async function saveAgentConfig() {
     const backend = document.getElementById('agent-backend').value;
-    const model = document.getElementById('agent-model').value.trim();
-    if (!model) { toast('Enter a model ID'); return; }
+    const select = document.getElementById('agent-model');
+    const custom = document.getElementById('agent-model-custom');
+    const model = select.value === '_custom' ? custom.value.trim() : select.value;
+    if (!model) { toast('Select or enter a model ID'); return; }
     try {
         const res = await fetch('/api/agent', {
             method: 'PUT',

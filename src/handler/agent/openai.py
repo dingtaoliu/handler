@@ -19,7 +19,7 @@ from ..tools.session import compact_messages
 from ..context import AgentContext
 from ..event_store import EventStore
 from ..types import RunContext
-from .base import BaseAgent, messages_to_openai_responses
+from .base import BaseAgent, messages_to_openai_responses, DEFAULT_MAX_TURNS, DEFAULT_COMPACT_THRESHOLD, DEFAULT_KEEP_RECENT
 
 logger = logging.getLogger("handler.agent.openai")
 
@@ -68,9 +68,9 @@ class OpenAIAgent(BaseAgent):
         run_ctx: RunContext,
         tools: list | None = None,
         model: str = "gpt-5.4-mini",
-        max_turns: int = 20,
-        compact_token_threshold: int = 100_000,
-        keep_recent: int = 10,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        compact_token_threshold: int = DEFAULT_COMPACT_THRESHOLD,
+        keep_recent: int = DEFAULT_KEEP_RECENT,
     ):
         super().__init__(
             context=context,

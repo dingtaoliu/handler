@@ -26,7 +26,7 @@ from claude_agent_sdk.types import (
 from ..context import AgentContext
 from ..event_store import EventStore
 from ..types import RunContext
-from .base import BaseAgent, extract_text_content
+from .base import BaseAgent, extract_text_content, DEFAULT_COMPACT_THRESHOLD, DEFAULT_KEEP_RECENT
 from .providers.anthropic import AnthropicProvider, COMPACTION_MODEL
 from .tools import invoke_tool, _is_function_tool, _clean_schema
 
@@ -93,8 +93,8 @@ class ClaudeAgent(BaseAgent):
         tools: list | None = None,
         model: str = "claude-opus-4-6",
         max_turns: int | None = 50,
-        compact_token_threshold: int = 100_000,
-        keep_recent: int = 10,
+        compact_token_threshold: int = DEFAULT_COMPACT_THRESHOLD,
+        keep_recent: int = DEFAULT_KEEP_RECENT,
     ):
         super().__init__(
             context=context,

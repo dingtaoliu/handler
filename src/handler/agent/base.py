@@ -18,9 +18,19 @@ from ..types import (
 
 logger = logging.getLogger("handler.agent.base")
 
+# Shared tunables — import these in subclasses rather than re-declaring literals.
+DEFAULT_MAX_TURNS: int = 20
+DEFAULT_COMPACT_THRESHOLD: int = 100_000
+DEFAULT_KEEP_RECENT: int = 10
+END_SESSION_TURNS: int = 5
+
 # Re-export so existing ``from .base import ...`` in sibling modules still works.
 __all__ = [
     "BaseAgent",
+    "DEFAULT_MAX_TURNS",
+    "DEFAULT_COMPACT_THRESHOLD",
+    "DEFAULT_KEEP_RECENT",
+    "END_SESSION_TURNS",
     "extract_text_content",
     "image_path_to_base64_url",
     "messages_to_openai",
@@ -56,9 +66,9 @@ class BaseAgent(ABC):
         run_ctx: RunContext,
         tools: list | None = None,
         model: str = "",
-        max_turns: int | None = 50,
-        compact_token_threshold: int = 100_000,
-        keep_recent: int = 10,
+        max_turns: int | None = DEFAULT_MAX_TURNS,
+        compact_token_threshold: int = DEFAULT_COMPACT_THRESHOLD,
+        keep_recent: int = DEFAULT_KEEP_RECENT,
     ):
         self.context = context
         self.store = store
@@ -152,7 +162,7 @@ class BaseAgent(ABC):
 
         total_in = total_out = 0
         try:
-            _, total_in, total_out = await self._inner_run(instructions, messages, max_turns=5)
+            _, total_in, total_out = await self._inner_run(instructions, messages, max_turns=END_SESSION_TURNS)
         except Exception as e:
             logger.error(f"[session] end_session failed: {e}", exc_info=True)
 

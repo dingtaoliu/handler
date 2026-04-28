@@ -125,7 +125,8 @@
             </select>
           </label>
           <label>Model
-            <input id="agent-model" type="text" placeholder="model id">
+            <select id="agent-model" onchange="onAgentModelChange()"></select>
+            <input id="agent-model-custom" type="text" placeholder="custom model id" style="display:none;margin-top:4px">
           </label>
           <button class="btn-small btn-primary" onclick="saveAgentConfig()">Apply</button>
         </div>

@@ -13,7 +13,7 @@ import logging
 from ..context import AgentContext
 from ..event_store import EventStore
 from ..types import RunContext
-from .base import BaseAgent
+from .base import BaseAgent, DEFAULT_MAX_TURNS, DEFAULT_COMPACT_THRESHOLD, DEFAULT_KEEP_RECENT
 from .providers.base import ModelProvider
 from .tools import invoke_tool
 
@@ -31,9 +31,9 @@ class ManualAgent(BaseAgent):
         run_ctx: RunContext,
         tools: list | None = None,
         model: str = "",
-        max_turns: int = 20,
-        compact_token_threshold: int = 100_000,
-        keep_recent: int = 10,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        compact_token_threshold: int = DEFAULT_COMPACT_THRESHOLD,
+        keep_recent: int = DEFAULT_KEEP_RECENT,
     ):
         super().__init__(
             context=context,
@@ -108,7 +108,7 @@ class ManualAgent(BaseAgent):
         messages: list[dict],
         max_turns: int | None,
     ) -> tuple[str, int, int]:
-        turns = max_turns if max_turns is not None else self.max_turns or 20
+        turns = max_turns if max_turns is not None else self.max_turns or DEFAULT_MAX_TURNS
         return await self._agentic_loop(system, messages, turns)
 
     async def compact_conversation(self, conversation_id: str) -> int:
