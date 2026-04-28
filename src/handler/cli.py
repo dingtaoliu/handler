@@ -248,8 +248,12 @@ def cmd_auth(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    import re
     from google_auth_oauthlib.flow import InstalledAppFlow
+
+    from .google_oauth import (
+        build_console_authorization_url,
+        exchange_console_authorization,
+    )
 
     if service == "gmail":
         from .tools.gmail import SCOPES, _token_path
@@ -261,12 +265,15 @@ def cmd_auth(args: argparse.Namespace) -> None:
 
     print(f"Authorizing {service}{f' for user {user}' if user else ''}...")
     if console:
-        auth_url, _ = flow.authorization_url(prompt="consent")
+        auth_url = build_console_authorization_url(flow)
         print("Open this URL in your browser and complete the Google sign-in flow:")
         print(auth_url)
-        code = _prompt("Authorization code: ")
-        creds = flow.fetch_token(code=code)
-        creds = flow.credentials
+        print(
+            "After Google redirects to localhost and the page fails to load, "
+            "copy the full URL from your browser's address bar and paste it here."
+        )
+        response = _prompt("Authorization response URL (or code): ")
+        creds = exchange_console_authorization(flow, response)
     else:
         creds = flow.run_local_server(port=0)
 

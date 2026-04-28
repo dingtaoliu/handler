@@ -5,6 +5,7 @@ src/handler/__main__.py
 src/handler/cli.py
 src/handler/environment.py
 src/handler/event_store.py
+src/handler/google_oauth.py
 src/handler/paths.py
 src/handler/types.py
 src/handler/users.py

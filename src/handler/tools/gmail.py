@@ -23,6 +23,7 @@ import sys
 
 from agents import function_tool
 
+from ..google_oauth import build_console_authorization_url
 from ..paths import DATA_DIR as _DATA_DIR, GMAIL_UPLOAD_DIR
 from ..users import get_default_user, get_user
 
@@ -179,7 +180,7 @@ def _get_credentials(
         if not creds or not creds.valid:
             flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
             if _is_headless():
-                auth_url, _ = flow.authorization_url(prompt="consent")
+                auth_url = build_console_authorization_url(flow)
                 raise OAuthRequired(auth_url)
             creds = flow.run_local_server(port=0)
         with open(token_path, "w") as f:
