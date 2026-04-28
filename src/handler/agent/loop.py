@@ -48,10 +48,6 @@ class ManualAgent(BaseAgent):
         self._provider = provider
         self._tool_defs, self._tool_lookup = provider.build_tool_defs(self.tools)
 
-    # ------------------------------------------------------------------
-    # Tool execution
-    # ------------------------------------------------------------------
-
     async def _execute_tool(self, name: str, tool_call_id: str, input_data: dict) -> str:
         tool = self._tool_lookup.get(name)
         if not tool:
@@ -61,10 +57,6 @@ class ManualAgent(BaseAgent):
         except Exception as e:
             logger.error(f"tool {name} raised: {e}", exc_info=True)
             return f"Error executing {name}: {e}"
-
-    # ------------------------------------------------------------------
-    # Agentic loop
-    # ------------------------------------------------------------------
 
     async def _agentic_loop(
         self,
@@ -108,12 +100,16 @@ class ManualAgent(BaseAgent):
 
             self._provider.append_tool_results(api_messages, response.tool_calls, results)
 
-        # Hit max turns — return whatever we have
         return final_text, total_in, total_out
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    async def _inner_run(
+        self,
+        system: str,
+        messages: list[dict],
+        max_turns: int | None,
+    ) -> tuple[str, int, int]:
+        turns = max_turns if max_turns is not None else self.max_turns or 20
+        return await self._agentic_loop(system, messages, turns)
 
     async def compact_conversation(self, conversation_id: str) -> int:
         active = self.store.get_messages(conversation_id)
@@ -121,106 +117,4 @@ class ManualAgent(BaseAgent):
             return 0
         return await self._provider.compact(
             self.store, conversation_id, active, self.keep_recent
-        )
-
-    async def run(self, conversation_id: str, messages: list[dict]) -> str:
-        self.run_ctx.conversation_id = conversation_id
-        self.run_ctx.user_id = self.store.get_conversation_user(conversation_id)
-        summary = self.store.get_latest_summary(conversation_id)
-        token_brief = self.store.get_token_cost_brief()
-        instructions = self.context.build(
-            summary=summary,
-            token_brief=token_brief,
-            user_id=self.run_ctx.user_id,
-        )
-        logger.info(
-            f"agent.run: conversation={conversation_id}, messages={len(messages)}"
-        )
-
-        final_text, total_in, total_out = await self._agentic_loop(
-            system=instructions,
-            messages=messages,
-            max_turns=self.max_turns,
-        )
-
-        self.store.record_token_usage(
-            conversation_id=conversation_id,
-            model=self.model,
-            input_tokens=total_in,
-            output_tokens=total_out,
-            trigger="chat",
-        )
-        self.store.log_event(
-            "agent_run",
-            "agent",
-            {"conversation_id": conversation_id, "input_messages": len(messages)},
-            conversation_id,
-            self.run_ctx.user_id or "",
-        )
-
-        if total_in >= self.compact_token_threshold:
-            active = self.store.get_messages(conversation_id)
-            if len(active) > self.keep_recent:
-                logger.info(
-                    f"[compact] auto-triggering: {total_in:,} input tokens "
-                    f">= threshold {self.compact_token_threshold:,}"
-                )
-                await self._provider.compact(
-                    self.store, conversation_id, active, self.keep_recent
-                )
-
-        logger.info(f"agent.run complete: {len(final_text)} chars")
-        return final_text
-
-    async def end_session(self, conversation_id: str) -> None:
-        """Give the agent a chance to persist important info before the session is wiped."""
-        messages = self.store.get_messages(conversation_id)
-        if not messages:
-            return
-
-        self.run_ctx.conversation_id = conversation_id
-        self.run_ctx.user_id = self.store.get_conversation_user(conversation_id)
-        instructions = self.context.build(
-            summary=self.store.get_latest_summary(conversation_id),
-            token_brief=self.store.get_token_cost_brief(),
-            user_id=self.run_ctx.user_id,
-        )
-        instructions += (
-            "\n\n# SESSION ENDING\n"
-            "This session is about to end. Review the conversation and write anything "
-            "important to memory files that hasn't been saved yet. Focus on:\n"
-            "- Key facts, decisions, or conclusions\n"
-            "- User preferences or corrections\n"
-            "- Anything the user would expect you to remember next time\n\n"
-            "If everything important is already in memory files, do nothing.\n"
-            "Do NOT respond to the user — this is a background housekeeping step."
-        )
-
-        logger.info(
-            f"[session] ending session {conversation_id}, "
-            f"giving agent {len(messages)} messages to review"
-        )
-
-        try:
-            _, total_in, total_out = await self._agentic_loop(
-                system=instructions,
-                messages=messages,
-                max_turns=5,
-            )
-        except Exception as e:
-            logger.error(f"[session] end_session failed: {e}", exc_info=True)
-            total_in = total_out = 0
-
-        if total_in > 0 or total_out > 0:
-            self.store.record_token_usage(
-                conversation_id=conversation_id,
-                model=self.model,
-                input_tokens=total_in,
-                output_tokens=total_out,
-                trigger="end_session",
-            )
-
-        n = self.store.compact_all(conversation_id)
-        logger.info(
-            f"[session] session {conversation_id} ended, compacted {n} messages"
         )

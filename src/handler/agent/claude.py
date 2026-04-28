@@ -11,8 +11,6 @@ import logging
 import re
 from typing import Any
 
-import anthropic
-
 from claude_agent_sdk import (
     query as sdk_query,
     ClaudeAgentOptions,
@@ -29,6 +27,7 @@ from ..context import AgentContext
 from ..event_store import EventStore
 from ..types import RunContext
 from .base import BaseAgent, extract_text_content
+from .providers.anthropic import AnthropicProvider, COMPACTION_MODEL
 from .tools import invoke_tool, _is_function_tool, _clean_schema
 
 logger = logging.getLogger("handler.agent.claude")
@@ -62,7 +61,6 @@ def _make_mcp_tool(tool_obj: Any):
         schema["required"] = [p for p in schema["required"] if p not in defaults]
 
     async def _fn(args: dict[str, Any]) -> dict[str, Any]:
-        # Fill in any missing optional params with their defaults
         full_args = {**defaults, **args}
         try:
             result = await invoke_tool(tool_obj, name, "sdk-call", full_args)
@@ -75,77 +73,6 @@ def _make_mcp_tool(tool_obj: Any):
             }
 
     return sdk_tool(name, desc, schema)(_fn)
-
-
-# ---------------------------------------------------------------------------
-# Claude-based compaction (uses raw Anthropic API — not the SDK)
-# ---------------------------------------------------------------------------
-
-
-COMPACTION_MODEL = "claude-haiku-4-5-20251001"
-
-
-async def _compact_with_claude(
-    client: anthropic.AsyncAnthropic,
-    store: EventStore,
-    conversation_id: str,
-    messages: list[dict],
-    keep_recent: int,
-) -> int:
-    """Summarize messages[:-keep_recent] using the Claude API and persist."""
-    to_compact = messages[:-keep_recent]
-    if not to_compact:
-        return 0
-
-    existing_summary = store.get_latest_summary(conversation_id)
-
-    parts = []
-    if existing_summary:
-        parts.append(f"## Prior Summary\n{existing_summary}")
-    parts.append("## Conversation")
-    for m in to_compact:
-        parts.append(f"{m['role'].capitalize()}: {extract_text_content(m['content'])}")
-    user_content = "\n\n".join(parts)
-
-    system_prompt = (
-        "You are a conversation summarizer. Produce a concise but complete summary that preserves:\n"
-        "- All facts, decisions, and conclusions reached\n"
-        "- Key numbers, dates, names, and values mentioned\n"
-        "- Any tasks or follow-ups\n"
-        "- The user's goals and context\n\n"
-        "If a prior summary is provided, incorporate it so the output covers the full conversation history.\n"
-        "Be dense and factual. This summary replaces the original messages in the context window."
-    )
-
-    logger.info(
-        f"[compact] summarizing {len(to_compact)} messages "
-        f"(prior summary: {'yes' if existing_summary else 'no'})"
-    )
-
-    response = await client.messages.create(
-        model=COMPACTION_MODEL,
-        max_tokens=16384,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_content}],
-    )
-
-    summary = next(
-        (block.text for block in response.content if block.type == "text"), ""
-    )
-    store.store_compaction(conversation_id, summary, len(to_compact))
-
-    store.record_token_usage(
-        conversation_id=conversation_id,
-        model=COMPACTION_MODEL,
-        input_tokens=response.usage.input_tokens,
-        output_tokens=response.usage.output_tokens,
-        trigger="compaction",
-    )
-
-    logger.info(
-        f"[compact] done: {len(to_compact)} messages → {len(summary)} char summary"
-    )
-    return len(to_compact)
 
 
 # ---------------------------------------------------------------------------
@@ -179,10 +106,8 @@ class ClaudeAgent(BaseAgent):
             compact_token_threshold=compact_token_threshold,
             keep_recent=keep_recent,
         )
-        # Raw Anthropic client kept for compaction (simple summarization call)
-        self._client = anthropic.AsyncAnthropic()
+        self._compactor = AnthropicProvider(COMPACTION_MODEL)
 
-        # Build MCP server from handler tools
         mcp_tools = []
         self._tool_names: list[str] = []
         for t in self.tools:
@@ -198,20 +123,12 @@ class ClaudeAgent(BaseAgent):
             f"MCP server created with {len(mcp_tools)} tools: {self._tool_names}"
         )
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     async def compact_conversation(self, conversation_id: str) -> int:
         active = self.store.get_messages(conversation_id)
         if len(active) <= self.keep_recent:
             return 0
-        return await _compact_with_claude(
-            self._client,
-            self.store,
-            conversation_id,
-            active,
-            self.keep_recent,
+        return await self._compactor.compact(
+            self.store, conversation_id, active, self.keep_recent
         )
 
     def _allowed_tools(self) -> list[str]:
@@ -221,7 +138,7 @@ class ClaudeAgent(BaseAgent):
         referenced in multi-modal messages.
         """
         tools = [f"mcp__{self.MCP_SERVER_NAME}__{n}" for n in self._tool_names]
-        tools.append("Read")  # built-in: view image files
+        tools.append("Read")
         return tools
 
     @staticmethod
@@ -237,8 +154,6 @@ class ClaudeAgent(BaseAgent):
         if not messages:
             return ""
 
-        # Collect image paths from recent user messages so we can instruct the
-        # agent to view them (the SDK only accepts text prompts).
         image_paths: list[str] = []
         for m in messages:
             content = m["content"]
@@ -250,21 +165,17 @@ class ClaudeAgent(BaseAgent):
         if len(messages) == 1:
             prompt = extract_text_content(messages[0]["content"])
         else:
-            # Previous messages become conversation context
             history_lines = []
             for m in messages[:-1]:
                 role = m["role"].capitalize()
                 history_lines.append(f"[{role}]: {extract_text_content(m['content'])}")
             history = "\n\n".join(history_lines)
-
             latest = extract_text_content(messages[-1]["content"])
-
             prompt = (
                 f"<conversation_history>\n{history}\n</conversation_history>\n\n"
                 f"{latest}"
             )
 
-        # If images are present, add an explicit instruction to view them
         if image_paths:
             paths_list = "\n".join(f"- {p}" for p in image_paths)
             prompt += (
@@ -276,7 +187,6 @@ class ClaudeAgent(BaseAgent):
         return prompt
 
     def _build_options(self, system: str, max_turns: int | None) -> ClaudeAgentOptions:
-        """Build ClaudeAgentOptions for an SDK query."""
         return ClaudeAgentOptions(
             system_prompt=system,
             model=self.model,
@@ -322,124 +232,13 @@ class ClaudeAgent(BaseAgent):
                     f"tokens: in={total_in:,}, out={total_out:,}"
                 )
 
-        # Strip SDK citation markers (e.g. citeturn0fetch0, citeturn1search2)
         final_text = re.sub(r"cite\w+", "", final_text).strip()
-
         return final_text, total_in, total_out
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    async def run(self, conversation_id: str, messages: list[dict]) -> str:
-        self.run_ctx.conversation_id = conversation_id
-        self.run_ctx.user_id = self.store.get_conversation_user(conversation_id)
-        summary = self.store.get_latest_summary(conversation_id)
-        token_brief = self.store.get_token_cost_brief()
-        instructions = self.context.build(
-            summary=summary,
-            token_brief=token_brief,
-            user_id=self.run_ctx.user_id,
-        )
-        logger.info(f"[system_prompt]\n{instructions}\n[/system_prompt]")
-        logger.info(
-            f"agent.run: conversation={conversation_id}, messages={len(messages)}"
-        )
-
-        final_text, total_in, total_out = await self._run_sdk(
-            system=instructions,
-            messages=messages,
-            max_turns=self.max_turns,
-        )
-
-        # Record token usage
-        self.store.record_token_usage(
-            conversation_id=conversation_id,
-            model=self.model,
-            input_tokens=total_in,
-            output_tokens=total_out,
-            trigger="chat",
-        )
-
-        self.store.log_event(
-            "agent_run",
-            "agent",
-            {
-                "conversation_id": conversation_id,
-                "input_messages": len(messages),
-            },
-            conversation_id,
-            self.run_ctx.user_id or "",
-        )
-
-        # Auto-compact if needed
-        if total_in >= self.compact_token_threshold:
-            active = self.store.get_messages(conversation_id)
-            if len(active) > self.keep_recent:
-                logger.info(
-                    f"[compact] auto-triggering: {total_in:,} input tokens "
-                    f">= threshold {self.compact_token_threshold:,}"
-                )
-                await _compact_with_claude(
-                    self._client,
-                    self.store,
-                    conversation_id,
-                    active,
-                    self.model,
-                    self.keep_recent,
-                )
-
-        logger.info(f"agent.run complete: {len(final_text)} chars")
-        return final_text
-
-    async def end_session(self, conversation_id: str) -> None:
-        """Give the agent a chance to persist important info before the session is wiped."""
-        messages = self.store.get_messages(conversation_id)
-        if not messages:
-            return
-
-        self.run_ctx.conversation_id = conversation_id
-        self.run_ctx.user_id = self.store.get_conversation_user(conversation_id)
-        instructions = self.context.build(
-            summary=self.store.get_latest_summary(conversation_id),
-            token_brief=self.store.get_token_cost_brief(),
-            user_id=self.run_ctx.user_id,
-        )
-        instructions += (
-            "\n\n# SESSION ENDING\n"
-            "This session is about to end. Review the conversation and write anything "
-            "important to memory files that hasn't been saved yet. Focus on:\n"
-            "- Key facts, decisions, or conclusions\n"
-            "- User preferences or corrections\n"
-            "- Anything the user would expect you to remember next time\n\n"
-            "If everything important is already in memory files, do nothing.\n"
-            "Do NOT respond to the user — this is a background housekeeping step."
-        )
-
-        logger.info(
-            f"[session] ending session {conversation_id}, "
-            f"giving agent {len(messages)} messages to review"
-        )
-
-        total_in = total_out = 0
-        try:
-            _, total_in, total_out = await self._run_sdk(
-                system=instructions,
-                messages=messages,
-            )
-        except Exception as e:
-            logger.error(f"[session] end_session failed: {e}", exc_info=True)
-
-        if total_in > 0 or total_out > 0:
-            self.store.record_token_usage(
-                conversation_id=conversation_id,
-                model=self.model,
-                input_tokens=total_in,
-                output_tokens=total_out,
-                trigger="end_session",
-            )
-
-        n = self.store.compact_all(conversation_id)
-        logger.info(
-            f"[session] session {conversation_id} ended, compacted {n} messages"
-        )
+    async def _inner_run(
+        self,
+        system: str,
+        messages: list[dict],
+        max_turns: int | None,
+    ) -> tuple[str, int, int]:
+        return await self._run_sdk(system, messages, max_turns)

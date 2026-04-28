@@ -67,7 +67,7 @@ class OpenAIAgent(BaseAgent):
         store: EventStore,
         run_ctx: RunContext,
         tools: list | None = None,
-        model: str = "gpt-5.4-2026-03-05",
+        model: str = "gpt-5.4-mini",
         max_turns: int = 20,
         compact_token_threshold: int = 100_000,
         keep_recent: int = 10,
@@ -84,6 +84,31 @@ class OpenAIAgent(BaseAgent):
         )
         self._hooks = LoggingHooks()
 
+    async def _inner_run(
+        self,
+        system: str,
+        messages: list[dict],
+        max_turns: int | None,
+    ) -> tuple[str, int, int]:
+        agent = OAIAgent(
+            name="handler",
+            instructions=system,
+            tools=self.tools,
+            model=self.model,
+        )
+        self._hooks.reset()
+        input_items = cast(
+            list[TResponseInputItem],
+            messages_to_openai_responses(messages),
+        )
+        result = await Runner.run(
+            agent,
+            input=input_items,
+            max_turns=max_turns,
+            hooks=self._hooks,
+        )
+        return result.final_output, self._hooks._prev_input, self._hooks._prev_output
+
     async def compact_conversation(self, conversation_id: str) -> int:
         active = self.store.get_messages(conversation_id)
         if len(active) <= self.keep_recent:
@@ -94,141 +119,3 @@ class OpenAIAgent(BaseAgent):
             active,
             self.keep_recent,
         )
-
-    async def end_session(self, conversation_id: str) -> None:
-        """Give the agent a chance to persist important info before the session is wiped."""
-        messages = self.store.get_messages(conversation_id)
-        if not messages:
-            return
-
-        self.run_ctx.conversation_id = conversation_id
-        self.run_ctx.user_id = self.store.get_conversation_user(conversation_id)
-        instructions = self.context.build(
-            summary=self.store.get_latest_summary(conversation_id),
-            token_brief=self.store.get_token_cost_brief(),
-            user_id=self.run_ctx.user_id,
-        )
-        instructions += (
-            "\n\n# SESSION ENDING\n"
-            "This session is about to end. Review the conversation and write anything "
-            "important to memory files that hasn't been saved yet. Focus on:\n"
-            "- Key facts, decisions, or conclusions\n"
-            "- User preferences or corrections\n"
-            "- Anything the user would expect you to remember next time\n\n"
-            "If everything important is already in memory files, do nothing.\n"
-            "Do NOT respond to the user — this is a background housekeeping step."
-        )
-
-        agent = OAIAgent(
-            name="handler",
-            instructions=instructions,
-            tools=self.tools,
-            model=self.model,
-        )
-
-        logger.info(
-            f"[session] ending session {conversation_id}, "
-            f"giving agent {len(messages)} messages to review"
-        )
-        self._hooks.reset()
-        input_items = cast(
-            list[TResponseInputItem],
-            messages_to_openai_responses(messages),
-        )
-        try:
-            await Runner.run(
-                agent,
-                input=input_items,
-                max_turns=5,
-                hooks=self._hooks,
-            )
-        except Exception as e:
-            logger.error(f"[session] end_session failed: {e}", exc_info=True)
-
-        # Record end_session token usage
-        if self._hooks._prev_input > 0 or self._hooks._prev_output > 0:
-            self.store.record_token_usage(
-                conversation_id=conversation_id,
-                model=self.model,
-                input_tokens=self._hooks._prev_input,
-                output_tokens=self._hooks._prev_output,
-                trigger="end_session",
-            )
-
-        # Compact everything
-        n = self.store.compact_all(conversation_id)
-        logger.info(
-            f"[session] session {conversation_id} ended, compacted {n} messages"
-        )
-
-    async def run(self, conversation_id: str, messages: list[dict]) -> str:
-        self.run_ctx.conversation_id = conversation_id
-        self.run_ctx.user_id = self.store.get_conversation_user(conversation_id)
-        summary = self.store.get_latest_summary(conversation_id)
-        token_brief = self.store.get_token_cost_brief()
-        instructions = self.context.build(
-            summary=summary,
-            token_brief=token_brief,
-            user_id=self.run_ctx.user_id,
-        )
-        logger.info(
-            f"agent.run: conversation={conversation_id}, messages={len(messages)}"
-        )
-
-        agent = OAIAgent(
-            name="handler",
-            instructions=instructions,
-            tools=self.tools,
-            model=self.model,
-        )
-
-        self._hooks.reset()
-        input_items = cast(
-            list[TResponseInputItem],
-            messages_to_openai_responses(messages),
-        )
-        try:
-            result = await Runner.run(
-                agent,
-                input=input_items,
-                max_turns=self.max_turns,
-                hooks=self._hooks,
-            )
-        except Exception as e:
-            logger.error(f"agent.run failed: {e}", exc_info=True)
-            raise
-
-        self.store.log_event(
-            "agent_run",
-            "agent",
-            {
-                "conversation_id": conversation_id,
-                "input_messages": len(messages),
-            },
-        )
-
-        # Record token usage
-        self.store.record_token_usage(
-            conversation_id=conversation_id,
-            model=self.model,
-            input_tokens=self._hooks._prev_input,
-            output_tokens=self._hooks._prev_output,
-            trigger="chat",
-        )
-
-        if self._hooks._prev_input >= self.compact_token_threshold:
-            active = self.store.get_messages(conversation_id)
-            if len(active) > self.keep_recent:
-                logger.info(
-                    f"[compact] auto-triggering: {self._hooks._prev_input:,} input tokens "
-                    f">= threshold {self.compact_token_threshold:,}"
-                )
-                await compact_messages(
-                    self.store,
-                    conversation_id,
-                    active,
-                    self.keep_recent,
-                )
-
-        logger.info(f"agent.run complete: {len(result.final_output)} chars")
-        return result.final_output

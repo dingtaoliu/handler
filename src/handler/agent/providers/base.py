@@ -6,8 +6,46 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
+from ...types import extract_text_content
+
 if TYPE_CHECKING:
     from ...event_store import EventStore
+
+
+COMPACTION_SYSTEM = (
+    "You are a conversation summarizer. Produce a concise but complete summary that preserves:\n"
+    "- All facts, decisions, and conclusions reached\n"
+    "- Key numbers, dates, names, and values mentioned\n"
+    "- Any tasks or follow-ups\n"
+    "- The user's goals and context\n\n"
+    "If a prior summary is provided, incorporate it so the output covers the full conversation history.\n"
+    "Be dense and factual. This summary replaces the original messages in the context window."
+)
+
+
+def build_compaction_prompt(
+    store: "EventStore",
+    conversation_id: str,
+    messages: list[dict],
+    keep_recent: int,
+) -> tuple[list[dict], str]:
+    """Slice messages and build the summarization prompt.
+
+    Returns (to_compact, user_content) where to_compact is the messages being
+    summarized and user_content is the formatted string to send to the LLM.
+    Returns an empty list and empty string if there is nothing to compact.
+    """
+    to_compact = messages[:-keep_recent]
+    if not to_compact:
+        return [], ""
+    existing_summary = store.get_latest_summary(conversation_id)
+    parts: list[str] = []
+    if existing_summary:
+        parts.append(f"## Prior Summary\n{existing_summary}")
+    parts.append("## Conversation")
+    for m in to_compact:
+        parts.append(f"{m['role'].capitalize()}: {extract_text_content(m['content'])}")
+    return to_compact, "\n\n".join(parts)
 
 
 @dataclass

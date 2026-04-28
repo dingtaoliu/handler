@@ -7,9 +7,9 @@ from typing import Any, TYPE_CHECKING
 
 import anthropic
 
-from ...types import extract_text_content, messages_to_anthropic
+from ...types import messages_to_anthropic
 from ..tools import build_tool_defs_for_claude
-from .base import ModelProvider, ToolCall, LLMResponse
+from .base import ModelProvider, ToolCall, LLMResponse, COMPACTION_SYSTEM, build_compaction_prompt
 
 if TYPE_CHECKING:
     from ...event_store import EventStore
@@ -17,16 +17,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("handler.agent.providers.anthropic")
 
 COMPACTION_MODEL = "claude-haiku-4-5-20251001"
-
-_COMPACTION_SYSTEM = (
-    "You are a conversation summarizer. Produce a concise but complete summary that preserves:\n"
-    "- All facts, decisions, and conclusions reached\n"
-    "- Key numbers, dates, names, and values mentioned\n"
-    "- Any tasks or follow-ups\n"
-    "- The user's goals and context\n\n"
-    "If a prior summary is provided, incorporate it so the output covers the full conversation history.\n"
-    "Be dense and factual. This summary replaces the original messages in the context window."
-)
 
 
 class AnthropicProvider(ModelProvider):
@@ -113,28 +103,18 @@ class AnthropicProvider(ModelProvider):
         messages: list[dict],
         keep_recent: int,
     ) -> int:
-        to_compact = messages[:-keep_recent]
+        to_compact, user_content = build_compaction_prompt(
+            store, conversation_id, messages, keep_recent
+        )
         if not to_compact:
             return 0
 
-        existing_summary = store.get_latest_summary(conversation_id)
-        parts = []
-        if existing_summary:
-            parts.append(f"## Prior Summary\n{existing_summary}")
-        parts.append("## Conversation")
-        for m in to_compact:
-            parts.append(f"{m['role'].capitalize()}: {extract_text_content(m['content'])}")
-        user_content = "\n\n".join(parts)
-
-        logger.info(
-            f"[compact] summarizing {len(to_compact)} messages "
-            f"(prior summary: {'yes' if existing_summary else 'no'})"
-        )
+        logger.info(f"[compact] summarizing {len(to_compact)} messages")
 
         response = await self._client.messages.create(
             model=COMPACTION_MODEL,
             max_tokens=16384,
-            system=_COMPACTION_SYSTEM,
+            system=COMPACTION_SYSTEM,
             messages=[{"role": "user", "content": user_content}],
         )
         summary = next(
@@ -150,7 +130,5 @@ class AnthropicProvider(ModelProvider):
             trigger="compaction",
         )
 
-        logger.info(
-            f"[compact] done: {len(to_compact)} messages → {len(summary)} char summary"
-        )
+        logger.info(f"[compact] done: {len(to_compact)} messages → {len(summary)} char summary")
         return len(to_compact)
