@@ -368,9 +368,12 @@ def cmd_kb_index(args: argparse.Namespace) -> None:
     from .kb.indexer import GmailIndexer
 
     user.base_dir.mkdir(parents=True, exist_ok=True)
-    # desktop.json is instance-level (shared); token is per-user
+    # desktop.json is instance-level (shared)
     creds_path = str(_paths.DATA_DIR / "credentials" / "desktop.json")
-    token_path = str(user.credentials_dir / "gmail_token.json")
+    # token: prefer per-user gmail_token.json, fall back to instance-level token.json
+    from .tools.gmail import _token_path as _gmail_token_path
+    _per_user_token = user.credentials_dir / "gmail_token.json"
+    token_path = str(_per_user_token) if _per_user_token.exists() else _gmail_token_path()
     db_path = str(user.emails_db_path)
 
     progress_bar = None
