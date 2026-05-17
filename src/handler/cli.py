@@ -352,6 +352,7 @@ def cmd_logs(args: argparse.Namespace) -> None:
 
 def cmd_kb_index(args: argparse.Namespace) -> None:
     """Index Gmail messages for the given year (and optional month) into the user's emails.db."""
+    _ensure_instance_selected(args)
     from dotenv import load_dotenv
     load_dotenv(_paths.DATA_DIR / ".env")
     load_dotenv()
@@ -367,8 +368,9 @@ def cmd_kb_index(args: argparse.Namespace) -> None:
     from .kb.indexer import GmailIndexer
 
     user.base_dir.mkdir(parents=True, exist_ok=True)
-    creds_path = str(user.credentials_dir / "desktop.json")
-    token_path = str(user.credentials_dir / "token.json")
+    # desktop.json is instance-level (shared); token is per-user
+    creds_path = str(_paths.DATA_DIR / "credentials" / "desktop.json")
+    token_path = str(user.credentials_dir / "gmail_token.json")
     db_path = str(user.emails_db_path)
 
     progress_bar = None
@@ -405,6 +407,7 @@ def cmd_kb_index(args: argparse.Namespace) -> None:
 
 def cmd_kb_build(args: argparse.Namespace) -> None:
     """Run the KB pipeline: filter emails then extract life facts to the user's knowledge/ dir."""
+    _ensure_instance_selected(args)
     from dotenv import load_dotenv
     load_dotenv(_paths.DATA_DIR / ".env")
     load_dotenv()
@@ -620,6 +623,7 @@ def cli() -> None:
         elif args.kb_command == "build":
             cmd_kb_build(args)
         elif args.kb_command == "export":
+            _ensure_instance_selected(args)
             from .kb.pipeline import KnowledgeBase
             from .users import get_user
             user = get_user(args.user)
