@@ -350,6 +350,107 @@ def cmd_logs(args: argparse.Namespace) -> None:
         print(f"Error reading logs: {e}")
 
 
+def cmd_kb_index(args: argparse.Namespace) -> None:
+    """Index Gmail messages for the given year (and optional month) into the user's emails.db."""
+    from dotenv import load_dotenv
+    load_dotenv(_paths.DATA_DIR / ".env")
+    load_dotenv()
+
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn, TextColumn
+    from .users import get_user
+
+    console = Console()
+    user = get_user(args.user)
+    console.print(f"\n[bold cyan]Gmail Indexer[/bold cyan] — {user.display_name} — {args.year}" + (f"-{args.month:02d}" if args.month else ""))
+
+    from .kb.indexer import GmailIndexer
+
+    user.base_dir.mkdir(parents=True, exist_ok=True)
+    creds_path = str(user.credentials_dir / "desktop.json")
+    token_path = str(user.credentials_dir / "token.json")
+    db_path = str(user.emails_db_path)
+
+    progress_bar = None
+    task_id = None
+
+    def on_progress(current, total, data):
+        nonlocal progress_bar, task_id
+        if progress_bar is None:
+            return
+        progress_bar.update(task_id, completed=current, total=total)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        progress_bar = progress
+        task_id = progress.add_task("Indexing", total=None)
+
+        with GmailIndexer(credentials_path=creds_path, token_path=token_path, db_path=db_path) as indexer:
+            stats = indexer.index_messages(
+                year=args.year,
+                month=args.month,
+                max_emails=args.limit,
+                overwrite=args.overwrite,
+                progress_callback=on_progress,
+            )
+
+    console.print(f"\n[green]Done[/green] — downloaded: {stats['downloaded']}, skipped: {stats['skipped']}, errors: {stats['errors']}")
+
+
+def cmd_kb_build(args: argparse.Namespace) -> None:
+    """Run the KB pipeline: filter emails then extract life facts to the user's knowledge/ dir."""
+    from dotenv import load_dotenv
+    load_dotenv(_paths.DATA_DIR / ".env")
+    load_dotenv()
+
+    from rich.console import Console
+    from .users import get_user
+
+    console = Console()
+    user = get_user(args.user)
+    console.print(f"\n[bold cyan]KB Pipeline[/bold cyan] — {user.display_name} — filtering and extracting life facts...")
+
+    from .kb.pipeline import run_pipeline
+
+    counts = {"filter_skip": 0, "extracted": 0, "errors": 0, "done": 0}
+
+    def on_progress(event):
+        counts["done"] += 1
+        phase = event.get("phase", "")
+        if phase == "extracted":
+            counts["extracted"] += 1
+        elif phase == "error":
+            counts["errors"] += 1
+        else:
+            counts["filter_skip"] += 1
+
+    stats = run_pipeline(
+        user_id=user.id,
+        limit=args.limit,
+        refilter=args.refilter,
+        reextract=args.reextract,
+        progress_callback=on_progress,
+    )
+
+    kb = stats.get("kb_stats", {})
+    console.print(f"\n[green]Done[/green]")
+    console.print(f"  Emails processed : {stats['total']}")
+    console.print(f"  Filter API calls : {stats['filter_api_calls']}")
+    console.print(f"  Extract API calls: {stats['extract_api_calls']}")
+    console.print(f"  Notes extracted  : {stats['extracted']}")
+    console.print(f"  Errors           : {stats['errors']}")
+    console.print(f"\nKnowledge base written to: [cyan]{stats['output_dir']}[/cyan]")
+    if kb.get("by_category"):
+        for cat, count in sorted(kb["by_category"].items()):
+            console.print(f"  {cat:<15} {count} entries")
+
+
 def cmd_instance_create(args: argparse.Namespace) -> None:
     instance_id = args.instance_id
     resolved_dir = resolve_instance_dir(instance_id)
@@ -451,6 +552,25 @@ def cli() -> None:
         help="Authorize for a specific shared-instance user (for example: danny or zhijian)",
     )
 
+    kb_parser = sub.add_parser("kb", help="Gmail knowledge base tools")
+    kb_sub = kb_parser.add_subparsers(dest="kb_command")
+
+    kb_index = kb_sub.add_parser("index", help="Index Gmail messages into emails.db")
+    kb_index.add_argument("--user", default="danny", help="User to index for (default: danny)")
+    kb_index.add_argument("--year", type=int, required=True, help="Year to index")
+    kb_index.add_argument("--month", type=int, choices=range(1, 13), help="Month (1-12)")
+    kb_index.add_argument("--limit", type=int, help="Max emails (for testing)")
+    kb_index.add_argument("--overwrite", action="store_true", help="Re-download existing")
+
+    kb_build = kb_sub.add_parser("build", help="Run KB pipeline: filter + extract facts")
+    kb_build.add_argument("--user", default="danny", help="User to build KB for (default: danny)")
+    kb_build.add_argument("--limit", type=int, help="Max emails to process (for testing)")
+    kb_build.add_argument("--refilter", action="store_true", help="Re-run filter on all emails")
+    kb_build.add_argument("--reextract", action="store_true", help="Re-run extraction on filtered emails")
+
+    kb_export = kb_sub.add_parser("export", help="Re-export markdown files from existing notes")
+    kb_export.add_argument("--user", default="danny", help="User to export for (default: danny)")
+
     instance_parser = sub.add_parser("instance", help="Manage Handler instances")
     instance_sub = instance_parser.add_subparsers(dest="instance_command")
 
@@ -494,6 +614,21 @@ def cli() -> None:
         cmd_logs(args)
     elif args.command == "auth":
         cmd_auth(args)
+    elif args.command == "kb":
+        if args.kb_command == "index":
+            cmd_kb_index(args)
+        elif args.kb_command == "build":
+            cmd_kb_build(args)
+        elif args.kb_command == "export":
+            from .kb.pipeline import KnowledgeBase
+            from .users import get_user
+            user = get_user(args.user)
+            kb = KnowledgeBase(str(user.emails_db_path))
+            out = kb.export_markdown(user.knowledge_dir)
+            kb.close()
+            print(f"Exported to {out}")
+        else:
+            kb_parser.print_help()
     elif args.command == "instance":
         if args.instance_command == "create":
             cmd_instance_create(args)

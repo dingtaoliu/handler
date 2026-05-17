@@ -61,6 +61,14 @@ class InstanceUser:
         return self.base_dir / "credentials"
 
     @property
+    def emails_db_path(self) -> Path:
+        return self.base_dir / "emails.db"
+
+    @property
+    def knowledge_dir(self) -> Path:
+        return self.base_dir / "knowledge"
+
+    @property
     def profile_path(self) -> Path:
         return self.base_dir / "profile.md"
 
