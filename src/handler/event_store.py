@@ -385,30 +385,30 @@ class EventStore:
             ).fetchall()
             return [r["conversation_id"] for r in rows]
 
-    def list_web_conversations(self) -> list[dict]:
-        """Return web conversations with metadata, newest first."""
+    def list_web_conversations(self, user_id: str | None = None) -> list[dict]:
+        """Return web conversations with metadata, newest first.
+
+        If user_id is given, only conversations owned by that user are returned.
+        """
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    c.id,
-                    c.user_id,
-                    c.created_at,
-                    COUNT(m.id) AS message_count,
-                    MAX(m.ts) AS last_ts,
-                    (SELECT content FROM messages
-                     WHERE conversation_id = c.id
-                     ORDER BY ts DESC LIMIT 1) AS last_content,
-                    (SELECT role FROM messages
-                     WHERE conversation_id = c.id
-                     ORDER BY ts DESC LIMIT 1) AS last_role
-                FROM conversations c
-                LEFT JOIN messages m ON m.conversation_id = c.id
-                WHERE c.channel = 'web' OR c.id = 'web' OR c.id LIKE 'web-%'
-                GROUP BY c.id
-                ORDER BY last_ts DESC NULLS LAST
-                """
-            ).fetchall()
+            base = (
+                "SELECT c.id, c.user_id, c.created_at,"
+                " COUNT(m.id) AS message_count, MAX(m.ts) AS last_ts,"
+                " (SELECT content FROM messages WHERE conversation_id = c.id"
+                "  ORDER BY ts DESC LIMIT 1) AS last_content,"
+                " (SELECT role FROM messages WHERE conversation_id = c.id"
+                "  ORDER BY ts DESC LIMIT 1) AS last_role"
+                " FROM conversations c"
+                " LEFT JOIN messages m ON m.conversation_id = c.id"
+                " WHERE (c.channel = 'web' OR c.id = 'web' OR c.id LIKE 'web-%')"
+            )
+            params: list = []
+            if user_id:
+                canonical = canonicalize_user_id(user_id)
+                base += " AND c.user_id = ?"
+                params.append(canonical)
+            base += " GROUP BY c.id ORDER BY last_ts DESC NULLS LAST"
+            rows = conn.execute(base, params).fetchall()
             return [
                 {
                     "id": r["id"],

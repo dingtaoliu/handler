@@ -205,7 +205,12 @@ async function loadUsers() {
         const data = await res.json();
         _users = data.users || [];
         if (!_activeUserId) {
-            _activeUserId = data.default_user_id || (_users[0] && _users[0].id) || null;
+            const saved = localStorage.getItem('activeUserId');
+            if (saved && _users.find(u => u.id === saved)) {
+                _activeUserId = saved;
+            } else {
+                _activeUserId = data.default_user_id || (_users[0] && _users[0].id) || null;
+            }
         }
         renderUserSelect();
     } catch (e) {
@@ -242,6 +247,13 @@ function getUserLabel(userId) {
 
 function onUserSelect(userId) {
     _activeUserId = userId || null;
+    localStorage.setItem('activeUserId', _activeUserId || '');
+    // Reload conversation list filtered to this user, then auto-select first
+    _activeCid = null;
+    messagesEl.innerHTML = '';
+    loadConversationList().then(() => {
+        if (_convs.length > 0) selectConversation(_convs[0].id);
+    });
     if (document.getElementById('tab-memory').classList.contains('active')) {
         loadMemory();
     }
@@ -257,7 +269,9 @@ async function loadHistory() {
 
 async function loadConversationList() {
     try {
-        const res = await fetch('/api/conversations');
+        const uid = getActiveUserId();
+        const url = uid ? '/api/conversations?user_id=' + encodeURIComponent(uid) : '/api/conversations';
+        const res = await fetch(url);
         const data = await res.json();
         _convs = data.conversations || [];
         renderConvSelect();
@@ -282,7 +296,7 @@ function renderConvSelect() {
             ? new Date(c.last_ts.replace(' ', 'T') + 'Z').toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})
             : '';
         const preview = c.last_content ? c.last_content.slice(0, 50) : '(empty)';
-        opt.textContent = '[' + getUserLabel(c.user_id) + '] ' + (ts ? ts + ' — ' : '') + preview;
+        opt.textContent = (ts ? ts + ' — ' : '') + preview;
         convSelectEl.appendChild(opt);
     }
     if (_activeCid) convSelectEl.value = _activeCid;

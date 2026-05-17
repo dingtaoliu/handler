@@ -332,8 +332,8 @@ def create_admin_router(
     # --- Conversations ---
 
     @router.get("/conversations")
-    async def conversations_list():
-        return {"conversations": store.list_web_conversations()}
+    async def conversations_list(user_id: str | None = None):
+        return {"conversations": store.list_web_conversations(user_id=user_id)}
 
     @router.post("/conversations")
     async def conversations_new(body: _ConversationBody):
