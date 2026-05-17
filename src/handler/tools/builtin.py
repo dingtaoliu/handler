@@ -142,6 +142,13 @@ def shell(command: str, timeout: int = 60) -> str:
 
     Output is also persisted to a log file for later reference.
 
+    For long-running tasks (>30s), run in the background so handler stays responsive:
+        shell('nohup <command> > /path/to/logfile.log 2>&1 & echo $!')
+    This returns the PID immediately. Check progress later with:
+        shell('tail -30 /path/to/logfile.log')
+    Or check if it's still running:
+        shell('ps -p <pid>')
+
     Args:
         command: Shell command to execute.
         timeout: Max seconds to wait (default 60).
