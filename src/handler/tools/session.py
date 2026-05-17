@@ -127,6 +127,7 @@ def cron_tool(
         schedule: str = "",
         payload: str = "",
         notify_channel: str = "",
+        one_shot: bool = False,
         job_id: int = 0,
     ) -> str:
         """Manage scheduled jobs. Actions: create, list, delete, help.
@@ -138,6 +139,7 @@ def cron_tool(
             schedule:       (create) Interval: '30m', '2h', '1d', '30s'.
             payload:        (create) Prompt text or shell command.
             notify_channel: (create) Where to push results: 'web', 'telegram', or '' (none).
+            one_shot:       (create) If true, run once then auto-delete. Use for background job follow-ups.
             job_id:         (delete) ID of the job to delete.
         """
         if action == "help":
@@ -146,7 +148,7 @@ def cron_tool(
                 "Actions:\n"
                 "  create  — Schedule a recurring job.\n"
                 "            Required: name, type ('prompt'|'shell'), schedule ('30m','2h','1d'), payload.\n"
-                "            Optional: notify_channel ('web'|'telegram'|'').\n"
+                "            Optional: notify_channel ('web'|'telegram'|''), one_shot (bool).\n"
                 "  list    — List all scheduled jobs.\n"
                 "  delete  — Delete a job by ID. Required: job_id.\n"
             )
@@ -186,9 +188,11 @@ def cron_tool(
                 conversation_id=cid if type == "prompt" else "",
                 user_id=run_ctx.user_id or "",
                 notify_channel=notify_channel if type == "prompt" else "",
+                one_shot=one_shot,
             )
             notify_msg = f", notify via {notify_channel}" if notify_channel else ""
-            return f"Scheduled job #{jid} '{name}' ({type}, every {schedule}{notify_msg}). Next run: {next_run} UTC."
+            once_msg = ", runs once" if one_shot else f", every {schedule}"
+            return f"Scheduled job #{jid} '{name}' ({type}{once_msg}{notify_msg}). Next run: {next_run} UTC."
 
         if action == "delete":
             if not job_id:
