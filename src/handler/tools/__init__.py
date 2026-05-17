@@ -13,6 +13,7 @@ from .coding import search_codebase, edit_file
 from .watchdog import get_health_problems
 from .gmail import gmail_tool
 from .gdrive import gdrive_tool
+from .auth import complete_google_auth
 
 __all__ = [
     "read_file",
@@ -29,4 +30,5 @@ __all__ = [
     "edit_file",
     "gmail_tool",
     "gdrive_tool",
+    "complete_google_auth",
 ]

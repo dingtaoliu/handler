@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from ..event_store import EventStore
 from ..memory import _validate_topic
-from ..paths import UPLOAD_DIR, LOG_DIR, get_log_path, PROJECT_ROOT, PID_PATH, MODELS_CONFIG_PATH
+from ..paths import UPLOAD_DIR, LOG_DIR, get_log_path, PROJECT_ROOT, PID_PATH, MODELS_CONFIG_PATH, DATA_DIR
 from ..users import serialize_users, get_default_user
 
 logger = logging.getLogger("handler.channels.admin")
@@ -79,6 +79,11 @@ class _AgentBody(BaseModel):
 
 
 class _ConversationBody(BaseModel):
+    user_id: str | None = None
+
+
+class _AuthCompleteBody(BaseModel):
+    code_or_url: str
     user_id: str | None = None
 
 
@@ -342,6 +347,78 @@ def create_admin_router(
     @router.get("/sessions")
     async def sessions_list():
         return {"sessions": store.list_all_conversations()}
+
+    # --- Google OAuth ---
+
+    _GOOGLE_CREDS_PATH = DATA_DIR / "credentials" / "desktop.json"
+
+    @router.get("/auth/{service}/status")
+    async def auth_status(service: str, user_id: str | None = None):
+        if service not in ("gmail", "gdrive"):
+            return JSONResponse({"error": "unknown service"}, status_code=400)
+        if not _GOOGLE_CREDS_PATH.exists():
+            return {"service": service, "configured": False, "authorized": False,
+                    "reason": "desktop.json not found"}
+        if service == "gmail":
+            from ..tools.gmail import _token_path
+        else:
+            from ..tools.gdrive import _token_path
+        token_file = Path(_token_path(user_id))
+        if not token_file.exists():
+            return {"service": service, "configured": True, "authorized": False,
+                    "reason": "no token"}
+        return {"service": service, "configured": True, "authorized": True}
+
+    @router.post("/auth/{service}/start")
+    async def auth_start(service: str, user_id: str | None = None):
+        if service not in ("gmail", "gdrive"):
+            return JSONResponse({"error": "unknown service"}, status_code=400)
+        if not _GOOGLE_CREDS_PATH.exists():
+            return JSONResponse(
+                {"error": f"desktop.json not found at {_GOOGLE_CREDS_PATH}. "
+                 "Download it from Google Cloud Console → APIs & Services → Credentials."},
+                status_code=404,
+            )
+        try:
+            from google_auth_oauthlib.flow import InstalledAppFlow
+            from ..google_oauth import build_console_authorization_url, store_pending_flow
+            if service == "gmail":
+                from ..tools.gmail import SCOPES
+            else:
+                from ..tools.gdrive import SCOPES
+            flow = InstalledAppFlow.from_client_secrets_file(str(_GOOGLE_CREDS_PATH), SCOPES)
+            auth_url = build_console_authorization_url(flow)
+            store_pending_flow(service, user_id, flow)
+            return {"service": service, "auth_url": auth_url}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    @router.post("/auth/{service}/complete")
+    async def auth_complete(service: str, body: _AuthCompleteBody):
+        if service not in ("gmail", "gdrive"):
+            return JSONResponse({"error": "unknown service"}, status_code=400)
+        from ..google_oauth import pop_pending_flow, exchange_console_authorization
+        entry = pop_pending_flow(service)
+        if entry is None:
+            return JSONResponse(
+                {"error": "no pending auth flow — call /start first"},
+                status_code=400,
+            )
+        user_id, flow = entry
+        effective_user_id = body.user_id or user_id
+        try:
+            creds = exchange_console_authorization(flow, body.code_or_url)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if service == "gmail":
+            from ..tools.gmail import _token_path
+        else:
+            from ..tools.gdrive import _token_path
+        token_file = Path(_token_path(effective_user_id))
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(creds.to_json())
+        logger.info(f"google oauth complete: service={service} user={effective_user_id}")
+        return {"ok": True, "service": service}
 
     # --- Tools ---
 

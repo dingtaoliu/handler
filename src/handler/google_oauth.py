@@ -6,6 +6,19 @@ import os
 from collections.abc import Mapping
 from contextlib import contextmanager
 
+# Pending OAuth flows keyed by service name ("gmail", "gdrive").
+# Stored here (rather than in each tool module) so both the agent tool
+# complete_google_auth and the admin API endpoints can share state.
+_pending_flows: dict[str, tuple[str | None, object]] = {}
+
+
+def store_pending_flow(service: str, user_id: str | None, flow: object) -> None:
+    _pending_flows[service] = (user_id, flow)
+
+
+def pop_pending_flow(service: str) -> tuple[str | None, object] | None:
+    return _pending_flows.pop(service, None)
+
 
 def _pick_console_redirect_uri(client_config: Mapping[str, object]) -> str:
     redirect_uris = [

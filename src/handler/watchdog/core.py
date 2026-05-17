@@ -11,12 +11,15 @@ import sys
 import time
 from pathlib import Path
 
+from ..instance import instance_id_for_dir, load_instance_metadata, resolve_instance_dir
+
 logger = logging.getLogger("handler.watchdog.core")
 
 _PACKAGE_DIR = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _PACKAGE_DIR.parent.parent  # src/handler -> src -> repo root
-# Match paths.py: ~/.handler by default, overridable via HANDLER_DATA_DIR
-_DATA_DIR = Path(os.environ.get("HANDLER_DATA_DIR") or Path.home() / ".handler")
+_DATA_DIR = resolve_instance_dir()
+_INSTANCE_ID = instance_id_for_dir(_DATA_DIR)
+_INSTANCE_METADATA = load_instance_metadata(_DATA_DIR, _INSTANCE_ID)
 _DB_PATH = _DATA_DIR / "handler.db"
 _PID_PATH = _DATA_DIR / "handler.pid"
 _LOG_PATH = _DATA_DIR / "handler.log"
@@ -54,6 +57,11 @@ def _run_git(*args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def _has_git_worktree() -> bool:
+    result = _run_git("rev-parse", "--is-inside-work-tree")
+    return result.returncode == 0 and result.stdout.strip() == "true"
 
 
 def _head_commit(short: bool = False) -> str:
@@ -262,6 +270,16 @@ def _maybe_apply_release_update() -> bool:
 
     checked_at = datetime.now(timezone.utc).isoformat()
     current_version = _current_release_tag() or _head_commit(short=True) or "unknown"
+
+    if not _has_git_worktree():
+        logger.info("auto-update skipped: install is not running from a git worktree")
+        _save_auto_update_state(
+            config,
+            last_checked_at=checked_at,
+            current_version=current_version,
+            last_result="skipped: install is not a git worktree",
+        )
+        return False
 
     try:
         if _worktree_dirty():

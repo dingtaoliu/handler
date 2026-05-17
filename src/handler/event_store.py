@@ -17,7 +17,7 @@ import logging
 import sqlite3
 from pathlib import Path
 
-from .users import DEFAULT_USER_ID
+from .users import DEFAULT_USER_ID, canonicalize_user_id
 
 logger = logging.getLogger("handler.event_store")
 
@@ -127,28 +127,11 @@ class EventStore:
 
         for table in ("events", "conversations", "cron_jobs", "token_usage"):
             try:
-                conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN user_id TEXT DEFAULT ''"
-                )
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id TEXT DEFAULT ''")
             except Exception:
                 pass
 
-        conn.execute(
-            "UPDATE conversations SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
-            (DEFAULT_USER_ID,),
-        )
-        conn.execute(
-            "UPDATE events SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
-            (DEFAULT_USER_ID,),
-        )
-        conn.execute(
-            "UPDATE cron_jobs SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
-            (DEFAULT_USER_ID,),
-        )
-        conn.execute(
-            "UPDATE token_usage SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
-            (DEFAULT_USER_ID,),
-        )
+        self._canonicalize_persisted_user_ids(conn)
 
         # Migrate old event_log → events table
         try:
@@ -208,6 +191,32 @@ class EventStore:
         conn.execute("DROP TABLE event_log")
         logger.info("dropped old event_log table")
 
+    def _canonicalize_persisted_user_ids(self, conn) -> None:
+        """Normalize stored user ids to their canonical registry ids."""
+
+        key_columns = {
+            "conversations": "id",
+            "events": "id",
+            "cron_jobs": "id",
+            "token_usage": "id",
+        }
+        updated = 0
+        for table, key_column in key_columns.items():
+            rows = conn.execute(
+                f"SELECT {key_column} AS row_key, user_id FROM {table}"
+            ).fetchall()
+            for row in rows:
+                canonical_user_id = canonicalize_user_id(row["user_id"])
+                if canonical_user_id == row["user_id"]:
+                    continue
+                conn.execute(
+                    f"UPDATE {table} SET user_id = ? WHERE {key_column} = ?",
+                    (canonical_user_id, row["row_key"]),
+                )
+                updated += 1
+        if updated:
+            logger.info(f"normalized {updated} persisted user id value(s)")
+
     # ------------------------------------------------------------------
     # Events (unified audit log)
     # ------------------------------------------------------------------
@@ -243,20 +252,21 @@ class EventStore:
         channel: str = "",
         user_id: str = "",
     ):
+        canonical_user_id = canonicalize_user_id(user_id) if user_id else ""
         with self._connect() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO conversations (id, user_id, channel) VALUES (?, ?, ?)",
-                (conversation_id, user_id or DEFAULT_USER_ID, channel),
+                (conversation_id, canonical_user_id or DEFAULT_USER_ID, channel),
             )
             if channel:
                 conn.execute(
                     "UPDATE conversations SET channel = ? WHERE id = ? AND (channel = '' OR channel IS NULL)",
                     (channel, conversation_id),
                 )
-            if user_id:
+            if canonical_user_id:
                 conn.execute(
                     "UPDATE conversations SET user_id = ? WHERE id = ?",
-                    (user_id, conversation_id),
+                    (canonical_user_id, conversation_id),
                 )
 
     def get_conversation_user(self, conversation_id: str) -> str:
@@ -265,8 +275,8 @@ class EventStore:
                 "SELECT user_id FROM conversations WHERE id = ?",
                 (conversation_id,),
             ).fetchone()
-            if row and row["user_id"]:
-                return row["user_id"]
+            if row:
+                return canonicalize_user_id(row["user_id"])
             return DEFAULT_USER_ID
 
     @staticmethod
@@ -402,7 +412,7 @@ class EventStore:
             return [
                 {
                     "id": r["id"],
-                    "user_id": r["user_id"] or DEFAULT_USER_ID,
+                    "user_id": canonicalize_user_id(r["user_id"]),
                     "created_at": r["created_at"],
                     "message_count": r["message_count"] or 0,
                     "last_ts": r["last_ts"],
@@ -441,7 +451,7 @@ class EventStore:
             return [
                 {
                     "id": r["id"],
-                    "user_id": r["user_id"] or DEFAULT_USER_ID,
+                    "user_id": canonicalize_user_id(r["user_id"]),
                     "channel": r["channel"] or "",
                     "created_at": r["created_at"],
                     "message_count": r["message_count"] or 0,

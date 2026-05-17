@@ -62,6 +62,7 @@ function onTabLoad(name) {
     else if (name === 'tools') loadTools();
     else if (name === 'files') loadFiles();
     else if (name === 'sessions') loadSessions();
+    else if (name === 'google') loadGoogle();
 }
 
 // ─── Chat ─────────────────────────────────────────────────────────────────────
@@ -873,6 +874,89 @@ function _inferChannel(cid) {
 function _channelBadge(channel) {
     const cls = channel === 'web' ? 'badge-blue' : channel === 'telegram' ? 'badge-green' : 'badge-gray';
     return '<span class="badge ' + cls + '">' + esc(channel) + '</span>';
+}
+
+// ─── Google OAuth ─────────────────────────────────────────────────────────────
+const _googleAuthUrls = {};
+
+async function loadGoogle() {
+    for (const service of ['gmail', 'gdrive']) {
+        const statusEl = document.getElementById('google-' + service + '-status');
+        const authBtn = document.getElementById('google-' + service + '-auth-btn');
+        statusEl.textContent = 'Checking...';
+        try {
+            const res = await fetch('/api/auth/' + service + '/status');
+            const data = await res.json();
+            if (!data.configured) {
+                statusEl.textContent = 'Not configured — upload desktop.json to ~/.handler/credentials/';
+                statusEl.style.color = 'var(--danger)';
+                authBtn.style.display = 'none';
+            } else if (data.authorized) {
+                statusEl.textContent = 'Authorized';
+                statusEl.style.color = '#22c55e';
+                authBtn.textContent = 'Re-authorize';
+                authBtn.style.display = '';
+            } else {
+                statusEl.textContent = 'Not authorized';
+                statusEl.style.color = 'var(--muted)';
+                authBtn.textContent = 'Authorize';
+                authBtn.style.display = '';
+            }
+        } catch(e) {
+            statusEl.textContent = 'Error: ' + e.message;
+            statusEl.style.color = 'var(--danger)';
+        }
+    }
+}
+
+async function startGoogleAuth(service) {
+    const flowEl = document.getElementById('google-' + service + '-flow');
+    const urlEl = document.getElementById('google-' + service + '-url');
+    const responseEl = document.getElementById('google-' + service + '-response');
+    responseEl.value = '';
+    flowEl.style.display = 'none';
+    try {
+        const res = await fetch('/api/auth/' + service + '/start', { method: 'POST' });
+        const data = await res.json();
+        if (data.error) { toast('Error: ' + data.error); return; }
+        _googleAuthUrls[service] = data.auth_url;
+        urlEl.href = data.auth_url;
+        urlEl.textContent = data.auth_url;
+        flowEl.style.display = '';
+    } catch(e) {
+        toast('Error: ' + e.message);
+    }
+}
+
+async function completeGoogleAuth(service) {
+    const responseEl = document.getElementById('google-' + service + '-response');
+    const code = responseEl.value.trim();
+    if (!code) { toast('Paste the redirect URL or code first'); return; }
+    try {
+        const res = await fetch('/api/auth/' + service + '/complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code_or_url: code }),
+        });
+        const data = await res.json();
+        if (data.error) { toast('Error: ' + data.error); return; }
+        toast((service === 'gmail' ? 'Gmail' : 'Google Drive') + ' authorized');
+        cancelGoogleAuth(service);
+        loadGoogle();
+    } catch(e) {
+        toast('Error: ' + e.message);
+    }
+}
+
+function cancelGoogleAuth(service) {
+    document.getElementById('google-' + service + '-flow').style.display = 'none';
+    document.getElementById('google-' + service + '-response').value = '';
+}
+
+function copyGoogleUrl(service) {
+    const url = _googleAuthUrls[service];
+    if (!url) return;
+    navigator.clipboard.writeText(url).then(() => toast('URL copied'));
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

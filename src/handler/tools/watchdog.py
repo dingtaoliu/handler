@@ -13,8 +13,28 @@ import os
 import subprocess
 
 from ..paths import PID_PATH as _PID_PATH, LOG_PATH as _LOG_PATH
+from ..instance import DEFAULT_INSTANCE_ID, instance_id_for_dir
 
 logger = logging.getLogger("handler.tools.watchdog")
+_INSTANCE_ID = instance_id_for_dir(_PID_PATH.parent)
+
+
+def _launchd_label() -> str:
+    if _INSTANCE_ID == DEFAULT_INSTANCE_ID:
+        return "com.handler.cron_runner"
+    return f"com.handler.cron_runner.{_INSTANCE_ID}"
+
+
+def _systemd_timer_unit() -> str:
+    if _INSTANCE_ID == DEFAULT_INSTANCE_ID:
+        return "handler-cron.timer"
+    return f"handler-cron-{_INSTANCE_ID}.timer"
+
+
+def _windows_task_name() -> str:
+    if _INSTANCE_ID == DEFAULT_INSTANCE_ID:
+        return "HandlerCronRunner"
+    return f"HandlerCronRunner-{_INSTANCE_ID}"
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -30,7 +50,7 @@ def _check_watchdog_active(backend: str) -> str:
     """Return a short string describing whether the watchdog is actively scheduled."""
     try:
         if backend == "launchd":
-            label = "com.handler.cron_runner"
+            label = _launchd_label()
             r = subprocess.run(
                 ["launchctl", "list", label],
                 capture_output=True,
@@ -39,7 +59,7 @@ def _check_watchdog_active(backend: str) -> str:
             return "yes" if r.returncode == 0 else "no (not loaded)"
         elif backend == "systemd":
             r = subprocess.run(
-                ["systemctl", "--user", "is-active", "handler-cron.timer"],
+                ["systemctl", "--user", "is-active", _systemd_timer_unit()],
                 capture_output=True,
                 text=True,
             )
@@ -49,7 +69,7 @@ def _check_watchdog_active(backend: str) -> str:
             return "yes" if "cron_runner" in r.stdout else "no (not in crontab)"
         elif backend == "windows":
             r = subprocess.run(
-                ["schtasks", "/query", "/tn", "HandlerCronRunner"],
+                ["schtasks", "/query", "/tn", _windows_task_name()],
                 capture_output=True,
                 text=True,
             )

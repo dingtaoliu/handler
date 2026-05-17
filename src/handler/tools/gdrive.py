@@ -20,7 +20,7 @@ from pathlib import Path
 
 from agents import function_tool
 
-from ..google_oauth import build_console_authorization_url
+from ..google_oauth import build_console_authorization_url, store_pending_flow
 from ..paths import DATA_DIR as _DATA_DIR, GDRIVE_UPLOAD_DIR
 from ..users import get_default_user, get_user
 
@@ -91,10 +91,11 @@ def _oauth_required_message(auth_url: str, run_ctx=None) -> str:
     user_id, display_name = _auth_user_context(run_ctx)
     return (
         f"Google Drive authentication is required for {display_name}.\n\n"
-        f"Run this on the server:\n\n"
-        f"  handler auth gdrive --console --user {user_id}\n\n"
-        f"If you have a browser on the server, you can omit --console.\n"
-        f"Or open this URL to complete the OAuth flow:\n{auth_url}"
+        f"1. Open this URL in your browser:\n{auth_url}\n\n"
+        f"2. Complete Google sign-in. When the page fails to load after redirecting to localhost, "
+        f"copy the full URL from your browser's address bar.\n\n"
+        f"3. Call: complete_google_auth(service='gdrive', code_or_url='<paste URL or code here>')\n\n"
+        f"Alternatively, on the server: handler auth gdrive --console --user {user_id}"
     )
 
 
@@ -169,6 +170,7 @@ def _get_credentials(
             flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
             if _is_headless():
                 auth_url = build_console_authorization_url(flow)
+                store_pending_flow("gdrive", user_id, flow)
                 raise OAuthRequired(auth_url)
             creds = flow.run_local_server(port=0)
         with open(token_path, "w") as f:

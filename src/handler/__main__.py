@@ -17,6 +17,8 @@ from .environment import Environment
 from .paths import (
     DATA_DIR,
     CONFIG_DIR,
+    INSTANCE_ID,
+    INSTANCE_METADATA,
     MEMORY_DIR,
     PID_PATH,
     LOG_DIR,
@@ -39,6 +41,7 @@ from .tools import (
     edit_file,
     gmail_tool,
     gdrive_tool,
+    complete_google_auth,
 )
 from .watchdog import install_watchdog, load_scheduler_config, detect_scheduler_backends
 
@@ -130,6 +133,15 @@ logging.getLogger().addHandler(_file_handler)
 
 def main():
     _write_pid()
+    instance_metadata = INSTANCE_METADATA
+    enabled_channels = set(instance_metadata.enabled_channels)
+    logger.info(
+        "starting handler instance=%s data_dir=%s host=%s port=%s",
+        INSTANCE_ID,
+        DATA_DIR,
+        instance_metadata.host,
+        instance_metadata.port,
+    )
 
     # Auto-detect and install watchdog if not already configured
     config = load_scheduler_config()
@@ -184,10 +196,8 @@ def main():
     tools.append(memory_tool(mem, run_ctx))
 
     tools.append(gmail_tool(run_ctx))
-    print("Gmail tool loaded")
-
     tools.append(gdrive_tool(run_ctx))
-    print("Google Drive tool loaded")
+    tools.append(complete_google_auth)
 
     def _build_agent(b: str, m: str) -> BaseAgent:
         kwargs = dict(
@@ -216,20 +226,24 @@ def main():
         env.agent = next_agent
         logger.info(f"agent swapped: backend={new_backend}, model={new_model}")
 
-    env.add_channel(
-        WebChannel(
-            store,
-            memory=mem,
-            config_dir=CONFIG_DIR,
-            tools=tools,
-            agent_config_loader=_load_agent_config,
-            agent_swapper=swap_agent,
+    if "web" in enabled_channels:
+        env.add_channel(
+            WebChannel(
+                store,
+                host=instance_metadata.host,
+                port=instance_metadata.port,
+                memory=mem,
+                config_dir=CONFIG_DIR,
+                tools=tools,
+                agent_config_loader=_load_agent_config,
+                agent_swapper=swap_agent,
+            )
         )
-    )
-    env.add_channel(SchedulerChannel(store))
+    if "scheduler" in enabled_channels:
+        env.add_channel(SchedulerChannel(store))
 
     telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if telegram_token:
+    if telegram_token and "telegram" in enabled_channels:
         allowed_raw = os.environ.get("TELEGRAM_ALLOWED_USERS", "").strip()
         allowed_ids = (
             {int(uid) for uid in allowed_raw.split(",") if uid.strip()}
@@ -238,10 +252,18 @@ def main():
         )
         env.add_channel(TelegramChannel(telegram_token, allowed_user_ids=allowed_ids))
 
-    if context.is_configured:
-        print("Starting Handler at http://localhost:8000")
+    web_url = f"http://localhost:{instance_metadata.port}"
+    if "web" in enabled_channels:
+        if context.is_configured:
+            print(f"Starting Handler at {web_url}")
+        else:
+            print(f"Starting Handler (first run — onboarding) at {web_url}")
+    elif context.is_configured:
+        print("Starting Handler without the web channel")
     else:
-        print("Starting Handler (first run — onboarding) at http://localhost:8000")
+        print(
+            "Starting Handler without the web channel (first run — onboarding unavailable via UI)"
+        )
 
     asyncio.run(_run(env))
 

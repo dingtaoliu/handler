@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .core import _DATA_DIR, _PROJECT_ROOT, _LOG_PATH
+from ..instance import DATA_DIR_ENV_VAR, DEFAULT_INSTANCE_ID, instance_id_for_dir
+from .core import _DATA_DIR, _INSTANCE_ID, _PROJECT_ROOT, _LOG_PATH
 
 logger = logging.getLogger("handler.watchdog.backends")
 
 _SCHEDULER_CONFIG = _DATA_DIR / "scheduler.json"
-_LAUNCH_LABEL = "com.handler.cron_runner"
-_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_LAUNCH_LABEL}.plist"
-_SYSTEMD_SERVICE = Path.home() / ".config" / "systemd" / "user" / "handler-cron.service"
-_SYSTEMD_TIMER = Path.home() / ".config" / "systemd" / "user" / "handler-cron.timer"
 
 _DEFAULT_AUTO_UPDATE = {
     "enabled": True,
@@ -30,6 +28,50 @@ _DEFAULT_AUTO_UPDATE = {
     "latest_version": "",
     "last_result": "",
 }
+
+
+def _launch_label() -> str:
+    if _INSTANCE_ID == DEFAULT_INSTANCE_ID:
+        return "com.handler.cron_runner"
+    return f"com.handler.cron_runner.{_INSTANCE_ID}"
+
+
+def _plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{_launch_label()}.plist"
+
+
+def _systemd_unit_base() -> str:
+    return (
+        "handler-cron"
+        if _INSTANCE_ID == DEFAULT_INSTANCE_ID
+        else f"handler-cron-{_INSTANCE_ID}"
+    )
+
+
+def _systemd_service_path() -> Path:
+    return (
+        Path.home() / ".config" / "systemd" / "user" / f"{_systemd_unit_base()}.service"
+    )
+
+
+def _systemd_timer_path() -> Path:
+    return (
+        Path.home() / ".config" / "systemd" / "user" / f"{_systemd_unit_base()}.timer"
+    )
+
+
+def _windows_task_name() -> str:
+    return (
+        "HandlerCronRunner"
+        if _INSTANCE_ID == DEFAULT_INSTANCE_ID
+        else f"HandlerCronRunner-{_INSTANCE_ID}"
+    )
+
+
+def _watchdog_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env[DATA_DIR_ENV_VAR] = str(_DATA_DIR)
+    return env
 
 
 def _normalize_auto_update_config(config: dict | None) -> dict:
@@ -220,19 +262,26 @@ def detect_scheduler_backends() -> dict:
 
 
 def _install_launchd(python: str) -> None:
+    plist_path = _plist_path()
+    launch_label = _launch_label()
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{_LAUNCH_LABEL}</string>
+    <string>{launch_label}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{python}</string>
         <string>-m</string>
         <string>handler.watchdog</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>{DATA_DIR_ENV_VAR}</key>
+        <string>{_DATA_DIR}</string>
+    </dict>
     <key>WorkingDirectory</key>
     <string>{_PROJECT_ROOT}</string>
     <key>StartInterval</key>
@@ -248,22 +297,23 @@ def _install_launchd(python: str) -> None:
 </dict>
 </plist>
 """
-    _PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if _PLIST_PATH.exists() and _PLIST_PATH.read_text() == plist:
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    if plist_path.exists() and plist_path.read_text() == plist:
         return
-    _PLIST_PATH.write_text(plist)
-    subprocess.run(["launchctl", "unload", str(_PLIST_PATH)], capture_output=True)
+    plist_path.write_text(plist)
+    subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
     r = subprocess.run(
-        ["launchctl", "load", str(_PLIST_PATH)], capture_output=True, text=True
+        ["launchctl", "load", str(plist_path)], capture_output=True, text=True
     )
     if r.returncode != 0:
         raise RuntimeError(f"launchctl load failed: {(r.stderr or r.stdout).strip()}")
 
 
 def _remove_launchd() -> None:
-    if _PLIST_PATH.exists():
-        subprocess.run(["launchctl", "unload", str(_PLIST_PATH)], capture_output=True)
-        _PLIST_PATH.unlink(missing_ok=True)
+    plist_path = _plist_path()
+    if plist_path.exists():
+        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+        plist_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -272,36 +322,41 @@ def _remove_launchd() -> None:
 
 
 def _install_systemd(python: str) -> None:
-    _SYSTEMD_SERVICE.parent.mkdir(parents=True, exist_ok=True)
-    _SYSTEMD_SERVICE.write_text(
+    systemd_service = _systemd_service_path()
+    systemd_timer = _systemd_timer_path()
+    unit_base = _systemd_unit_base()
+    systemd_service.parent.mkdir(parents=True, exist_ok=True)
+    systemd_service.write_text(
         f"[Unit]\nDescription=Handler cron runner\n\n"
         f"[Service]\nType=oneshot\n"
+        f"Environment={DATA_DIR_ENV_VAR}={_DATA_DIR}\n"
         f"ExecStart={python} -m handler.watchdog\n"
         f"WorkingDirectory={_PROJECT_ROOT}\n"
         f"StandardOutput=append:{_LOG_PATH}\n"
         f"StandardError=append:{_LOG_PATH}\n"
     )
-    _SYSTEMD_TIMER.write_text(
+    systemd_timer.write_text(
         f"[Unit]\nDescription=Handler cron runner (every 60s)\nAfter=network.target\n\n"
-        f"[Timer]\nOnBootSec=60\nOnUnitActiveSec=60\nUnit=handler-cron.service\n\n"
+        f"[Timer]\nOnBootSec=60\nOnUnitActiveSec=60\nUnit={unit_base}.service\n\n"
         f"[Install]\nWantedBy=timers.target\n"
     )
     subprocess.run(
         ["systemctl", "--user", "daemon-reload"], capture_output=True, check=True
     )
     subprocess.run(
-        ["systemctl", "--user", "enable", "--now", "handler-cron.timer"],
+        ["systemctl", "--user", "enable", "--now", f"{unit_base}.timer"],
         capture_output=True,
         check=True,
     )
 
 
 def _remove_systemd() -> None:
+    unit_base = _systemd_unit_base()
     subprocess.run(
-        ["systemctl", "--user", "disable", "--now", "handler-cron.timer"],
+        ["systemctl", "--user", "disable", "--now", f"{unit_base}.timer"],
         capture_output=True,
     )
-    for p in (_SYSTEMD_SERVICE, _SYSTEMD_TIMER):
+    for p in (_systemd_service_path(), _systemd_timer_path()):
         p.unlink(missing_ok=True)
     subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
 
@@ -312,10 +367,16 @@ def _remove_systemd() -> None:
 
 
 def _install_crontab_backend(python: str) -> None:
-    entry = f"* * * * * cd '{_PROJECT_ROOT}' && '{python}' -m handler.watchdog >> '{_LOG_PATH}' 2>&1"
+    entry = (
+        f"* * * * * {DATA_DIR_ENV_VAR}='{_DATA_DIR}' cd '{_PROJECT_ROOT}' && "
+        f"'{python}' -m handler.watchdog >> '{_LOG_PATH}' 2>&1"
+    )
     r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     existing = r.stdout if r.returncode == 0 else ""
-    if "handler.watchdog" in existing or "handler.cron_runner" in existing:
+    if (
+        f"{DATA_DIR_ENV_VAR}='{_DATA_DIR}'" in existing
+        or f"{DATA_DIR_ENV_VAR}={_DATA_DIR}" in existing
+    ):
         return
     new_ct = existing.rstrip("\n") + ("\n" if existing else "") + entry + "\n"
     result = subprocess.run(
@@ -329,14 +390,10 @@ def _remove_crontab_backend() -> None:
     r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     if r.returncode != 0:
         return
-    if "handler.watchdog" not in r.stdout and "handler.cron_runner" not in r.stdout:
+    if str(_DATA_DIR) not in r.stdout:
         return
     filtered = (
-        "\n".join(
-            line
-            for line in r.stdout.splitlines()
-            if "handler.watchdog" not in line and "handler.cron_runner" not in line
-        )
+        "\n".join(line for line in r.stdout.splitlines() if str(_DATA_DIR) not in line)
         + "\n"
     )
     subprocess.run(["crontab", "-"], input=filtered, text=True, capture_output=True)
@@ -348,6 +405,7 @@ def _remove_crontab_backend() -> None:
 
 
 def _install_windows(python: str) -> None:
+    task_name = _windows_task_name()
     r = subprocess.run(
         [
             "schtasks",
@@ -357,9 +415,9 @@ def _install_windows(python: str) -> None:
             "/MO",
             "1",
             "/TN",
-            "HandlerCronRunner",
+            task_name,
             "/TR",
-            f'"{python}" -m handler.watchdog',
+            f'cmd /c "set {DATA_DIR_ENV_VAR}={_DATA_DIR}&& "{python}" -m handler.watchdog"',
             "/F",
         ],
         capture_output=True,
@@ -371,7 +429,7 @@ def _install_windows(python: str) -> None:
 
 def _remove_windows() -> None:
     subprocess.run(
-        ["schtasks", "/Delete", "/TN", "HandlerCronRunner", "/F"], capture_output=True
+        ["schtasks", "/Delete", "/TN", _windows_task_name(), "/F"], capture_output=True
     )
 
 

@@ -67,9 +67,14 @@ ssh dannyliu@macbook-server '
   /Users/dannyliu/.local/share/uv/tools/handler/bin/handler stop &&
   cd ~/repos/handler &&
   git pull &&
-  ~/.local/bin/uv tool install . --force &&
+  ~/.local/bin/uv tool install --reinstall --editable ~/repos/handler &&
   /Users/dannyliu/.local/share/uv/tools/handler/bin/handler start
 '
 ```
+
+Notes:
+
+- Use `--reinstall` when updating the server tool. `--force` only refreshes metadata and can leave stale code in the existing tool environment.
+- Use `--editable` so the installed tool imports directly from `~/repos/handler/src`. That keeps the running code aligned with the repo checkout and preserves watchdog git-based update checks.
 
 Verify: `curl http://macbook-server:8000/api/chat -X POST -H "Content-Type: application/json" -d '{"message":"hi","conversation_id":null}'`

@@ -23,6 +23,7 @@
       <li class="nav-item" data-tab="config" onclick="switchTab('config')">Config</li>
       <li class="nav-item" data-tab="tools" onclick="switchTab('tools')">Tools</li>
       <li class="nav-item" data-tab="files" onclick="switchTab('files')">Files</li>
+      <li class="nav-item" data-tab="google" onclick="switchTab('google')">Google</li>
     </ul>
     <div id="sidebar-bottom">
       <button id="theme-toggle" onclick="toggleTheme()">Light</button>
@@ -150,6 +151,63 @@
     <div id="tab-tools" class="tab-pane scroll-pane">
       <div class="pane-title">Available Tools</div>
       <div id="tools-content"></div>
+    </div>
+
+    <!-- Google -->
+    <div id="tab-google" class="tab-pane scroll-pane">
+      <div class="pane-title">Google Connections</div>
+      <div id="google-content">
+        <div class="google-service-card" id="google-gmail-card">
+          <div class="google-service-header">
+            <div>
+              <div class="google-service-name">Gmail</div>
+              <div class="google-service-status" id="google-gmail-status">Checking...</div>
+            </div>
+            <button class="btn-small btn-primary" id="google-gmail-auth-btn" onclick="startGoogleAuth('gmail')" style="display:none">Authorize</button>
+          </div>
+          <div class="google-auth-flow" id="google-gmail-flow" style="display:none">
+            <p class="google-auth-instruction">
+              Open the URL below in your browser and complete Google sign-in.
+              After Google redirects to localhost (the page will fail to load), copy the full URL
+              from your browser's address bar and paste it in the field below.
+            </p>
+            <div class="google-auth-url-row">
+              <a id="google-gmail-url" href="#" target="_blank" class="google-auth-link">(loading...)</a>
+              <button class="btn-small" onclick="copyGoogleUrl('gmail')">Copy</button>
+            </div>
+            <textarea id="google-gmail-response" class="google-auth-textarea" placeholder="Paste the redirect URL (http://localhost:...?code=...) or just the code here"></textarea>
+            <div class="btn-row" style="margin-top:8px">
+              <button class="btn-small btn-primary" onclick="completeGoogleAuth('gmail')">Complete Authorization</button>
+              <button class="btn-small" onclick="cancelGoogleAuth('gmail')">Cancel</button>
+            </div>
+          </div>
+        </div>
+        <div class="google-service-card" id="google-gdrive-card">
+          <div class="google-service-header">
+            <div>
+              <div class="google-service-name">Google Drive</div>
+              <div class="google-service-status" id="google-gdrive-status">Checking...</div>
+            </div>
+            <button class="btn-small btn-primary" id="google-gdrive-auth-btn" onclick="startGoogleAuth('gdrive')" style="display:none">Authorize</button>
+          </div>
+          <div class="google-auth-flow" id="google-gdrive-flow" style="display:none">
+            <p class="google-auth-instruction">
+              Open the URL below in your browser and complete Google sign-in.
+              After Google redirects to localhost (the page will fail to load), copy the full URL
+              from your browser's address bar and paste it in the field below.
+            </p>
+            <div class="google-auth-url-row">
+              <a id="google-gdrive-url" href="#" target="_blank" class="google-auth-link">(loading...)</a>
+              <button class="btn-small" onclick="copyGoogleUrl('gdrive')">Copy</button>
+            </div>
+            <textarea id="google-gdrive-response" class="google-auth-textarea" placeholder="Paste the redirect URL (http://localhost:...?code=...) or just the code here"></textarea>
+            <div class="btn-row" style="margin-top:8px">
+              <button class="btn-small btn-primary" onclick="completeGoogleAuth('gdrive')">Complete Authorization</button>
+              <button class="btn-small" onclick="cancelGoogleAuth('gdrive')">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Files -->

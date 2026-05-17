@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -9,18 +10,19 @@ import time
 
 from pathlib import Path
 
-from .paths import (
-    DATA_DIR as _DATA_DIR,
-    PID_PATH as _PID_PATH,
-    LOG_PATH as _LOG_PATH,
-    ensure_scripts_dir_on_path,
-    with_scripts_dir_on_path,
+from . import paths as _paths
+from .instance import (
+    DEFAULT_INSTANCE_ID,
+    discover_instances,
+    ensure_instance_layout,
+    instance_meta_path,
+    is_instance_dir,
+    resolve_instance_dir,
 )
 
 _RUN_DIR = Path.home()
-_ENV_PATH = _DATA_DIR / ".env"
 
-ensure_scripts_dir_on_path()
+_paths.ensure_scripts_dir_on_path()
 
 
 _PROVIDERS = {
@@ -41,8 +43,9 @@ def _init() -> None:
     """Prompt for required config on first run and save to ~/.handler/.env."""
     from dotenv import load_dotenv, set_key
 
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    load_dotenv(_ENV_PATH)
+    env_path = _paths.DATA_DIR / ".env"
+    _paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    load_dotenv(env_path)
     load_dotenv()
 
     # Already configured — nothing to do
@@ -69,12 +72,12 @@ def _init() -> None:
         print("No key provided. Exiting.")
         sys.exit(1)
 
-    _ENV_PATH.touch(mode=0o600)
-    set_key(str(_ENV_PATH), env_var, key)
-    set_key(str(_ENV_PATH), "HANDLER_AGENT", backend)
+    env_path.touch(mode=0o600)
+    set_key(str(env_path), env_var, key)
+    set_key(str(env_path), "HANDLER_AGENT", backend)
     os.environ[env_var] = key
     os.environ["HANDLER_AGENT"] = backend
-    print(f"\nSaved to {_ENV_PATH}")
+    print(f"\nSaved to {env_path}")
 
     # Optional: Google credentials for Gmail / Drive
     print()
@@ -88,7 +91,7 @@ def _init() -> None:
         if not src.exists():
             print(f"File not found: {src} — skipping Google setup.")
         else:
-            dest = _DATA_DIR / "credentials" / "desktop.json"
+            dest = _paths.DATA_DIR / "credentials" / "desktop.json"
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(src.read_bytes())
             dest.chmod(0o600)
@@ -100,29 +103,55 @@ def _init() -> None:
 
 def _read_pid() -> tuple[int | None, bool]:
     """Read PID from file. Returns (pid, alive)."""
-    if not _PID_PATH.exists():
+    if not _paths.PID_PATH.exists():
         return None, False
     try:
-        pid = int(_PID_PATH.read_text().strip())
+        pid = int(_paths.PID_PATH.read_text().strip())
         os.kill(pid, 0)
         return pid, True
     except (ValueError, ProcessLookupError, PermissionError):
         return None, False
 
 
+def _configure_runtime_instance(instance_id: str | None) -> None:
+    if instance_id:
+        _paths.configure_instance(instance_id)
+
+
+def _ensure_instance_selected(args: argparse.Namespace) -> None:
+    _configure_runtime_instance(getattr(args, "instance", None))
+
+
+def _ensure_named_instance_exists(instance_id: str | None) -> None:
+    if not instance_id:
+        return
+    resolved_dir = resolve_instance_dir(instance_id)
+    if instance_id == DEFAULT_INSTANCE_ID:
+        return
+    if is_instance_dir(resolved_dir):
+        return
+    print(
+        f"Instance '{instance_id}' does not exist yet. "
+        f"Create it first with: handler instance create {instance_id}"
+    )
+    sys.exit(1)
+
+
 def cmd_start(args: argparse.Namespace) -> None:
+    _ensure_instance_selected(args)
+    _ensure_named_instance_exists(getattr(args, "instance", None))
     _init()
-    first_run = not (_DATA_DIR / "config" / "identity.md").exists()
+    first_run = not (_paths.DATA_DIR / "config" / "identity.md").exists()
 
     pid, alive = _read_pid()
     if alive:
         print(f"Handler is already running (PID {pid})")
         return
 
-    _PID_PATH.unlink(missing_ok=True)
-    _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _paths.PID_PATH.unlink(missing_ok=True)
+    _paths.LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    log_file = open(_LOG_PATH, "a")
+    log_file = open(_paths.LOG_PATH, "a")
     subprocess.Popen(
         [sys.executable, "-m", "handler"],
         stdin=subprocess.DEVNULL,
@@ -130,7 +159,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         stderr=subprocess.STDOUT,
         start_new_session=True,
         cwd=str(_RUN_DIR),
-        env=with_scripts_dir_on_path(),
+        env=_paths.with_scripts_dir_on_path(),
     )
 
     # Wait for PID file
@@ -161,17 +190,20 @@ def _stop_watchdog() -> None:
 
 
 def cmd_init(args: argparse.Namespace) -> None:
+    _ensure_instance_selected(args)
     _init()
     print("Handler is configured and ready. Run: handler start")
 
 
 def cmd_stop(args: argparse.Namespace) -> None:
+    _ensure_instance_selected(args)
+    _ensure_named_instance_exists(getattr(args, "instance", None))
     _stop_watchdog()
 
     pid, alive = _read_pid()
     if not alive or pid is None:
         print("Handler is not running")
-        _PID_PATH.unlink(missing_ok=True)
+        _paths.PID_PATH.unlink(missing_ok=True)
         return
 
     print(f"Stopping handler (PID {pid})...")
@@ -182,7 +214,7 @@ def cmd_stop(args: argparse.Namespace) -> None:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
-            _PID_PATH.unlink(missing_ok=True)
+            _paths.PID_PATH.unlink(missing_ok=True)
             print("Handler stopped.")
             return
 
@@ -191,20 +223,24 @@ def cmd_stop(args: argparse.Namespace) -> None:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    _PID_PATH.unlink(missing_ok=True)
+    _paths.PID_PATH.unlink(missing_ok=True)
     print("Handler stopped.")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
+    _ensure_instance_selected(args)
+    _ensure_named_instance_exists(getattr(args, "instance", None))
     pid, alive = _read_pid()
     if alive and pid is not None:
         print(f"Handler is running (PID {pid})")
     else:
         print("Handler is not running")
-        _PID_PATH.unlink(missing_ok=True)
+        _paths.PID_PATH.unlink(missing_ok=True)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
+    _ensure_instance_selected(args)
+    _ensure_named_instance_exists(getattr(args, "instance", None))
     _init()
     from .__main__ import main
 
@@ -212,6 +248,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_restart(args: argparse.Namespace) -> None:
+    _ensure_instance_selected(args)
     cmd_stop(args)
     cmd_start(args)
 
@@ -221,7 +258,11 @@ def cmd_auth(args: argparse.Namespace) -> None:
     from dotenv import load_dotenv
     from .users import get_user, list_users
 
-    load_dotenv(_ENV_PATH)
+    _ensure_instance_selected(args)
+    _ensure_named_instance_exists(getattr(args, "instance", None))
+
+    env_path = _paths.DATA_DIR / ".env"
+    load_dotenv(env_path)
     load_dotenv()
 
     service = args.service
@@ -245,7 +286,7 @@ def cmd_auth(args: argparse.Namespace) -> None:
             print(f"Valid user ids: {valid_users}")
             sys.exit(1)
 
-    creds_path = _DATA_DIR / "credentials" / "desktop.json"
+    creds_path = _paths.DATA_DIR / "credentials" / "desktop.json"
     if not creds_path.exists():
         print(f"Error: credentials not found at {creds_path}")
         print(
@@ -289,13 +330,15 @@ def cmd_auth(args: argparse.Namespace) -> None:
 
 
 def cmd_logs(args: argparse.Namespace) -> None:
-    if not _LOG_PATH.exists():
+    _ensure_instance_selected(args)
+    _ensure_named_instance_exists(getattr(args, "instance", None))
+    if not _paths.LOG_PATH.exists():
         print("No log file found")
         return
     n = args.lines
     # Read last N lines
     try:
-        with open(_LOG_PATH, "rb") as f:
+        with open(_paths.LOG_PATH, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
             buf = min(size, n * 200)
@@ -307,10 +350,79 @@ def cmd_logs(args: argparse.Namespace) -> None:
         print(f"Error reading logs: {e}")
 
 
+def cmd_instance_create(args: argparse.Namespace) -> None:
+    instance_id = args.instance_id
+    resolved_dir = resolve_instance_dir(instance_id)
+    if instance_meta_path(resolved_dir).exists():
+        print(f"Instance '{instance_id}' already exists at {resolved_dir}")
+        return
+
+    data_dir, metadata = ensure_instance_layout(
+        instance_id,
+        host=args.host,
+        port=args.port,
+        display_name=args.display_name,
+    )
+    for relative in (
+        "config",
+        "memory",
+        "uploads",
+        "credentials",
+        "logs",
+        "shell_logs",
+        "users",
+    ):
+        (data_dir / relative).mkdir(parents=True, exist_ok=True)
+
+    print(f"Created instance '{metadata.id}' at {data_dir}")
+    print(f"Web UI will bind to http://{metadata.host}:{metadata.port}")
+
+
+def cmd_instance_list(args: argparse.Namespace) -> None:
+    instances = discover_instances()
+    if not instances:
+        print("No instances found")
+        return
+
+    current_dir = _paths.DATA_DIR.resolve()
+    for data_dir, metadata in instances:
+        marker = "*" if data_dir.resolve() == current_dir else " "
+        print(
+            f"{marker} {metadata.id:<12} {metadata.host}:{metadata.port:<5} "
+            f"{metadata.display_name:<20} {data_dir}"
+        )
+
+
+def cmd_instance_remove(args: argparse.Namespace) -> None:
+    instance_id = args.instance_id
+    if instance_id == DEFAULT_INSTANCE_ID:
+        print("Refusing to remove the default legacy instance")
+        sys.exit(1)
+
+    resolved_dir = resolve_instance_dir(instance_id)
+    if not resolved_dir.exists():
+        print(f"Instance '{instance_id}' does not exist")
+        return
+
+    if not args.force:
+        print(
+            f"Refusing to remove {resolved_dir} without --force. "
+            "This deletes the full instance workspace."
+        )
+        sys.exit(1)
+
+    shutil.rmtree(resolved_dir)
+    print(f"Removed instance '{instance_id}'")
+
+
 def cli() -> None:
     parser = argparse.ArgumentParser(
         prog="handler",
         description="Handler — autonomous personal agent",
+    )
+    parser.add_argument(
+        "--instance",
+        help="Named instance to use (stored under ~/.handler/instances/<name>)",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -339,6 +451,29 @@ def cli() -> None:
         help="Authorize for a specific shared-instance user (for example: danny or zhijian)",
     )
 
+    instance_parser = sub.add_parser("instance", help="Manage Handler instances")
+    instance_sub = instance_parser.add_subparsers(dest="instance_command")
+
+    instance_create = instance_sub.add_parser("create", help="Create a named instance")
+    instance_create.add_argument(
+        "instance_id", help="Instance id, for example: personal"
+    )
+    instance_create.add_argument("--display-name", help="Human-readable display name")
+    instance_create.add_argument(
+        "--host", default="0.0.0.0", help="Web bind host (default: 0.0.0.0)"
+    )
+    instance_create.add_argument(
+        "--port", type=int, default=8000, help="Web bind port (default: 8000)"
+    )
+
+    instance_sub.add_parser("list", help="List discovered instances")
+
+    instance_remove = instance_sub.add_parser("remove", help="Delete a named instance")
+    instance_remove.add_argument("instance_id", help="Instance id to delete")
+    instance_remove.add_argument(
+        "--force", action="store_true", help="Delete the instance workspace"
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -359,6 +494,15 @@ def cli() -> None:
         cmd_logs(args)
     elif args.command == "auth":
         cmd_auth(args)
+    elif args.command == "instance":
+        if args.instance_command == "create":
+            cmd_instance_create(args)
+        elif args.instance_command == "list":
+            cmd_instance_list(args)
+        elif args.instance_command == "remove":
+            cmd_instance_remove(args)
+        else:
+            instance_parser.print_help()
 
 
 if __name__ == "__main__":

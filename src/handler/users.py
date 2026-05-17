@@ -171,6 +171,23 @@ def get_user(user_id: str | None) -> InstanceUser:
     raise KeyError(slug)
 
 
+def canonicalize_user_id(
+    user_id: str | None, *, default_to_default: bool = True
+) -> str:
+    """Resolve persisted user ids to their canonical slug.
+
+    Known aliases are collapsed to the owning user id. Unknown non-empty ids are
+    still normalized into slugs so older persisted values remain usable.
+    """
+
+    if not user_id:
+        return DEFAULT_USER_ID if default_to_default else ""
+    try:
+        return get_user(user_id).id
+    except KeyError:
+        return slugify_user_id(user_id)
+
+
 def resolve_user_from_telegram(
     telegram_user_id: int | str | None,
     *,
