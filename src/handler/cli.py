@@ -417,48 +417,75 @@ def cmd_kb_build(args: argparse.Namespace) -> None:
     load_dotenv()
 
     from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn, TextColumn
     from .users import get_user
 
     console = Console()
     user = get_user(args.user)
     year_str = f" — {args.year}" if getattr(args, "year", None) else ""
-    console.print(f"\n[bold cyan]KB Pipeline[/bold cyan] — {user.display_name}{year_str} — filtering and extracting life facts...")
+    console.print(f"\n[bold cyan]KB Pipeline[/bold cyan] — {user.display_name}{year_str}")
 
     from .kb.pipeline import run_pipeline
 
-    counts = {"filter_skip": 0, "extracted": 0, "errors": 0, "done": 0}
+    refilter = args.refilter or getattr(args, "force", False)
+    reextract = args.reextract or getattr(args, "force", False)
+
+    counts = {"skip": 0, "cached": 0, "extracted": 0, "extract_skip": 0, "errors": 0}
+    errors_shown = 0
+    progress_bar = task_id = None
 
     def on_progress(event):
-        counts["done"] += 1
+        nonlocal errors_shown
         phase = event.get("phase", "")
-        if phase == "extracted":
-            counts["extracted"] += 1
-        elif phase == "error":
-            counts["errors"] += 1
-            if counts["errors"] <= 3:
-                console.print(f"  [red]Error[/red]: {event.get('error')} (subject: {event.get('subject', '')[:60]})")
-        else:
-            counts["filter_skip"] += 1
+        counts[phase] = counts.get(phase, 0) + 1
+
+        if phase == "error" and errors_shown < 3:
+            errors_shown += 1
+            console.print(f"  [red]Error[/red]: {event.get('error', '')[:120]}")
+
+        if progress_bar and task_id is not None:
+            done = sum(counts.values())
+            desc = (f"skip={counts['skip']} cached={counts['cached']} "
+                    f"extracted={counts['extracted']} err={counts['errors']}")
+            progress_bar.update(task_id, completed=event.get("index", done), description=desc)
 
     model = getattr(args, "model", None)
     extra = {"filter_model": model, "extract_model": model} if model else {}
-    stats = run_pipeline(
-        user_id=user.id,
-        limit=args.limit,
-        refilter=args.refilter,
-        reextract=args.reextract,
-        progress_callback=on_progress,
-        year=getattr(args, "year", None),
-        **extra,
-    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        progress_bar = progress
+        task_id = progress.add_task("skip=0 cached=0 extracted=0 err=0", total=None)
+
+        stats = run_pipeline(
+            user_id=user.id,
+            limit=args.limit,
+            refilter=refilter,
+            reextract=reextract,
+            progress_callback=on_progress,
+            year=getattr(args, "year", None),
+            **extra,
+        )
+        progress.update(task_id, completed=stats["total"], total=stats["total"])
 
     kb = stats.get("kb_stats", {})
     console.print(f"\n[green]Done[/green]")
-    console.print(f"  Emails processed : {stats['total']}")
+    console.print(f"  Total emails     : {stats['total']}")
+    console.print(f"  Filtered out     : {counts['skip']}")
+    console.print(f"  Already cached   : {counts['cached']}")
+    console.print(f"  Extracted        : {stats['extracted']}")
+    console.print(f"  Extract skipped  : {counts.get('extract_skip', 0)}")
+    console.print(f"  Errors           : {stats['errors']}")
     console.print(f"  Filter API calls : {stats['filter_api_calls']}")
     console.print(f"  Extract API calls: {stats['extract_api_calls']}")
-    console.print(f"  Notes extracted  : {stats['extracted']}")
-    console.print(f"  Errors           : {stats['errors']}")
+    if kb:
+        console.print(f"  KB notes total   : {kb.get('total_notes', 0)}")
     console.print(f"\nKnowledge base written to: [cyan]{stats['output_dir']}[/cyan]")
     if kb.get("by_category"):
         for cat, count in sorted(kb["by_category"].items()):
@@ -581,8 +608,9 @@ def cli() -> None:
     kb_build.add_argument("--year", type=int, help="Only process emails from this year")
     kb_build.add_argument("--model", help="Override model for both filter and extract passes")
     kb_build.add_argument("--limit", type=int, help="Max emails to process (for testing)")
-    kb_build.add_argument("--refilter", action="store_true", help="Re-run filter on all emails")
-    kb_build.add_argument("--reextract", action="store_true", help="Re-run extraction on filtered emails")
+    kb_build.add_argument("--refilter", action="store_true", help="Re-run filter on already-filtered emails")
+    kb_build.add_argument("--reextract", action="store_true", help="Re-run extraction on already-extracted emails")
+    kb_build.add_argument("--force", action="store_true", help="Reprocess everything (implies --refilter --reextract)")
 
     kb_export = kb_sub.add_parser("export", help="Re-export markdown files from existing notes")
     kb_export.add_argument("--user", default="danny", help="User to export for (default: danny)")
