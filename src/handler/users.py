@@ -14,11 +14,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .paths import DATA_DIR, USERS_DIR, LEGACY_CREDENTIALS_DIR, LEGACY_MEMORY_DIR
+from .paths import LEGACY_CREDENTIALS_DIR, LEGACY_MEMORY_DIR
 
 logger = logging.getLogger("handler.users")
 
-_USERS_FILE = DATA_DIR / "users.json"
+def _users_file() -> Path:
+    from .paths import current_instance_paths
+    return current_instance_paths().data_dir / "users.json"
 _DEFAULT_USER_ID = "danny"
 _DISALLOWED_ALIASES = {"zhijian-zhu"}
 _DEFAULT_USERS = [
@@ -50,7 +52,8 @@ class InstanceUser:
 
     @property
     def base_dir(self) -> Path:
-        return USERS_DIR / self.slug
+        from .paths import current_instance_paths
+        return current_instance_paths().users_dir / self.slug
 
     @property
     def memory_dir(self) -> Path:
@@ -74,19 +77,22 @@ class InstanceUser:
 
 
 def _write_default_users_file() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _USERS_FILE.write_text(json.dumps(_DEFAULT_USERS, indent=2) + "\n")
+    f = _users_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(_DEFAULT_USERS, indent=2) + "\n")
 
 
 def _load_users_file() -> list[dict]:
-    if not _USERS_FILE.exists():
+    f = _users_file()
+    if not f.exists():
         _write_default_users_file()
+        f = _users_file()
     try:
-        data = json.loads(_USERS_FILE.read_text())
+        data = json.loads(f.read_text())
     except Exception:
         logger.warning("users.json invalid, rewriting defaults", exc_info=True)
         _write_default_users_file()
-        data = json.loads(_USERS_FILE.read_text())
+        data = json.loads(_users_file().read_text())
     if not isinstance(data, list):
         raise ValueError("users.json must contain a list")
 
@@ -116,7 +122,7 @@ def _load_users_file() -> list[dict]:
         changed = changed or normalized[-1] != raw
 
     if changed:
-        _USERS_FILE.write_text(json.dumps(normalized, indent=2) + "\n")
+        _users_file().write_text(json.dumps(normalized, indent=2) + "\n")
     return normalized
 
 
