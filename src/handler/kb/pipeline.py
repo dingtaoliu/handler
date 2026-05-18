@@ -224,7 +224,7 @@ def _extract_facts(
     )
     response = client.chat.completions.create(
         model=model,
-        max_completion_tokens=350,
+        max_completion_tokens=600,
         messages=[{"role": "user", "content": prompt}],
     )
     raw = response.choices[0].message.content.strip()
