@@ -206,7 +206,7 @@ def _filter_email(client, subject: str, from_email: str, model: str) -> bool:
     prompt = _FILTER_PROMPT.format(from_email=from_email or "", subject=subject or "")
     response = client.chat.completions.create(
         model=model,
-        max_tokens=5,
+        max_completion_tokens=5,
         messages=[{"role": "user", "content": prompt}],
     )
     return response.choices[0].message.content.strip().lower().startswith("yes")
@@ -224,7 +224,7 @@ def _extract_facts(
     )
     response = client.chat.completions.create(
         model=model,
-        max_tokens=350,
+        max_completion_tokens=350,
         messages=[{"role": "user", "content": prompt}],
     )
     raw = response.choices[0].message.content.strip()
