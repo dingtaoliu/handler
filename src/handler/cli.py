@@ -444,10 +444,14 @@ def cmd_kb_build(args: argparse.Namespace) -> None:
             console.print(f"  [red]Error[/red]: {event.get('error', '')[:120]}")
 
         if progress_bar and task_id is not None:
-            done = sum(counts.values())
             desc = (f"skip={counts['skip']} cached={counts['cached']} "
                     f"extracted={counts['extracted']} err={counts['errors']}")
-            progress_bar.update(task_id, completed=event.get("index", done), description=desc)
+            progress_bar.update(
+                task_id,
+                completed=event.get("index", sum(counts.values())),
+                total=event.get("total"),
+                description=desc,
+            )
 
     model = getattr(args, "model", None)
     extra = {"filter_model": model, "extract_model": model} if model else {}
