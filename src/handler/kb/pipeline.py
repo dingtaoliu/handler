@@ -19,7 +19,7 @@ KB_CATEGORIES = {
     "personal": "Employment, address changes, identity documents, important personal records",
 }
 
-DEFAULT_FILTER_MODEL = "gpt-5.4-mini-2026-03-17"
+DEFAULT_FILTER_MODEL = "gpt-5.4-nano-2026-03-17"
 DEFAULT_EXTRACT_MODEL = "gpt-5.4-mini-2026-03-17"
 
 _FILTER_PROMPT = """Does this email likely contain important personal life information worth keeping long-term?
