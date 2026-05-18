@@ -371,9 +371,10 @@ def cmd_kb_index(args: argparse.Namespace) -> None:
     # desktop.json is instance-level (shared)
     creds_path = str(_paths.DATA_DIR / "credentials" / "desktop.json")
     # token: prefer per-user gmail_token.json, fall back to instance-level token.json
-    from .tools.gmail import _token_path as _gmail_token_path
+    # Use _paths.DATA_DIR directly (not gmail._DATA_DIR which is captured at import time)
     _per_user_token = user.credentials_dir / "gmail_token.json"
-    token_path = str(_per_user_token) if _per_user_token.exists() else _gmail_token_path()
+    _instance_token = _paths.DATA_DIR / "credentials" / "token.json"
+    token_path = str(_per_user_token) if _per_user_token.exists() else str(_instance_token)
     db_path = str(user.emails_db_path)
 
     progress_bar = None
