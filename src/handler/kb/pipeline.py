@@ -256,6 +256,7 @@ def run_pipeline(
     refilter: bool = False,
     reextract: bool = False,
     progress_callback=None,
+    year: Optional[int] = None,
 ) -> dict:
     """
     Run the KB pipeline for a specific user over their indexed emails.
@@ -289,7 +290,7 @@ def run_pipeline(
     }
 
     with EmailDatabase(db_path) as email_db, KnowledgeBase(db_path) as kb:
-        emails = email_db.get_messages(limit=limit)
+        emails = email_db.get_messages(limit=limit, year=year)
         stats["total"] = len(emails)
 
         for i, email in enumerate(emails):

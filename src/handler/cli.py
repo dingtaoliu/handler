@@ -421,7 +421,8 @@ def cmd_kb_build(args: argparse.Namespace) -> None:
 
     console = Console()
     user = get_user(args.user)
-    console.print(f"\n[bold cyan]KB Pipeline[/bold cyan] — {user.display_name} — filtering and extracting life facts...")
+    year_str = f" — {args.year}" if getattr(args, "year", None) else ""
+    console.print(f"\n[bold cyan]KB Pipeline[/bold cyan] — {user.display_name}{year_str} — filtering and extracting life facts...")
 
     from .kb.pipeline import run_pipeline
 
@@ -443,6 +444,7 @@ def cmd_kb_build(args: argparse.Namespace) -> None:
         refilter=args.refilter,
         reextract=args.reextract,
         progress_callback=on_progress,
+        year=getattr(args, "year", None),
     )
 
     kb = stats.get("kb_stats", {})
@@ -571,6 +573,7 @@ def cli() -> None:
 
     kb_build = kb_sub.add_parser("build", help="Run KB pipeline: filter + extract facts")
     kb_build.add_argument("--user", default="danny", help="User to build KB for (default: danny)")
+    kb_build.add_argument("--year", type=int, help="Only process emails from this year")
     kb_build.add_argument("--limit", type=int, help="Max emails to process (for testing)")
     kb_build.add_argument("--refilter", action="store_true", help="Re-run filter on all emails")
     kb_build.add_argument("--reextract", action="store_true", help="Re-run extraction on filtered emails")
