@@ -430,17 +430,21 @@ def cmd_kb_build(args: argparse.Namespace) -> None:
     refilter = args.refilter or getattr(args, "force", False)
     reextract = args.reextract or getattr(args, "force", False)
 
-    # Show resume state so it's clear what's cached vs new
-    if not refilter and not reextract:
-        try:
-            with KnowledgeBase(str(user.emails_db_path)) as _kb:
-                _s = _kb.get_stats()
-            already_filtered = _s["total_filtered"]
-            already_extracted = _s["total_notes"]
-            if already_filtered:
-                console.print(f"  Resuming — {already_filtered} already filtered, {already_extracted} notes extracted")
-        except Exception:
-            pass
+    # Always show cached state so it's clear what's being reused vs reprocessed
+    try:
+        with KnowledgeBase(str(user.emails_db_path)) as _kb:
+            _s = _kb.get_stats()
+        already_filtered = _s["total_filtered"]
+        already_extracted = _s["total_notes"]
+        if already_filtered:
+            parts = [f"{already_filtered} already filtered"]
+            if refilter:
+                parts = ["refiltering all"]
+            if already_extracted:
+                parts.append(f"{already_extracted} notes extracted" + (" (re-extracting)" if reextract else ""))
+            console.print(f"  [dim]{', '.join(parts)}[/dim]")
+    except Exception:
+        pass
 
     counts = {"skip": 0, "cached": 0, "extracted": 0, "extract_skip": 0, "errors": 0}
     errors_shown = 0
