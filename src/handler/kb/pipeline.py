@@ -19,9 +19,8 @@ KB_CATEGORIES = {
     "personal": "Employment, address changes, identity documents, important personal records",
 }
 
-# gpt-4o-mini: ~$0.15/M input tokens
-FILTER_MODEL = "gpt-4o-mini"
-EXTRACT_MODEL = "gpt-4o-mini"
+DEFAULT_FILTER_MODEL = "gpt-5.4-mini-2026-03-17"
+DEFAULT_EXTRACT_MODEL = "gpt-5.4-mini-2026-03-17"
 
 _FILTER_PROMPT = """Does this email likely contain important personal life information worth keeping long-term?
 
@@ -203,10 +202,10 @@ class KnowledgeBase:
         self.close()
 
 
-def _filter_email(client, subject: str, from_email: str) -> bool:
+def _filter_email(client, subject: str, from_email: str, model: str) -> bool:
     prompt = _FILTER_PROMPT.format(from_email=from_email or "", subject=subject or "")
     response = client.chat.completions.create(
-        model=FILTER_MODEL,
+        model=model,
         max_tokens=5,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -214,7 +213,7 @@ def _filter_email(client, subject: str, from_email: str) -> bool:
 
 
 def _extract_facts(
-    client, email_date: str, from_email: str, subject: str, body: str
+    client, email_date: str, from_email: str, subject: str, body: str, model: str
 ) -> Optional[dict]:
     body_text = preprocess_email_for_classification(body or "", level=2)[:2000]
     prompt = _EXTRACT_PROMPT.format(
@@ -224,7 +223,7 @@ def _extract_facts(
         body=body_text or "(no body)",
     )
     response = client.chat.completions.create(
-        model=EXTRACT_MODEL,
+        model=model,
         max_tokens=350,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -257,6 +256,8 @@ def run_pipeline(
     reextract: bool = False,
     progress_callback=None,
     year: Optional[int] = None,
+    filter_model: str = DEFAULT_FILTER_MODEL,
+    extract_model: str = DEFAULT_EXTRACT_MODEL,
 ) -> dict:
     """
     Run the KB pipeline for a specific user over their indexed emails.
@@ -305,7 +306,7 @@ def run_pipeline(
                 # Phase 1: filter
                 cached = kb.filter_status(gmail_id)
                 if cached is None or refilter:
-                    is_important = _filter_email(client, subject, from_email)
+                    is_important = _filter_email(client, subject, from_email, filter_model)
                     kb.save_filter(gmail_id, is_important)
                     stats["filter_api_calls"] += 1
                 else:
@@ -325,7 +326,7 @@ def run_pipeline(
                         progress_callback({"phase": "cached", "subject": subject, "index": i, "total": stats["total"]})
                     continue
 
-                result = _extract_facts(client, date, from_email, subject, body_plain or body_html)
+                result = _extract_facts(client, date, from_email, subject, body_plain or body_html, extract_model)
                 stats["extract_api_calls"] += 1
 
                 if result:

@@ -440,6 +440,8 @@ def cmd_kb_build(args: argparse.Namespace) -> None:
         else:
             counts["filter_skip"] += 1
 
+    model = getattr(args, "model", None)
+    extra = {"filter_model": model, "extract_model": model} if model else {}
     stats = run_pipeline(
         user_id=user.id,
         limit=args.limit,
@@ -447,6 +449,7 @@ def cmd_kb_build(args: argparse.Namespace) -> None:
         reextract=args.reextract,
         progress_callback=on_progress,
         year=getattr(args, "year", None),
+        **extra,
     )
 
     kb = stats.get("kb_stats", {})
@@ -576,6 +579,7 @@ def cli() -> None:
     kb_build = kb_sub.add_parser("build", help="Run KB pipeline: filter + extract facts")
     kb_build.add_argument("--user", default="danny", help="User to build KB for (default: danny)")
     kb_build.add_argument("--year", type=int, help="Only process emails from this year")
+    kb_build.add_argument("--model", help="Override model for both filter and extract passes")
     kb_build.add_argument("--limit", type=int, help="Max emails to process (for testing)")
     kb_build.add_argument("--refilter", action="store_true", help="Re-run filter on all emails")
     kb_build.add_argument("--reextract", action="store_true", help="Re-run extraction on filtered emails")
