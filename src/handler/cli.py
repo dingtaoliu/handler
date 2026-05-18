@@ -425,10 +425,22 @@ def cmd_kb_build(args: argparse.Namespace) -> None:
     year_str = f" — {args.year}" if getattr(args, "year", None) else ""
     console.print(f"\n[bold cyan]KB Pipeline[/bold cyan] — {user.display_name}{year_str}")
 
-    from .kb.pipeline import run_pipeline
+    from .kb.pipeline import run_pipeline, KnowledgeBase
 
     refilter = args.refilter or getattr(args, "force", False)
     reextract = args.reextract or getattr(args, "force", False)
+
+    # Show resume state so it's clear what's cached vs new
+    if not refilter and not reextract:
+        try:
+            with KnowledgeBase(str(user.emails_db_path)) as _kb:
+                _s = _kb.get_stats()
+            already_filtered = _s["total_filtered"]
+            already_extracted = _s["total_notes"]
+            if already_filtered:
+                console.print(f"  Resuming — {already_filtered} already filtered, {already_extracted} notes extracted")
+        except Exception:
+            pass
 
     counts = {"skip": 0, "cached": 0, "extracted": 0, "extract_skip": 0, "errors": 0}
     errors_shown = 0
