@@ -435,6 +435,8 @@ def cmd_kb_build(args: argparse.Namespace) -> None:
             counts["extracted"] += 1
         elif phase == "error":
             counts["errors"] += 1
+            if counts["errors"] <= 3:
+                console.print(f"  [red]Error[/red]: {event.get('error')} (subject: {event.get('subject', '')[:60]})")
         else:
             counts["filter_skip"] += 1
 
