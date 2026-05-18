@@ -19,9 +19,9 @@ KB_CATEGORIES = {
     "personal": "Employment, address changes, identity documents, important personal records",
 }
 
-# Haiku: ~$0.80/M input tokens — filter pass costs ~$0.20 for 17K emails
-FILTER_MODEL = "claude-haiku-4-5-20251001"
-EXTRACT_MODEL = "claude-haiku-4-5-20251001"
+# gpt-4o-mini: ~$0.15/M input tokens
+FILTER_MODEL = "gpt-4o-mini"
+EXTRACT_MODEL = "gpt-4o-mini"
 
 _FILTER_PROMPT = """Does this email likely contain important personal life information worth keeping long-term?
 
@@ -205,12 +205,12 @@ class KnowledgeBase:
 
 def _filter_email(client, subject: str, from_email: str) -> bool:
     prompt = _FILTER_PROMPT.format(from_email=from_email or "", subject=subject or "")
-    response = client.messages.create(
+    response = client.chat.completions.create(
         model=FILTER_MODEL,
         max_tokens=5,
         messages=[{"role": "user", "content": prompt}],
     )
-    return response.content[0].text.strip().lower().startswith("yes")
+    return response.choices[0].message.content.strip().lower().startswith("yes")
 
 
 def _extract_facts(
@@ -223,12 +223,12 @@ def _extract_facts(
         subject=subject or "",
         body=body_text or "(no body)",
     )
-    response = client.messages.create(
+    response = client.chat.completions.create(
         model=EXTRACT_MODEL,
         max_tokens=350,
         messages=[{"role": "user", "content": prompt}],
     )
-    raw = response.content[0].text.strip()
+    raw = response.choices[0].message.content.strip()
 
     if raw.startswith("```"):
         parts = raw.split("```")
@@ -270,7 +270,7 @@ def run_pipeline(
 
     progress_callback(event: dict) receives per-email status updates.
     """
-    import anthropic
+    from openai import OpenAI
     from .database import EmailDatabase
     from ..users import get_user
 
@@ -278,7 +278,7 @@ def run_pipeline(
     db_path = str(user.emails_db_path)
     output_dir = user.knowledge_dir
 
-    client = anthropic.Anthropic()
+    client = OpenAI()
     stats = {
         "total": 0,
         "filtered_important": 0,
