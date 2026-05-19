@@ -9,6 +9,7 @@ from .builtin import (
     memory_tool,
 )
 from .session import compact_tool, compact_messages, cron_tool
+from .tasks import task_tool
 from .coding import search_codebase, edit_file
 from .watchdog import get_health_problems
 from .gmail import gmail_tool
@@ -31,4 +32,5 @@ __all__ = [
     "gmail_tool",
     "gdrive_tool",
     "complete_google_auth",
+    "task_tool",
 ]

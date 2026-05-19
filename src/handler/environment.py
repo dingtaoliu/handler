@@ -94,9 +94,9 @@ class Environment:
                     pass
 
     async def _notify_channel(self, event: Event, response: str) -> None:
-        """Push cron responses to the specified notification channel (e.g. telegram)."""
+        """Push cron/task responses to the specified notification channel (e.g. telegram)."""
         notify = event.data.get("notify_channel", "")
-        if not notify or event.type != "cron_prompt":
+        if not notify or event.type not in ("cron_prompt", "task_notification"):
             return
         cid = event.conversation_id
         if not cid:
@@ -139,6 +139,15 @@ class Environment:
                 f"{content}\n"
                 f"(This is an automated cron prompt, not a live user message.)"
             )
+        elif event.type == "task_notification":
+            task_title = event.data.get("task_title", "Unknown task")
+            task_status = event.data.get("task_status", "completed")
+            result = event.data.get("result", "")
+            content = (
+                f"[BACKGROUND TASK {task_status.upper()} — {task_title}]\n"
+                f"{result}\n"
+                f"(Automated notification — let the user know their task finished.)"
+            )
 
         # Build multi-modal content blocks if images are present
         if images:
@@ -158,7 +167,7 @@ class Environment:
             store_content = content
 
         self.store.ensure_conversation(cid, channel=event.source, user_id=user_id)
-        role = "system" if event.type == "cron_prompt" else "user"
+        role = "system" if event.type in ("cron_prompt", "task_notification") else "user"
         self.store.add_message(cid, role, store_content)
         self.store.log_event(event.type, event.source, event.data, cid, user_id)
 

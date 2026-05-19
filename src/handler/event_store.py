@@ -15,6 +15,7 @@ managed by AgentContext — not in this class.
 import json
 import logging
 import sqlite3
+import uuid
 from pathlib import Path
 
 from .users import DEFAULT_USER_ID, canonicalize_user_id
@@ -105,6 +106,25 @@ class EventStore:
                     total_tokens INTEGER,
                     estimated_cost_usd REAL,
                     trigger TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    workspace_dir TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    pid INTEGER DEFAULT NULL,
+                    conversation_id TEXT NOT NULL DEFAULT '',
+                    user_id TEXT NOT NULL DEFAULT '',
+                    notify_channel TEXT NOT NULL DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    started_at TEXT DEFAULT NULL,
+                    completed_at TEXT DEFAULT NULL,
+                    last_heartbeat TEXT DEFAULT NULL,
+                    result TEXT DEFAULT NULL,
+                    error TEXT DEFAULT NULL,
+                    notified_at TEXT DEFAULT NULL
                 );
             """)
             self._migrate(conn)
@@ -773,3 +793,80 @@ class EventStore:
             f"last 30d: ${month['estimated_cost_usd']:.2f} "
             f"({month['total_tokens']:,} tokens, {month['runs']} runs)"
         )
+
+    # ------------------------------------------------------------------
+    # Conversations — helpers
+    # ------------------------------------------------------------------
+
+    def get_conversation_channel(self, conversation_id: str) -> str:
+        """Return the channel name for a conversation, or empty string."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT channel FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            return row["channel"] if row else ""
+
+    # ------------------------------------------------------------------
+    # Tasks
+    # ------------------------------------------------------------------
+
+    def create_task(
+        self,
+        task_id: str,
+        title: str,
+        description: str,
+        conversation_id: str,
+        user_id: str,
+        workspace_dir: str,
+        notify_channel: str = "",
+    ) -> str:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO tasks (id, title, description, conversation_id, user_id, workspace_dir, notify_channel) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (task_id, title, description, conversation_id, user_id, workspace_dir, notify_channel),
+            )
+        return task_id
+
+    def update_task(self, task_id: str, **fields) -> None:
+        allowed = {
+            "status", "pid", "started_at", "completed_at",
+            "last_heartbeat", "result", "error", "notified_at",
+        }
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [task_id]
+        with self._connect() as conn:
+            conn.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", values)
+
+    def get_task(self, task_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_tasks(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks ORDER BY created_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_pending_task_notifications(self) -> list[dict]:
+        """Return completed/failed tasks that haven't been notified yet."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE status IN ('completed', 'failed') AND notified_at IS NULL"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_task_notified(self, task_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET notified_at = datetime('now') WHERE id = ?",
+                (task_id,),
+            )

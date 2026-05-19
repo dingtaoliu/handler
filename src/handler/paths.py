@@ -44,6 +44,7 @@ class InstancePaths:
     users_dir: Path
     credentials_dir: Path
     instance_meta_path: Path
+    tasks_dir: Path
 
     @property
     def legacy_memory_dir(self) -> Path:
@@ -82,6 +83,7 @@ def resolve_instance_paths(instance_id: str | None = None) -> InstancePaths:
         users_dir=data_dir / "users",
         credentials_dir=data_dir / "credentials",
         instance_meta_path=data_dir / "instance.json",
+        tasks_dir=data_dir / "tasks",
     )
 
 
@@ -108,6 +110,7 @@ def _sync_globals(paths: InstancePaths) -> None:
             "LEGACY_MEMORY_DIR": paths.legacy_memory_dir,
             "LEGACY_CREDENTIALS_DIR": paths.legacy_credentials_dir,
             "INSTANCE_META_PATH": paths.instance_meta_path,
+            "TASKS_DIR": paths.tasks_dir,
             "LOG_PATH": paths.get_log_path(),
         }
     )

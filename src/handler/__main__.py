@@ -20,6 +20,7 @@ from .paths import (
     INSTANCE_ID,
     INSTANCE_METADATA,
     MEMORY_DIR,
+    TASKS_DIR,
     PID_PATH,
     LOG_DIR,
     ensure_scripts_dir_on_path,
@@ -42,6 +43,7 @@ from .tools import (
     gmail_tool,
     gdrive_tool,
     complete_google_auth,
+    task_tool,
 )
 from .watchdog import install_watchdog, load_scheduler_config, detect_scheduler_backends
 
@@ -198,6 +200,7 @@ def main():
     tools.append(gmail_tool(run_ctx))
     tools.append(gdrive_tool(run_ctx))
     tools.append(complete_google_auth)
+    tools.append(task_tool(store, run_ctx, DATA_DIR))
 
     def _build_agent(b: str, m: str) -> BaseAgent:
         kwargs = dict(

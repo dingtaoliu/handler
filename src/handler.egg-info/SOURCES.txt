@@ -6,6 +6,7 @@ src/handler/cli.py
 src/handler/environment.py
 src/handler/event_store.py
 src/handler/google_oauth.py
+src/handler/instance.py
 src/handler/paths.py
 src/handler/types.py
 src/handler/users.py
@@ -38,9 +39,16 @@ src/handler/channels/static/logo.svg
 src/handler/channels/static/style.css
 src/handler/context/__init__.py
 src/handler/context/context.py
+src/handler/kb/__init__.py
+src/handler/kb/database.py
+src/handler/kb/indexer.py
+src/handler/kb/models.py
+src/handler/kb/pipeline.py
+src/handler/kb/preprocessing.py
 src/handler/memory/__init__.py
 src/handler/memory/memory.py
 src/handler/tools/__init__.py
+src/handler/tools/auth.py
 src/handler/tools/builtin.py
 src/handler/tools/coding.py
 src/handler/tools/gdrive.py

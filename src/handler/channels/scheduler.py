@@ -53,6 +53,8 @@ class SchedulerChannel(Channel):
                 logger.error(f"job executor failed: {e}", exc_info=True)
 
     async def _run_due_jobs(self) -> None:
+        await self._notify_completed_tasks()
+
         jobs = self.store.get_due_jobs()
         if not jobs:
             return
@@ -98,6 +100,34 @@ class SchedulerChannel(Channel):
         )
         preview = (result.stdout or result.stderr)[:300]
         logger.info(f"[job #{job['id']}] shell exit={result.returncode}: {preview}")
+
+    async def _notify_completed_tasks(self) -> None:
+        """Inject task_notification events for any completed tasks not yet reported."""
+        tasks = self.store.get_pending_task_notifications()
+        for task in tasks:
+            # Mark notified before queuing to prevent double-notification on crash.
+            self.store.mark_task_notified(task["id"])
+            cid = task.get("conversation_id") or "web"
+            queue = self.queue
+            if queue is None:
+                return
+            await queue.put(
+                Event(
+                    type="task_notification",
+                    source="scheduler",
+                    conversation_id=cid,
+                    data={
+                        "task_id": task["id"],
+                        "task_title": task["title"],
+                        "task_status": task["status"],
+                        "result": task.get("result") or task.get("error") or "",
+                        "notify_channel": task.get("notify_channel", ""),
+                    },
+                )
+            )
+            logger.info(
+                f"[task:{task['id']}] notification queued (conversation={cid}, status={task['status']})"
+            )
 
     async def _run_prompt_job(self, job: dict) -> None:
         """Push a prompt job directly onto the event queue."""
