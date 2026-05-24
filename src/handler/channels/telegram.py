@@ -13,6 +13,7 @@ from ..environment import Channel
 from ..paths import UPLOAD_DIR as _UPLOAD_DIR
 from ..types import Event
 from ..users import resolve_user_from_telegram
+from ..utils import transcribe_audio
 
 logger = logging.getLogger("handler.channels.telegram")
 
@@ -152,7 +153,7 @@ class TelegramChannel(Channel):
         await self._process(update, content)
 
     async def _on_voice(self, update, context) -> None:
-        """Handle voice/audio: download and send path to agent."""
+        """Handle voice/audio: download, transcribe via Whisper, send transcript to agent."""
         msg = update.message
         if not msg:
             return
@@ -167,7 +168,13 @@ class TelegramChannel(Channel):
         await file.download_to_drive(str(local_path))
         logger.info(f"telegram voice saved: {local_path}")
 
-        content = f"[Voice message saved to {local_path.resolve()}]"
+        try:
+            transcript = await transcribe_audio(local_path)
+            content = f"[Voice] {transcript}"
+        except Exception as e:
+            logger.error(f"transcription failed: {e}", exc_info=True)
+            content = f"[Voice message saved to {local_path.resolve()}] (transcription failed: {e})"
+
         await self._process(update, content)
 
     # ------------------------------------------------------------------

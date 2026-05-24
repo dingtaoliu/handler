@@ -1,6 +1,25 @@
 """Shared utility functions with no intra-package dependencies."""
 
+import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+logger = logging.getLogger("handler.utils")
+
+
+async def transcribe_audio(path: Path) -> str:
+    """Transcribe an audio file using OpenAI Whisper. Returns the transcript text."""
+    import openai
+
+    client = openai.AsyncOpenAI()
+    with open(path, "rb") as f:
+        result = await client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f,
+            response_format="text",
+        )
+    logger.info(f"transcribed {path.name}: {str(result)[:100]}")
+    return str(result).strip()
 
 
 def parse_interval(schedule: str) -> timedelta:
