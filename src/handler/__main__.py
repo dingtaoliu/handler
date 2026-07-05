@@ -104,6 +104,14 @@ def _save_agent_config(backend: str, model: str) -> None:
 
 
 def _write_pid() -> None:
+    try:
+        existing = int(PID_PATH.read_text().strip())
+        if existing != os.getpid():
+            os.kill(existing, 0)  # raises if dead
+            logger.warning("handler already running (pid=%d), skipping pid file update", existing)
+            return
+    except (ProcessLookupError, PermissionError, ValueError, OSError):
+        pass
     PID_PATH.write_text(str(os.getpid()))
 
 
