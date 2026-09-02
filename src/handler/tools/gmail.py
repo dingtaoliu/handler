@@ -432,7 +432,7 @@ def gmail_tool(run_ctx=None):
 
     def _action_read(gmail_id: str, download_attachments: bool) -> str:
         msg_data = (
-            _build_service(creds)
+            _build_service(_creds())
             .users()
             .messages()
             .get(userId="me", id=gmail_id, format="raw")
