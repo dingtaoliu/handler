@@ -100,6 +100,18 @@ cloud provisioning were performed during this driver pass.
    - real model prices
    - personal macbook-server cutover from the legacy code
 
+### Status 2026-10-17 (evening)
+
+- **Hosted sandbox mode** done: `HANDLER_CODEX_SANDBOX`, an environment allowlist, and a Codex shell env policy (`known-issues.md` §2). Live secret-stripping check pending Codex quota.
+- **Phase 3c (Crontal integration)** built and verified end-to-end locally (real Crontal + real handler, two processes): MCP tool discovery, signed webhook delivery with retry and idempotency, and the Crontal proxy (status, chat, threads).
+  - Handler side is on `rebuild`.
+  - Crontal side is on hephaestus branch `handler-integration` (pushed, worktree `../hephaestus-wt/handler-integration`): 198 backend tests pass and the frontend builds.
+- **Before merging `handler-integration` into Crontal `main`:**
+  1. The owner's uncommitted migration `p1k2l3m4n5q6_bid_currency_categories.py` and `q2m3n4o5p6r7_handler_outbox.py` share `down_revision = "n0j1k2l3m4p5"`. Re-point whichever merges second.
+  2. The outbox row commits right after the notification, not in the same transaction (`create_model_instance` commits), so a crash between them can lose one event.
+  3. `requests` isn't declared in Crontal's `pyproject.toml`.
+- **Not yet run:** a real agent run over Crontal tools (needs Codex quota or an API key).
+
 ## 4. Rules and decisions to keep
 
 - **Work-package pattern:** contracts first, then parallel packages in worktrees (`git worktree add ../handler-wt/<name> -b <branch> rebuild`), then review, merge `--no-ff`, run the full suite, push `rebuild`.
