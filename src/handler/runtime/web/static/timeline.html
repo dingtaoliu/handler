@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Run timeline</title>
+<style>
+:root {
+  --bg: #fafafa; --panel: #fff; --text: #1b1f24; --muted: #6a737d;
+  --border: #d8dce0; --accent: #2563eb; --ok: #16a34a; --err: #dc2626;
+  --run: #d97706; --bar: #93b4f5; --user: #e8f0fe; --asst: #f1f3f4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a; --panel: #1c1f24; --text: #e6e8eb; --muted: #8b949e;
+    --border: #30363d; --accent: #6ea0ff; --ok: #3fb950; --err: #f85149;
+    --run: #e3a008; --bar: #3b5fa8; --user: #1f2d46; --asst: #262a30;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg);
+  color: var(--text); display: flex; height: 100vh; }
+#threads { width: 280px; border-right: 1px solid var(--border);
+  overflow-y: auto; background: var(--panel); }
+#threads h2, #main h3 { margin: 0; padding: 10px 12px; font-size: 13px;
+  color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.thread { padding: 8px 12px; border-top: 1px solid var(--border); cursor: pointer; }
+.thread:hover, .thread.sel { background: var(--bg); }
+.thread .k { font-weight: 600; word-break: break-all; }
+.meta { color: var(--muted); font-size: 12px; }
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0;
+  overflow-y: auto; }
+#empty { padding: 24px; color: var(--muted); }
+.msg { margin: 6px 12px; padding: 8px 10px; border-radius: 6px;
+  white-space: pre-wrap; word-break: break-word; background: var(--asst); }
+.msg.user { background: var(--user); }
+.msg .role { font-size: 11px; color: var(--muted); display: block; }
+#chat { display: flex; gap: 8px; padding: 10px 12px;
+  border-top: 1px solid var(--border); background: var(--panel); }
+#chat input { flex: 1; padding: 8px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--bg); color: var(--text); }
+button { padding: 8px 14px; border: 0; border-radius: 6px; cursor: pointer;
+  background: var(--accent); color: #fff; }
+.run { margin: 4px 12px; padding: 6px 10px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--panel); cursor: pointer; }
+.run.sel { border-color: var(--accent); }
+.status-completed, .status-ok { color: var(--ok); }
+.status-failed, .status-error, .status-denied { color: var(--err); }
+.status-running, .status-cancelled { color: var(--run); }
+table { width: calc(100% - 24px); margin: 6px 12px; border-collapse: collapse;
+  font-size: 13px; }
+th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border);
+  vertical-align: top; }
+th { color: var(--muted); font-weight: 500; }
+.track { position: relative; height: 12px; min-width: 120px;
+  background: var(--asst); border-radius: 3px; }
+.track i { position: absolute; top: 0; bottom: 0; background: var(--bar);
+  border-radius: 3px; min-width: 2px; }
+.step { cursor: pointer; }
+pre { margin: 0; padding: 8px; background: var(--asst); border-radius: 4px;
+  overflow-x: auto; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="threads"><h2>Threads</h2><div id="thread-list"></div></div>
+<div id="main">
+  <div id="empty">Select a thread, or send a message to start one.</div>
+  <div id="thread-view" hidden>
+    <h3 id="thread-title"></h3>
+    <div id="messages"></div>
+    <h3>Runs</h3>
+    <div id="runs"></div>
+    <div id="steps"></div>
+  </div>
+  <form id="chat">
+    <input id="user" size="8" value="me" title="user id">
+    <input id="text" placeholder="Message..." autocomplete="off">
+    <button type="submit">Send</button>
+  </form>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null, currentRun = null, source = null;
+
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+  (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const api = async (path, opts) => {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(path + " " + r.status);
+  return r.json();
+};
+const fmtCost = (c) => c == null ? "-" : "$" + c.toFixed(4);
+const ms = (a, b) => (a && b) ? new Date(b) - new Date(a) : null;
+
+async function loadThreads() {
+  const threads = await api("/api/threads");
+  $("thread-list").innerHTML = threads.map((t) => `
+    <div class="thread ${t.key === current ? "sel" : ""}" data-key="${esc(t.key)}">
+      <div class="k">${esc(t.key)}</div>
+      <div class="meta">${esc(t.harness)} · ${t.dead ? "dead" :
+        t.pending_since ? "pending" : "idle"}${t.last_error ?
+        " · " + esc(t.last_error) : ""}</div>
+    </div>`).join("");
+}
+
+function blockText(blocks) {
+  return (blocks || []).map((b) => b.text ??
+    (b.type === "tool_call" ? `[tool ${b.name}] ${JSON.stringify(b.input)}` :
+     b.type === "tool_result" ? `[result] ${JSON.stringify(b.output)}` :
+     JSON.stringify(b))).join("\n");
+}
+
+async function loadMessages() {
+  if (!current) return;
+  const msgs = await api(`/api/threads/${encodeURIComponent(current)}/messages`);
+  $("messages").innerHTML = msgs.map((m) => `
+    <div class="msg ${esc(m.role)}"><span class="role">${esc(m.role)}</span>
+    ${esc(blockText(m.blocks))}</div>`).join("");
+}
+
+async function loadRuns() {
+  if (!current) return;
+  const runs = await api(`/api/threads/${encodeURIComponent(current)}/runs`);
+  $("runs").innerHTML = runs.map((r) => `
+    <div class="run ${r.id === currentRun ? "sel" : ""}" data-id="${esc(r.id)}">
+      <b class="status-${esc(r.status)}">${esc(r.status)}</b> ${esc(r.id)}
+      <span class="meta">${esc(r.model || "")} · in ${r.usage.input_tokens}
+      out ${r.usage.output_tokens} · ${fmtCost(r.cost_usd)}${r.error ?
+      " · " + esc(r.error) : ""}</span>
+    </div>`).join("");
+}
+
+async function loadSteps() {
+  if (!currentRun) { $("steps").innerHTML = ""; return; }
+  const {run, steps} = await api(`/api/runs/${encodeURIComponent(currentRun)}`);
+  const t0 = new Date(run.started_at).getTime();
+  const end = Math.max(...steps.map((s) => new Date(s.ended_at || s.started_at)
+    .getTime()), run.finished_at ? new Date(run.finished_at).getTime() : 0,
+    t0 + 1);
+  const span = end - t0;
+  $("steps").innerHTML = `<table><tr><th>#</th><th>kind</th><th>name</th>
+    <th>status</th><th style="width:30%">timeline</th><th>tokens</th>
+    <th>cost</th></tr>` + steps.map((s) => {
+    const st = new Date(s.started_at).getTime();
+    const en = new Date(s.ended_at || s.started_at).getTime();
+    const left = (100 * (st - t0)) / span, w = (100 * (en - st)) / span;
+    const dur = ms(s.started_at, s.ended_at);
+    const tok = s.usage ? `${s.usage.input_tokens}/${s.usage.output_tokens}` : "";
+    return `<tr class="step" data-seq="${s.seq}"><td>${s.seq}</td>
+      <td>${esc(s.kind)}</td><td>${esc(s.name)}</td>
+      <td class="status-${esc(s.status)}">${esc(s.status)}</td>
+      <td><div class="track"><i style="left:${left}%;width:${w}%"></i></div>
+      <span class="meta">${dur == null ? "" : dur + " ms"}</span></td>
+      <td>${tok}</td><td>${fmtCost(s.cost_usd)}</td></tr>
+      <tr hidden id="data-${s.seq}"><td colspan="7"><pre>${esc(
+        JSON.stringify({data: s.data, raw_ref: s.raw_ref, model: s.model},
+        null, 2))}</pre></td></tr>`;
+  }).join("") + "</table>";
+}
+
+function connect() {
+  if (source) source.close();
+  source = new EventSource(current ?
+    `/api/threads/${encodeURIComponent(current)}/stream` : "/api/stream");
+  source.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    loadThreads();
+    if (m.thread_key === current) {
+      loadMessages(); loadRuns();
+      if (m.run_id && m.run_id === currentRun) loadSteps();
+    }
+  };
+}
+
+async function select(key) {
+  current = key; currentRun = null;
+  $("empty").hidden = true; $("thread-view").hidden = false;
+  $("thread-title").textContent = key;
+  $("steps").innerHTML = "";
+  await Promise.all([loadThreads(), loadMessages(), loadRuns()]);
+  connect();
+}
+
+$("thread-list").onclick = (e) => {
+  const el = e.target.closest(".thread");
+  if (el) select(el.dataset.key);
+};
+$("runs").onclick = (e) => {
+  const el = e.target.closest(".run");
+  if (el) { currentRun = el.dataset.id; loadRuns(); loadSteps(); }
+};
+$("steps").onclick = (e) => {
+  const row = e.target.closest(".step");
+  if (row) { const d = $("data-" + row.dataset.seq); d.hidden = !d.hidden; }
+};
+$("chat").onsubmit = async (e) => {
+  e.preventDefault();
+  const text = $("text").value.trim();
+  if (!text) return;
+  const body = {user_id: $("user").value || "me", text,
+    client_message_id: crypto.randomUUID()};
+  if (current) {
+    const parts = current.split(":");
+    if (parts[0] === "chat" && parts[1] === body.user_id)
+      body.conversation_id = parts.slice(2).join(":");
+  }
+  $("text").value = "";
+  const r = await api("/api/chat", {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (r.thread_key !== current) await select(r.thread_key);
+  else { loadMessages(); loadThreads(); }
+};
+
+loadThreads(); connect();
+</script>
+</body>
+</html>
