@@ -152,7 +152,8 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
     # The new session makes the child PID its process group ID, including tools.
     try:
         os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
+        # macOS reports EPERM once the group leader has exited.
         await process.wait()
         return
     try:
@@ -161,7 +162,7 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
         pass
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     await process.wait()
 
