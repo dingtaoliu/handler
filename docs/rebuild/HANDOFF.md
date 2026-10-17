@@ -67,6 +67,8 @@ named files containing secrets are not detected by the filename exclusions.
 The Google OAuth client JSON was absent at review time. No live model calls or
 cloud provisioning were performed during this driver pass.
 
+**Known issues:** see `docs/rebuild/known-issues.md`: workspace sync never deletes remote files, and Codex's sandbox can't run in unprivileged containers (likely Heroku). Both need a decision before onboarding non-admin users.
+
 ## 3. What's next, in order
 
 1. ~~L, M, N integration~~ **Done 2026-10-17:** all three merged into `rebuild`; full suite 447 passed, 2 skipped (run outside the Codex sandbox, which blocks localhost binding).

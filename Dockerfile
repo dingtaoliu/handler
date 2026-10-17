@@ -17,7 +17,7 @@ ENV PYTHONUNBUFFERED=1 \
     HANDLER_RT_DATA_DIR=/tmp/handler
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && apt-get install -y --no-install-recommends ca-certificates curl git bubblewrap \
     && curl -fsSL -o /tmp/codex.tar.gz \
         "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" \
     && echo "${CODEX_SHA256}  /tmp/codex.tar.gz" | sha256sum -c - \
