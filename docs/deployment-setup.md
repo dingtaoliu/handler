@@ -78,3 +78,34 @@ Notes:
 - Use `--editable` so the installed tool imports directly from `~/repos/handler/src`. That keeps the running code aligned with the repo checkout and preserves watchdog git-based update checks.
 
 Verify: `curl http://macbook-server:8000/api/chat -X POST -H "Content-Type: application/json" -d '{"message":"hi","conversation_id":null}'`
+
+## Rebuild runtime (handler-rt) on macbook-server
+
+Runs **alongside** the legacy instance, which is untouched on port 8000 and auto-updated by its watchdog from `~/repos/handler`.
+
+| What | Where |
+|---|---|
+| Checkout | `~/repos/handler-rt` (branch `rebuild`, HTTPS remote) |
+| Data | `~/.handler-rt/` (SQLite `handler.db`, workspaces, logs) |
+| Secrets/config | `~/.handler-rt/env` (mode 600): admin key, Codex settings, users |
+| Admin user token | `~/.handler-rt/danny.token` (mode 600) |
+| Codex CLI | `~/.local/bin/codex` (0.162.0, x86_64-apple-darwin, sha256-verified) |
+| Codex login | `~/.codex/auth.json` from `codex login --device-auth`, symlinked into each run (`HANDLER_RT_CODEX_AUTH_LINK=1`) |
+| Service | launchd `com.handler.rt` (`~/Library/LaunchAgents/com.handler.rt.plist`), runs `~/.handler-rt/run.sh` |
+| URL | `http://macbook-server:8100` (`/login`, then paste the token) |
+
+```bash
+# status / restart / logs
+ssh dannyliu@macbook-server 'launchctl print gui/$(id -u)/com.handler.rt | grep -E "state|pid ="'
+ssh dannyliu@macbook-server 'launchctl kickstart -k gui/$(id -u)/com.handler.rt'
+ssh dannyliu@macbook-server 'tail -50 ~/.handler-rt/logs/handler-rt.log'
+
+# update to the latest rebuild
+ssh dannyliu@macbook-server 'cd ~/repos/handler-rt && git pull --ff-only origin rebuild && ~/.local/bin/uv sync --frozen && launchctl kickstart -k gui/$(id -u)/com.handler.rt'
+
+# users and tokens
+ssh dannyliu@macbook-server 'cd ~/repos/handler-rt && .venv/bin/python -m handler.runtime.server user add <id> --data-dir ~/.handler-rt'
+ssh dannyliu@macbook-server 'cd ~/repos/handler-rt && .venv/bin/python -m handler.runtime.server token create <id> --data-dir ~/.handler-rt'
+```
+
+The launchd job lives in the GUI session domain. After a reboot it starts when you log in; it doesn't start before login.
