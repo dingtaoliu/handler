@@ -46,7 +46,7 @@ Three packages, specified in `docs/rebuild/phase3.md`, were being built in git w
 | Package | Worktree / branch | Snapshot of what existed |
 |---|---|---|
 | L. Auth + users | `handler-wt/p3-l` / `rb3-l` | `sqlite_users.py`, `schema_users.sql`, edits to `sqlite.py`, `postgres*.py`. No `auth.py` or API yet; looked early-stage |
-| M. Docker + Heroku | `handler-wt/p3-m` / `rb3-m` | `Dockerfile`, `.dockerignore`, `heroku.yml`, `deploy/`, edits to `server.py` and `postgres.py` |
+| M. Docker + Heroku | `handler-wt/p3-m` / `rb3-m` | **Finished and committed on `rb3-m`** (347 passed, 2 skipped in its worktree). It needs review and merge. The image builds (1.96 GB, `codex-cli 0.162.0` pinned with a SHA256). It adds `PostgresCore(schema=...)` with per-schema NOTIFY channels and new `server.py` flags (`--db-schema`, `--harness-env-file`, env defaults, MCP url uses 127.0.0.1 when binding 0.0.0.0). Flags to resolve: (1) Codex's `workspace-write` sandbox may not work in a Heroku dyno (no user namespaces), so decide the harness sandbox mode for the hosted profile; (2) the file-store env var name is a placeholder until package N wires the file store; (3) `/healthz` comes from package L |
 | N. Durable workspaces + session recovery | `handler-wt/p3-n` / `rb3-n` | `workspaces.py`, edits to `run.py` |
 
 **What to do with them:**
