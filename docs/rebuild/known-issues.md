@@ -59,3 +59,5 @@ Without the sandbox, the same probe could write anywhere the user can and reach 
 4. **Tools-only threads**: for thread types that don't need shell or file work (e.g. Crontal notifications handled purely through handler and Crontal MCP tools), disable Codex's shell, if Codex exposes a reliable switch for that (needs checking).
 
 Decide before onboarding non-admin users. Option 1 is reasonable for the admin-only pilot, as long as the environment allowlist is implemented and tested.
+
+**Status (2026-10-17):** option 1 is implemented: `--codex-sandbox` / `HANDLER_CODEX_SANDBOX`, an environment allowlist in `harness/codex.py`, and a Codex `shell_environment_policy` stripping key/token/secret variables. **Still to verify live:** that a real Codex run's shell commands don't see variables matching the exclude patterns (the check needs Codex quota), and the `heroku run` sandbox check on the first deploy.
