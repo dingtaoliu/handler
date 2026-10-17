@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Handler</title>
+<link rel="icon" type="image/svg+xml" href="/app/static/logo.svg">
+<link rel="stylesheet" href="/app/static/style.css">
+</head>
+<body>
+<div id="app">
+  <nav id="sidebar" aria-label="Main">
+    <div id="logo"><img src="/app/static/logo.svg" alt="">handler</div>
+    <ul id="nav-list">
+      <li><button class="nav-item active" data-tab="chat">Chat</button></li>
+      <li><button class="nav-item" data-tab="memory">Memory</button></li>
+      <li><button class="nav-item" data-tab="automations">Automations</button></li>
+      <li><button class="nav-item" data-tab="activity">Activity</button></li>
+      <li><button class="nav-item" data-tab="usage">Usage</button></li>
+      <li><button class="nav-item" data-tab="approvals">Approvals<span class="nav-badge" id="badge-approvals" hidden>0</span></button></li>
+      <li><button class="nav-item" data-tab="notifications">Notifications<span class="nav-badge" id="badge-notifications" hidden>0</span></button></li>
+      <li><button class="nav-item" data-tab="settings">Settings</button></li>
+      <li><button class="nav-item" data-tab="tools">Tools</button></li>
+      <li><button class="nav-item" data-tab="files">Files</button></li>
+      <li><button class="nav-item" data-tab="logs" data-admin hidden>Logs</button></li>
+      <li><button class="nav-item" data-tab="connections">Connections</button></li>
+      <li><button class="nav-item" data-tab="users" data-admin hidden>Users</button></li>
+    </ul>
+    <div id="sidebar-bottom">
+      <div id="sidebar-user"></div>
+      <button id="theme-toggle" type="button">Light</button>
+      <button id="logout-btn" type="button">Log out</button>
+    </div>
+  </nav>
+
+  <main id="content">
+
+    <!-- Chat -->
+    <section id="tab-chat" class="tab-pane split-layout active" aria-label="Chat">
+      <div class="split-left" style="width:260px">
+        <div class="panel-header">
+          <span>Threads</span>
+          <button class="btn-small btn-primary" id="new-chat" type="button">+ New</button>
+        </div>
+        <div id="thread-list" class="file-list"></div>
+      </div>
+      <div class="chat-body">
+        <div class="panel-header"><span id="chat-title">New conversation</span><a class="link" id="chat-timeline" hidden>Timeline</a></div>
+        <div id="messages" aria-live="polite"></div>
+        <div id="pending-files"></div>
+        <div id="input-area">
+          <button id="upload-btn" type="button" title="Attach files" aria-label="Attach files">+</button>
+          <input id="file-input" type="file" multiple aria-label="Attach files">
+          <textarea id="input" rows="1" placeholder="Type a message..." aria-label="Message"></textarea>
+          <button id="send-btn" type="button">Send</button>
+        </div>
+        <div id="chat-readonly" class="chat-readonly" hidden>This is a shared thread. You can read it but not reply from here.</div>
+      </div>
+    </section>
+
+    <!-- Memory -->
+    <section id="tab-memory" class="tab-pane split-layout" aria-label="Memory">
+      <div class="split-left">
+        <div class="panel-header">
+          <span>Memory</span>
+          <button class="btn-small" id="mem-new" type="button">+ New</button>
+        </div>
+        <div id="memory-file-list" class="file-list"></div>
+      </div>
+      <div class="split-right">
+        <div class="panel-header">
+          <input id="mem-name" type="text" class="filename-input" placeholder="topic/name" aria-label="Topic name">
+          <div class="btn-row">
+            <button class="btn-small btn-primary" id="mem-save" type="button">Save</button>
+            <button class="btn-small btn-danger" id="mem-delete" type="button">Delete</button>
+          </div>
+        </div>
+        <div class="panel-header"><input id="mem-desc" type="text" class="filename-input" placeholder="Short description" aria-label="Description"></div>
+        <div id="mem-msg" class="err-text" role="alert"></div>
+        <textarea id="mem-content" class="editor" placeholder="Select a topic or click + New" aria-label="Content"></textarea>
+      </div>
+    </section>
+
+    <!-- Automations -->
+    <section id="tab-automations" class="tab-pane scroll-pane" aria-label="Automations">
+      <div class="pane-title">Automations <button class="btn-small" id="auto-refresh" type="button">Refresh</button>
+        <button class="btn-small btn-primary" id="auto-new" type="button">+ New</button></div>
+      <form id="auto-form" class="form-grid card" hidden>
+        <label>Name <input type="text" id="auto-name" required></label>
+        <label>Prompt <textarea class="input" id="auto-prompt" rows="4" required></textarea></label>
+        <label>Schedule <input type="text" id="auto-schedule" required placeholder="every 30m">
+          <span class="help">Examples: <code>every 30m</code>, <code>every 2h</code>, <code>cron: 0 9 * * 1-5</code>, <code>at: 2026-12-01T09:00</code> (one shot).</span></label>
+        <label>Timezone <input type="text" id="auto-tz" placeholder="UTC"></label>
+        <label>Notify (comma separated user ids) <input type="text" id="auto-notify"></label>
+        <div class="err-text" id="auto-err" role="alert"></div>
+        <div class="inline-actions"><button class="btn-small btn-primary" type="submit">Save</button>
+          <button class="btn-small" type="button" id="auto-cancel">Cancel</button></div>
+      </form>
+      <div id="automations-content"></div>
+    </section>
+
+    <!-- Activity -->
+    <section id="tab-activity" class="tab-pane scroll-pane" aria-label="Activity">
+      <div class="pane-title">Activity <button class="btn-small" id="act-refresh" type="button">Refresh</button>
+        <a class="link" href="/timeline" style="font-size:12px;font-weight:400">Open timeline</a></div>
+      <div id="activity-content"></div>
+      <div id="activity-steps"></div>
+    </section>
+
+    <!-- Usage -->
+    <section id="tab-usage" class="tab-pane scroll-pane" aria-label="Usage">
+      <div class="pane-title">Usage
+        <select id="usage-days" aria-label="Period"><option value="1">1 day</option><option value="7">7 days</option><option value="30" selected>30 days</option></select>
+        <button class="btn-small" id="usage-refresh" type="button">Refresh</button></div>
+      <div id="usage-content"></div>
+    </section>
+
+    <!-- Approvals -->
+    <section id="tab-approvals" class="tab-pane scroll-pane" aria-label="Approvals">
+      <div class="pane-title">Approvals <button class="btn-small" id="appr-refresh" type="button">Refresh</button>
+        <label class="checkbox-label"><input type="checkbox" id="appr-history"> Show history</label></div>
+      <div id="approvals-content"></div>
+    </section>
+
+    <!-- Notifications -->
+    <section id="tab-notifications" class="tab-pane scroll-pane" aria-label="Notifications">
+      <div class="pane-title">Notifications <button class="btn-small" id="notif-refresh" type="button">Refresh</button>
+        <label class="checkbox-label"><input type="checkbox" id="notif-unread" checked> Unread only</label></div>
+      <div id="notifications-content"></div>
+    </section>
+
+    <!-- Settings -->
+    <section id="tab-settings" class="tab-pane config-layout" aria-label="Settings">
+      <div class="settings-layout">
+        <div class="split-left" style="width:180px">
+          <div class="panel-header"><span>Sections</span></div>
+          <div id="settings-sections" class="file-list"></div>
+        </div>
+        <div class="settings-body">
+          <div class="pane-title"><span id="settings-title">Settings</span>
+            <span class="muted" id="settings-version" style="font-weight:400;font-size:12px"></span></div>
+          <form id="settings-form"></form>
+          <div class="err-text" id="settings-err" role="alert"></div>
+          <div class="inline-actions" id="settings-actions" hidden>
+            <button class="btn-small btn-primary" id="settings-save" type="button">Save</button>
+            <button class="btn-small" id="settings-reset" type="button">Reset</button>
+            <button class="btn-small" id="settings-hist-btn" type="button">History</button>
+          </div>
+          <div id="settings-history"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tools -->
+    <section id="tab-tools" class="tab-pane scroll-pane" aria-label="Tools">
+      <div class="pane-title">Available Tools <button class="btn-small" id="tools-refresh" type="button">Refresh</button></div>
+      <div id="tools-content"></div>
+    </section>
+
+    <!-- Files -->
+    <section id="tab-files" class="tab-pane scroll-pane" aria-label="Files">
+      <div class="pane-title">Uploaded Files
+        <button class="btn-small" id="files-refresh" type="button">Refresh</button>
+        <button class="btn-small btn-primary" id="files-upload" type="button">Upload</button>
+        <input type="file" id="files-input" multiple hidden></div>
+      <div class="err-text" id="files-err" role="alert"></div>
+      <div id="files-content"></div>
+    </section>
+
+    <!-- Logs -->
+    <section id="tab-logs" class="tab-pane logs-layout" aria-label="Logs">
+      <div class="panel-header">
+        <span>Logs</span>
+        <div class="btn-row">
+          <input type="search" id="log-q" placeholder="Search" aria-label="Search logs">
+          <select id="log-level" aria-label="Level"><option value="">All levels</option><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
+          <select id="log-lines" aria-label="Lines"><option value="100">100 lines</option><option value="200" selected>200 lines</option><option value="500">500 lines</option></select>
+          <label class="checkbox-label"><input type="checkbox" id="log-auto"> Auto-refresh</label>
+          <button class="btn-small" id="log-refresh" type="button">Refresh</button>
+        </div>
+      </div>
+      <div id="logs-content" class="log-output"></div>
+    </section>
+
+    <!-- Connections -->
+    <section id="tab-connections" class="tab-pane scroll-pane" aria-label="Connections">
+      <div class="pane-title">Connections <button class="btn-small" id="conn-refresh" type="button">Refresh</button></div>
+      <div id="connections-content"></div>
+      <div class="card muted">Gmail connector coming. Connections created by the platform will be listed here; secrets are never shown.</div>
+    </section>
+
+    <!-- Users -->
+    <section id="tab-users" class="tab-pane scroll-pane" aria-label="Users">
+      <div class="pane-title">Users <button class="btn-small" id="users-refresh" type="button">Refresh</button></div>
+      <div id="token-reveal" class="token-reveal" hidden></div>
+      <form id="user-form" class="card form-grid">
+        <label>User id <input type="text" id="user-id" required pattern="[A-Za-z0-9][A-Za-z0-9._@\-]*" placeholder="alice"></label>
+        <label>Display name <input type="text" id="user-name" required></label>
+        <label>Role <select id="user-role"><option value="member">member</option><option value="admin">admin</option></select></label>
+        <div class="err-text" id="user-err" role="alert"></div>
+        <div><button class="btn-small btn-primary" type="submit">Create user</button></div>
+      </form>
+      <div id="users-content"></div>
+    </section>
+
+  </main>
+</div>
+<script src="/app/static/app.js"></script>
+</body>
+</html>

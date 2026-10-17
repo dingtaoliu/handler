@@ -23,6 +23,7 @@ from .auth_api import auth_router
 HEARTBEAT_SECONDS = 15.0
 MEMBER_SCAN_LIMIT = 1000  # threads scanned when filtering a member's list
 TIMELINE_HTML = Path(__file__).resolve().parent / "static" / "timeline.html"
+APP_DIR = Path(__file__).resolve().parent / "static" / "app"
 
 
 class ChatRequest(BaseModel):
@@ -189,6 +190,22 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @router.get("/")
+    @router.get("/app")
+    @router.get("/app/")
+    async def app_shell() -> FileResponse:
+        # Unauthenticated shell: it redirects to /login without a token, and
+        # every data call carries one.
+        return FileResponse(APP_DIR / "index.html", media_type="text/html",
+                            headers={"Cache-Control": "no-store"})
+
+    @router.get("/app/static/{name}")
+    async def app_asset(name: str) -> FileResponse:
+        path = APP_DIR / name
+        if name != path.name or name == "index.html" or not path.is_file():
+            raise HTTPException(404, "not found")
+        return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
     @router.get("/login")
     async def login() -> FileResponse:
