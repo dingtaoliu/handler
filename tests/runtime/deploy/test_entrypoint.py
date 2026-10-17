@@ -110,3 +110,9 @@ def test_docker_image_runs_codex_and_handler():
                              "--entrypoint", "handler-rt", tag, "--help"],
                             check=True, capture_output=True, text=True)
     assert "serve" in helper.stdout
+
+
+def test_global_run_limit_environment(monkeypatch):
+    monkeypatch.setenv("HANDLER_MAX_CONCURRENT", "1")
+    assert server._parse_args(["serve"]).max_concurrent == 1
+    assert server._parse_args(["serve", "--max-concurrent", "2"]).max_concurrent == 2

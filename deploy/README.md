@@ -92,10 +92,9 @@ schema as the dyno via the config vars.)
 ## Operating notes
 
 - **Memory**: a Basic dyno has 512 MB. Handler plus a running Codex process can approach it.
-  The capacities are per lane: setting both to 1 permits two simultaneous runs.
-  Until a global cap is configured, set `limits.interactive_capacity=1` and
-  `background_capacity=0` (background jobs remain queued), restart after changing
-  limits, watch `heroku logs` for `R14`/`R15` errors, and move to Standard-2X if needed.
+  The container defaults `HANDLER_MAX_CONCURRENT=1`, a global cap across both
+  interactive and background lanes. Lane capacities remain configurable in settings;
+  restart after changing limits. Watch `heroku logs` for `R14`/`R15` errors, and move to Standard-2X if needed.
 - **Ephemeral disk**: the data dir is `/tmp/handler` and is wiped on every restart and at
   least daily. Durable state is in Postgres and Bucketeer only.
 - **Sandbox**: Codex's `workspace-write` sandbox may not work inside a Heroku dyno

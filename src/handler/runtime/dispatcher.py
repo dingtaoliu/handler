@@ -26,10 +26,14 @@ class Dispatcher:
         executor: RunExecutor,
         *,
         lane_capacity: dict[Lane, int] | None = None,
+        max_concurrent: int | None = None,
         lease_seconds: float = 120.0,
         idle_poll_seconds: float = 30.0,
         owner: str | None = None,
     ) -> None:
+        if max_concurrent is not None and max_concurrent < 1:
+            raise ValueError("max_concurrent must be positive")
+        self.max_concurrent = max_concurrent
         self.store = store
         self.executor = executor
         self.capacity = lane_capacity or {Lane.INTERACTIVE: 2, Lane.BACKGROUND: 1}
@@ -48,6 +52,8 @@ class Dispatcher:
         started = 0
         for lane, cap in self.capacity.items():
             free = cap - len(self._active[lane])
+            if self.max_concurrent is not None:
+                free = min(free, self.max_concurrent - self.active_count)
             if free <= 0:
                 continue
             for lease in await self.store.claim(self.owner, lane, free, self.lease_seconds):

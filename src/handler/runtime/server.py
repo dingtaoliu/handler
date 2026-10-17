@@ -99,6 +99,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     s.add_argument("--agent-md", default=None, help="seed persona from this AGENT.md once")
     s.add_argument("--users", default=os.environ.get("HANDLER_RT_USERS", ""),
                    help="comma-separated user ids (for notify to 'all')")
+    s.add_argument("--max-concurrent", type=int,
+                   default=int(os.environ["HANDLER_MAX_CONCURRENT"])
+                   if os.environ.get("HANDLER_MAX_CONCURRENT") else None,
+                   help="maximum active runs across all lanes")
     s.add_argument("--log-level", default="INFO")
     return p.parse_args(argv)
 
@@ -151,6 +155,7 @@ async def serve(args: argparse.Namespace) -> None:
     )
     dispatcher = Dispatcher(
         store, executor, lease_seconds=config.lease_seconds,
+        max_concurrent=args.max_concurrent,
         lane_capacity={Lane.INTERACTIVE: int(limits_cfg["interactive_capacity"]),
                        Lane.BACKGROUND: int(limits_cfg["background_capacity"])},
     )

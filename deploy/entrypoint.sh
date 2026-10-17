@@ -13,7 +13,8 @@ set -eu
 : "${PORT:=8100}"
 : "${HANDLER_DB_SCHEMA:=handler_crontal}"
 : "${HANDLER_RT_DATA_DIR:=/tmp/handler}"
-export HANDLER_RT_DATA_DIR
+: "${HANDLER_MAX_CONCURRENT:=1}"
+export HANDLER_RT_DATA_DIR HANDLER_MAX_CONCURRENT
 
 set -- handler-rt serve --host 0.0.0.0 --port "$PORT" --data-dir "$HANDLER_RT_DATA_DIR"
 if [ -n "${DATABASE_URL:-}" ]; then
