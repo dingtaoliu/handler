@@ -127,6 +127,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="instance admin key (bearer credential with admin rights)")
     s.add_argument("--log-level", default="INFO")
     add_cli_commands(sub)
+    imp = sub.add_parser("import-legacy",
+                         help="copy persona, memory, users and chats from a legacy handler")
+    imp.add_argument("--from", dest="source", required=True,
+                     help="legacy instance dir, e.g. ~/.handler/instances/personal")
+    imp.add_argument("--data-dir", default=os.environ.get("HANDLER_RT_DATA_DIR", "~/.handler-rt"))
+    imp.add_argument("--default-user", default="danny",
+                     help="owner for legacy data without a user id")
     return p.parse_args(argv)
 
 
@@ -274,11 +281,27 @@ async def serve(args: argparse.Namespace) -> None:
     await store.close()
 
 
+async def _import_legacy(args: argparse.Namespace) -> None:
+    from .migrate_legacy import import_legacy
+
+    data_dir = Path(args.data_dir).expanduser()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    store = SQLiteStore(data_dir / "handler.db")
+    try:
+        report = await import_legacy(Path(args.source), store, SettingsService(store),
+                                     default_user=args.default_user)
+    finally:
+        await store.close()
+    print("\n".join(report.lines()))
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     if args.command == "serve":
         configure_json_logging(args.log_level)
         asyncio.run(serve(args))
+    elif args.command == "import-legacy":
+        asyncio.run(_import_legacy(args))
     else:
         raise SystemExit(run_cli(args))
 

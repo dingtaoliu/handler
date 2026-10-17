@@ -348,6 +348,13 @@ class RunExecutor:
         req: RunRequest, recorder: _RunRecorder, transcript: list[Message],
     ) -> str:
         input_count = len(transcript)
+        if not req.session_id and await self.store.list_messages(thread.key, limit=1):
+            # History without a harness session (e.g. imported from another
+            # system): give the fresh session the thread's record as context.
+            recap = await self._recap(
+                thread.key, header="Earlier conversation in this thread (from handler's "
+                "record; you have no session memory of it):")
+            req = replace(req, prompt=recap + "\n\nCurrent turn:\n" + req.prompt)
         for attempt in range(2):
             final_text = ""
             progressed = False
@@ -387,7 +394,10 @@ class RunExecutor:
                 del transcript[input_count:]
         raise AssertionError("unreachable")
 
-    async def _recap(self, thread_key: str) -> str:
+    async def _recap(
+        self, thread_key: str,
+        header: str = "Recent official transcript (context for the recovered session):",
+    ) -> str:
         # Store pages start with the oldest messages, so grow the window until
         # it includes the tail rather than mistaking the first 20 for the last.
         limit = 200
@@ -396,7 +406,7 @@ class RunExecutor:
             if len(messages) < limit:
                 break
             limit *= 2
-        lines = ["Recent official transcript (context for the recovered session):"]
+        lines = [header]
         for message in messages[-20:]:
             content = json.dumps(message.blocks, ensure_ascii=False, default=str)
             excerpt = content if len(content) <= 500 else content[:500] + "…"
