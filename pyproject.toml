@@ -39,6 +39,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "handler.channels" = ["static/*"]
+"handler.runtime.web" = ["static/*"]
+"handler.runtime.observability" = ["*.yaml"]
 
 [project.optional-dependencies]
 dev = [
