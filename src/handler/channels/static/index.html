@@ -118,7 +118,7 @@
         <div class="panel-header"><span>Agent</span></div>
         <div class="agent-settings">
           <label>Backend
-            <select id="agent-backend" onchange="onAgentBackendChange()">
+            <select id="agent-backend" onchange="onAgentBackendChange('main')">
               <option value="openai">OpenAI (SDK)</option>
               <option value="openai-manual">OpenAI (Manual)</option>
               <option value="claude">Claude (SDK)</option>
@@ -126,10 +126,28 @@
             </select>
           </label>
           <label>Model
-            <select id="agent-model" onchange="onAgentModelChange()"></select>
+            <select id="agent-model" onchange="onAgentModelChange('main')"></select>
             <input id="agent-model-custom" type="text" placeholder="custom model id" style="display:none;margin-top:4px">
           </label>
-          <button class="btn-small btn-primary" onclick="saveAgentConfig()">Apply</button>
+          <button class="btn-small btn-primary" onclick="saveAgentConfig('main')">Apply</button>
+        </div>
+      </div>
+      <div class="config-agent-section">
+        <div class="panel-header"><span>Background Agent (cron &amp; scheduled tasks)</span></div>
+        <div class="agent-settings">
+          <label>Backend
+            <select id="bg-agent-backend" onchange="onAgentBackendChange('background')">
+              <option value="openai">OpenAI (SDK)</option>
+              <option value="openai-manual">OpenAI (Manual)</option>
+              <option value="claude">Claude (SDK)</option>
+              <option value="anthropic">Anthropic (Manual)</option>
+            </select>
+          </label>
+          <label>Model
+            <select id="bg-agent-model" onchange="onAgentModelChange('background')"></select>
+            <input id="bg-agent-model-custom" type="text" placeholder="custom model id" style="display:none;margin-top:4px">
+          </label>
+          <button class="btn-small btn-primary" onclick="saveAgentConfig('background')">Apply</button>
         </div>
       </div>
       <div class="config-files-section split-layout">

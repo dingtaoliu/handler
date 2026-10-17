@@ -681,9 +681,18 @@ async function _loadModelList() {
     }
 }
 
-function _populateModelDropdown(backend, selectedModel) {
-    const select = document.getElementById('agent-model');
-    const custom = document.getElementById('agent-model-custom');
+function _agentUI(kind) {
+    const prefix = kind === 'background' ? 'bg-agent' : 'agent';
+    return {
+        backendEl: document.getElementById(prefix + '-backend'),
+        modelEl: document.getElementById(prefix + '-model'),
+        customEl: document.getElementById(prefix + '-model-custom'),
+        endpoint: kind === 'background' ? '/api/agent/background' : '/api/agent',
+    };
+}
+
+function _populateModelDropdown(kind, backend, selectedModel) {
+    const { modelEl: select, customEl: custom } = _agentUI(kind);
     const models = _modelsByBackend[backend] || [];
 
     select.innerHTML = '';
@@ -709,9 +718,8 @@ function _populateModelDropdown(backend, selectedModel) {
     }
 }
 
-function onAgentModelChange() {
-    const select = document.getElementById('agent-model');
-    const custom = document.getElementById('agent-model-custom');
+function onAgentModelChange(kind) {
+    const { modelEl: select, customEl: custom } = _agentUI(kind);
     if (select.value === '_custom') {
         custom.style.display = '';
         custom.focus();
@@ -722,14 +730,21 @@ function onAgentModelChange() {
 }
 
 async function loadConfig() {
-    // Load model list then agent config so dropdown is ready
+    // Load model list then agent config so dropdowns are ready
     await _loadModelList();
     try {
         const agentRes = await fetch('/api/agent');
         const agentData = await agentRes.json();
         const backend = agentData.backend || 'openai';
         document.getElementById('agent-backend').value = backend;
-        _populateModelDropdown(backend, agentData.model || '');
+        _populateModelDropdown('main', backend, agentData.model || '');
+    } catch(e) {}
+    try {
+        const bgRes = await fetch('/api/agent/background');
+        const bgData = await bgRes.json();
+        const bgBackend = bgData.backend || 'openai';
+        document.getElementById('bg-agent-backend').value = bgBackend;
+        _populateModelDropdown('background', bgBackend, bgData.model || '');
     } catch(e) {}
 
     // Load config files
@@ -748,27 +763,27 @@ async function loadConfig() {
     if (!_configSelected && files.length > 0) selectConfigFile(files[0].name);
 }
 
-function onAgentBackendChange() {
-    const backend = document.getElementById('agent-backend').value;
+function onAgentBackendChange(kind) {
+    const { backendEl } = _agentUI(kind);
+    const backend = backendEl.value;
     const models = _modelsByBackend[backend] || [];
-    _populateModelDropdown(backend, models[0] || '');
+    _populateModelDropdown(kind, backend, models[0] || '');
 }
 
-async function saveAgentConfig() {
-    const backend = document.getElementById('agent-backend').value;
-    const select = document.getElementById('agent-model');
-    const custom = document.getElementById('agent-model-custom');
+async function saveAgentConfig(kind) {
+    const { backendEl, modelEl: select, customEl: custom, endpoint } = _agentUI(kind);
+    const backend = backendEl.value;
     const model = select.value === '_custom' ? custom.value.trim() : select.value;
     if (!model) { toast('Select or enter a model ID'); return; }
     try {
-        const res = await fetch('/api/agent', {
+        const res = await fetch(endpoint, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ backend, model }),
         });
         const data = await res.json();
         if (data.error) { toast('Error: ' + data.error); return; }
-        toast('Agent updated: ' + backend + ' / ' + model);
+        toast((kind === 'background' ? 'Background agent' : 'Agent') + ' updated: ' + backend + ' / ' + model);
     } catch(e) {
         toast('Error: ' + e.message);
     }

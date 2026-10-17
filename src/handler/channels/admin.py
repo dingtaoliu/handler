@@ -18,8 +18,8 @@ logger = logging.getLogger("handler.channels.admin")
 import json as _json
 
 _DEFAULT_MODELS: dict[str, list[str]] = {
-    "openai": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.4-pro", "gpt-5.4-nano"],
-    "openai-manual": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.4-pro"],
+    "openai": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.4-pro", "gpt-5.4-nano", "gpt-5.6", "gpt-5.6-luna"],
+    "openai-manual": ["gpt-5.4-mini", "gpt-5.4", "gpt-5.4-pro", "gpt-5.6", "gpt-5.6-luna"],
     "claude": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
     "anthropic": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
 }
@@ -94,6 +94,8 @@ def create_admin_router(
     tools: list | None = None,
     agent_config_loader=None,
     agent_swapper=None,
+    background_agent_config_loader=None,
+    background_agent_swapper=None,
 ) -> APIRouter:
     """Build a FastAPI router with all admin/dashboard endpoints."""
     router = APIRouter(prefix="/api")
@@ -134,6 +136,34 @@ def create_admin_router(
             )
         agent_swapper(body.backend, body.model.strip())
         logger.info(f"agent config updated: backend={body.backend}, model={body.model}")
+        return {"ok": True, "backend": body.backend, "model": body.model}
+
+    # --- Background agent config (cron prompts, task notifications) ---
+
+    @router.get("/agent/background")
+    async def background_agent_config():
+        if not background_agent_config_loader:
+            return {"backend": "openai", "model": "gpt-5.6-luna"}
+        return background_agent_config_loader()
+
+    @router.put("/agent/background")
+    async def background_agent_update(body: _AgentBody):
+        valid_backends = ["openai", "openai-manual", "claude", "anthropic"]
+        if body.backend not in valid_backends:
+            return JSONResponse(
+                {"error": f"invalid backend, must be one of: {valid_backends}"},
+                status_code=400,
+            )
+        if not body.model.strip():
+            return JSONResponse({"error": "model is required"}, status_code=400)
+        if not background_agent_swapper:
+            return JSONResponse(
+                {"error": "background agent swapping not available"}, status_code=503
+            )
+        background_agent_swapper(body.backend, body.model.strip())
+        logger.info(
+            f"background agent config updated: backend={body.backend}, model={body.model}"
+        )
         return {"ok": True, "backend": body.backend, "model": body.model}
 
     # --- Model list ---

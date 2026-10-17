@@ -65,12 +65,23 @@ _DEFAULT_MODELS = {
     "anthropic": "claude-opus-4-6",
 }
 
+# Cheaper defaults for unattended work (cron prompts, task notifications) —
+# used the first time a background config is written, if the caller doesn't
+# specify a model.
+_DEFAULT_BACKGROUND_MODELS = {
+    "openai": "gpt-5.6-luna",
+    "openai-manual": "gpt-5.6-luna",
+    "claude": "claude-haiku-4-5-20251001",
+    "anthropic": "claude-haiku-4-5-20251001",
+}
+
 _MANUAL_PROVIDERS = {
     "openai-manual": OpenAIProvider,
     "anthropic": AnthropicProvider,
 }
 
 _AGENT_CONFIG_PATH = CONFIG_DIR / "agent.json"
+_BACKGROUND_AGENT_CONFIG_PATH = CONFIG_DIR / "agent_background.json"
 
 
 def _normalize_agent_config(backend: str | None, model: str | None) -> dict[str, str]:
@@ -101,6 +112,40 @@ def _save_agent_config(backend: str, model: str) -> None:
     config = _normalize_agent_config(backend, model)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     _AGENT_CONFIG_PATH.write_text(json.dumps(config, indent=2))
+
+
+def _normalize_background_agent_config(
+    backend: str | None, model: str | None, main_backend: str
+) -> dict[str, str]:
+    resolved_backend = (backend or main_backend).strip()
+    if resolved_backend not in _VALID_BACKENDS:
+        resolved_backend = main_backend
+    resolved_model = (model or "").strip() or _DEFAULT_BACKGROUND_MODELS[resolved_backend]
+    return {"backend": resolved_backend, "model": resolved_model}
+
+
+def _load_background_agent_config(main_backend: str) -> dict:
+    """Load the model used for unattended runs (cron prompts, task notifications).
+
+    Defaults to the same backend as the main agent (so it uses whatever API key
+    is already configured) but a cheaper model, unless overridden.
+    """
+    if _BACKGROUND_AGENT_CONFIG_PATH.exists():
+        try:
+            data = json.loads(_BACKGROUND_AGENT_CONFIG_PATH.read_text())
+            return _normalize_background_agent_config(
+                data.get("backend"), data.get("model"), main_backend
+            )
+        except Exception:
+            pass
+    return _normalize_background_agent_config(None, None, main_backend)
+
+
+def _save_background_agent_config(backend: str, model: str, main_backend: str) -> None:
+    """Persist background agent config to disk."""
+    config = _normalize_background_agent_config(backend, model, main_backend)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _BACKGROUND_AGENT_CONFIG_PATH.write_text(json.dumps(config, indent=2))
 
 
 def _write_pid() -> None:
@@ -183,7 +228,12 @@ def main():
     agent_cfg = _load_agent_config()
     backend = agent_cfg["backend"]
     model = agent_cfg["model"]
-    agent_ref: dict[str, BaseAgent | None] = {"current": None}
+
+    bg_agent_cfg = _load_background_agent_config(backend)
+    bg_backend = bg_agent_cfg["backend"]
+    bg_model = bg_agent_cfg["model"]
+
+    agent_ref: dict[str, BaseAgent | None] = {"current": None, "background": None}
 
     def _get_agent() -> BaseAgent:
         agent = agent_ref["current"]
@@ -227,7 +277,9 @@ def main():
 
     agent = _build_agent(backend, model)
     agent_ref["current"] = agent
-    env = Environment(agent, store)
+    background_agent = _build_agent(bg_backend, bg_model)
+    agent_ref["background"] = background_agent
+    env = Environment(agent, store, background_agent=background_agent)
 
     def swap_agent(new_backend: str, new_model: str) -> None:
         """Rebuild the agent and hot-swap it on the environment."""
@@ -236,6 +288,14 @@ def main():
         agent_ref["current"] = next_agent
         env.agent = next_agent
         logger.info(f"agent swapped: backend={new_backend}, model={new_model}")
+
+    def swap_background_agent(new_backend: str, new_model: str) -> None:
+        """Rebuild the background (cron/task-notification) agent and hot-swap it."""
+        _save_background_agent_config(new_backend, new_model, backend)
+        next_agent = _build_agent(new_backend, new_model)
+        agent_ref["background"] = next_agent
+        env.background_agent = next_agent
+        logger.info(f"background agent swapped: backend={new_backend}, model={new_model}")
 
     if "web" in enabled_channels:
         env.add_channel(
@@ -248,6 +308,8 @@ def main():
                 tools=tools,
                 agent_config_loader=_load_agent_config,
                 agent_swapper=swap_agent,
+                background_agent_config_loader=lambda: _load_background_agent_config(backend),
+                background_agent_swapper=swap_background_agent,
             )
         )
     if "scheduler" in enabled_channels:

@@ -37,8 +37,13 @@ class Channel(ABC):
 class Environment:
     """The outer loop. Starts channels, consumes events, runs the agent, delivers responses."""
 
-    def __init__(self, agent, store: EventStore):
+    # Event types that represent unattended/automated runs rather than a live
+    # user turn — routed to background_agent when one is configured.
+    _BACKGROUND_EVENT_TYPES = ("cron_prompt", "task_notification")
+
+    def __init__(self, agent, store: EventStore, background_agent=None):
         self.agent = agent
+        self.background_agent = background_agent
         self.store = store
         self.queue: asyncio.Queue[Event] = asyncio.Queue()
         self.channels: dict[str, Channel] = {}
@@ -172,7 +177,12 @@ class Environment:
         self.store.log_event(event.type, event.source, event.data, cid, user_id)
 
         messages = self.store.get_messages(cid)
-        response = await self.agent.run(cid, messages)
+        agent = (
+            self.background_agent
+            if event.type in self._BACKGROUND_EVENT_TYPES and self.background_agent is not None
+            else self.agent
+        )
+        response = await agent.run(cid, messages)
 
         self.store.add_message(cid, "assistant", response)
         self.store.log_event(

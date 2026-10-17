@@ -51,6 +51,8 @@ class WebChannel(Channel):
         tools: list | None = None,
         agent_config_loader=None,
         agent_swapper=None,
+        background_agent_config_loader=None,
+        background_agent_swapper=None,
     ):
         self.store = store
         self.host = host
@@ -63,6 +65,8 @@ class WebChannel(Channel):
             tools=tools,
             agent_config_loader=agent_config_loader,
             agent_swapper=agent_swapper,
+            background_agent_config_loader=background_agent_config_loader,
+            background_agent_swapper=background_agent_swapper,
         )
 
     def _new_conversation_id(self, user_id: str | None = None) -> str:
@@ -89,7 +93,14 @@ class WebChannel(Channel):
                 self.listeners.pop(conversation_id, None)
 
     def _build_app(
-        self, memory, config_dir, tools, agent_config_loader, agent_swapper
+        self,
+        memory,
+        config_dir,
+        tools,
+        agent_config_loader,
+        agent_swapper,
+        background_agent_config_loader=None,
+        background_agent_swapper=None,
     ) -> FastAPI:
         app = FastAPI(title="Handler")
         app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -102,6 +113,8 @@ class WebChannel(Channel):
             tools=tools,
             agent_config_loader=agent_config_loader,
             agent_swapper=agent_swapper,
+            background_agent_config_loader=background_agent_config_loader,
+            background_agent_swapper=background_agent_swapper,
         )
         app.include_router(admin_router)
 
