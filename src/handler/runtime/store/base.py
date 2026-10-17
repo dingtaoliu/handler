@@ -12,7 +12,14 @@ from datetime import datetime
 from typing import Protocol
 
 from ..types import (
+    Approval,
+    ApprovalStatus,
+    AuditEntry,
+    Connection,
     Event,
+    MemoryTopic,
+    Schedule,
+    SettingsVersion,
     Lane,
     Lease,
     Message,
@@ -126,3 +133,125 @@ class Store(EventQueue, Protocol):
     async def list_steps(self, run_id: str) -> list[RunStep]: ...
 
     async def close(self) -> None: ...
+
+
+# --------------------------------------------------------------------------
+# Phase 2 domain stores. Each is implemented as a mixin on SQLiteCore
+# (store/sqlite_<domain>.py) and later on the Postgres store.
+# --------------------------------------------------------------------------
+
+
+class ScheduleStore(Protocol):
+    async def create_schedule(self, schedule: Schedule) -> None: ...
+    async def get_schedule(self, schedule_id: str) -> Schedule | None: ...
+    async def list_schedules(self, include_disabled: bool = False) -> list[Schedule]: ...
+    async def update_schedule(self, schedule: Schedule) -> None: ...
+    async def delete_schedule(self, schedule_id: str) -> bool: ...
+
+    async def next_due_at(self) -> datetime | None:
+        """Earliest next_run_at among enabled schedules (None if none)."""
+        ...
+
+    async def due_schedules(self, now: datetime, limit: int = 50) -> list[Schedule]:
+        """Enabled schedules with next_run_at <= now, oldest first."""
+        ...
+
+    async def fire_schedule(
+        self,
+        schedule: Schedule,
+        expected_next_run_at: datetime,
+        next_run_at: datetime | None,
+        event: Event,
+        thread: ThreadSpec,
+    ) -> bool:
+        """Atomically emit the schedule's event and advance it.
+
+        In one transaction: only if the stored next_run_at still equals
+        expected_next_run_at (another worker hasn't fired it), put the event
+        exactly like EventQueue.put (idempotent on its key, routes the
+        thread), set last_run_at = expected_next_run_at and next_run_at; if
+        next_run_at is None, set enabled = False. Returns True if this call
+        fired it. Wakes waiting readers.
+        """
+        ...
+
+
+class ApprovalStore(Protocol):
+    async def create_approval(self, approval: Approval) -> None: ...
+    async def get_approval(self, approval_id: str) -> Approval | None: ...
+    async def list_approvals(
+        self, status: ApprovalStatus | None = None, limit: int = 100
+    ) -> list[Approval]: ...
+
+    async def transition_approval(
+        self,
+        approval_id: str,
+        expected: ApprovalStatus,
+        new: ApprovalStatus,
+        *,
+        decided_by: str | None = None,
+        result: dict | None = None,
+    ) -> bool:
+        """Compare-and-set the status. Sets decided_by/decided_at when given a
+        decider, and result when given. Returns False if the status wasn't
+        `expected` (e.g. already decided)."""
+        ...
+
+
+class AuditStore(Protocol):
+    async def add_audit(self, entry: AuditEntry) -> None: ...
+    async def list_audit(
+        self, run_id: str | None = None, limit: int = 200
+    ) -> list[AuditEntry]:
+        """Newest first."""
+        ...
+
+
+class MemoryStore(Protocol):
+    async def list_topics(self) -> list[MemoryTopic]:
+        """All topics, by name (content included)."""
+        ...
+
+    async def get_topic(self, name: str) -> MemoryTopic | None: ...
+
+    async def put_topic(self, topic: MemoryTopic, expected_version: int | None) -> MemoryTopic | None:
+        """Create (expected_version None: must not exist) or replace
+        (expected_version must equal the stored version). Stores
+        version = expected_version + 1 (or 1). Returns the stored topic, or
+        None on a version conflict."""
+        ...
+
+    async def delete_topic(self, name: str) -> bool: ...
+
+
+class SettingsStore(Protocol):
+    async def get_settings(self, section: str) -> SettingsVersion | None:
+        """Latest version of a section."""
+        ...
+
+    async def put_settings(
+        self, section: str, value: dict, *, updated_by: str | None,
+        expected_version: int | None, schema_version: int = 1,
+    ) -> SettingsVersion | None:
+        """Append a new version (expected_version None: section must not
+        exist yet; otherwise must equal the latest). Returns the new version,
+        or None on conflict. History is never overwritten."""
+        ...
+
+    async def settings_history(self, section: str, limit: int = 50) -> list[SettingsVersion]:
+        """Newest first."""
+        ...
+
+
+class ConnectionStore(Protocol):
+    async def put_connection(self, connection: Connection) -> None:
+        """Insert or replace by id."""
+        ...
+
+    async def get_connection(self, connection_id: str) -> Connection | None: ...
+
+    async def find_connection(self, connector: str, owner: str) -> Connection | None:
+        """The active connection for (connector, owner), if any."""
+        ...
+
+    async def list_connections(self, owner: str | None = None) -> list[Connection]: ...

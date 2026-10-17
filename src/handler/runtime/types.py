@@ -194,3 +194,126 @@ class RunStep:
     data: dict[str, Any] = field(default_factory=dict)  # small summary fields only
     raw_ref: str | None = None  # pointer to the full payload in file storage
     parent_seq: int | None = None
+
+
+# --------------------------------------------------------------------------
+# Phase 2: schedules, gateway (grants, approvals, audit), memory, settings,
+# connections. See docs/rebuild/phase2.md.
+# --------------------------------------------------------------------------
+
+
+class Risk(StrEnum):
+    READ = "read"
+    WRITE_INTERNAL = "write_internal"
+    WRITE_EXTERNAL = "write_external"
+    EXEC = "exec"
+
+
+class Decision(StrEnum):
+    ALLOW = "allow"
+    ASK = "ask"
+    DENY = "deny"
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"  # decided, execution in progress
+    DENIED = "denied"
+    EXPIRED = "expired"
+    EXECUTED = "executed"  # approved and the stored call succeeded
+    FAILED = "failed"  # approved but the stored call failed
+
+
+@dataclass
+class Schedule:
+    """An automation. `spec` forms: "every 30m" | "cron: 0 7 * * 1-5" | "at: <ISO-8601>"."""
+
+    name: str
+    prompt: str
+    spec: str
+    created_by: str | None = None
+    timezone: str = "UTC"
+    notify: list[str] = field(default_factory=list)  # user ids to notify with results
+    harness: str | None = None  # None = thread-type default
+    model: str | None = None
+    enabled: bool = True
+    one_shot: bool = False  # derived from an "at:" spec; disabled after firing
+    parent_thread_key: str | None = None  # set for async delegation
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    id: str = field(default_factory=lambda: new_id("sch"))
+    created_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class Approval:
+    """A gated tool call waiting for (or decided by) a human."""
+
+    run_id: str
+    thread_key: str
+    tool: str  # MCP tool name, e.g. "gmail_send"
+    action: str  # action id, e.g. "gmail.send"
+    args: dict[str, Any]
+    requested_by: str | None  # acting_as user of the run, None = the agent itself
+    reason: str = ""
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    result: dict[str, Any] | None = None  # {"content": ..., "is_error": bool} after execution
+    expires_at: datetime | None = None
+    id: str = field(default_factory=lambda: new_id("apr"))
+    created_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class AuditEntry:
+    run_id: str | None
+    thread_key: str | None
+    actor: str | None  # acting_as user, or None for the agent
+    tool: str
+    action: str
+    decision: Decision
+    status: str  # "ok" | "error" | "pending" | "denied"
+    args_digest: str = ""  # sha256 of canonical JSON args
+    args_preview: str = ""  # truncated
+    result_size: int = 0
+    duration_ms: int = 0
+    error: str | None = None
+    approval_id: str | None = None
+    id: str = field(default_factory=lambda: new_id("aud"))
+    at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class MemoryTopic:
+    name: str  # e.g. "people/danny" (no extension)
+    description: str
+    content: str
+    version: int = 1
+    updated_by: str | None = None
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class SettingsVersion:
+    section: str  # e.g. "persona", "threads", "grants", "limits"
+    version: int
+    value: dict[str, Any]
+    schema_version: int = 1
+    updated_by: str | None = None
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass
+class Connection:
+    connector: str  # e.g. "google"
+    owner: str  # "user:<id>" | "instance"
+    provider: str  # "local" | "platform" | "broker"
+    external_ref: str | None = None  # platform account id, broker subject, ...
+    secret_ref: str | None = None  # SecretStore key
+    scopes: list[str] = field(default_factory=list)
+    status: str = "active"  # "active" | "needs_reauth" | "revoked"
+    created_by: str | None = None
+    last_used_at: datetime | None = None
+    id: str = field(default_factory=lambda: new_id("con"))
+    created_at: datetime = field(default_factory=utcnow)

@@ -99,7 +99,13 @@ def _transaction(db: sqlite3.Connection) -> Iterator[None]:
         raise
 
 
-class SQLiteStore:
+class SQLiteCore:
+    """Core tables (events, threads, runs, messages, steps) and DB plumbing.
+
+    Domain mixins (schedules, approvals, memory, ...) live in sqlite_<domain>.py,
+    use self._call / self._clock / self._wake and the module helpers below, and
+    ship their own schema_<domain>.sql. SQLiteStore composes them.
+    """
     def __init__(
         self, path: str | Path, *, clock: Callable[[], datetime] = utcnow
     ) -> None:
@@ -119,7 +125,8 @@ class SQLiteStore:
                 db.execute("PRAGMA busy_timeout = 5000")
                 db.execute("PRAGMA journal_mode = WAL")
                 db.execute("PRAGMA foreign_keys = ON")
-                db.executescript(Path(__file__).with_name("schema.sql").read_text())
+                for schema in sorted(Path(__file__).parent.glob("schema*.sql")):
+                    db.executescript(schema.read_text())
             except BaseException:
                 db.close()
                 raise
@@ -409,3 +416,7 @@ class SQLiteStore:
             self._closed = True
             self._close_task = asyncio.create_task(self._shutdown())
         await asyncio.shield(self._close_task)
+
+
+class SQLiteStore(SQLiteCore):
+    """The full SQLite store: core plus every domain mixin (composed as they land)."""
