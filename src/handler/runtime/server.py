@@ -111,6 +111,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                    default=int(os.environ["HANDLER_MAX_CONCURRENT"])
                    if os.environ.get("HANDLER_MAX_CONCURRENT") else None,
                    help="maximum active runs across all lanes")
+    s.add_argument("--codex-auth-link", action="store_true",
+                   default=os.environ.get("HANDLER_RT_CODEX_AUTH_LINK", "") == "1",
+                   help="symlink --codex-auth-json into each harness home instead of "
+                        "copying it (keeps one shared ChatGPT login fresh)")
     s.add_argument("--codex-sandbox",
                    default=os.environ.get("HANDLER_CODEX_SANDBOX", "workspace-write"),
                    choices=SANDBOX_MODES,
@@ -163,6 +167,7 @@ async def serve(args: argparse.Namespace) -> None:
         default_reasoning_effort=args.reasoning_effort,
         auth_json=Path(args.codex_auth_json).expanduser() if args.codex_auth_json else None,
         sandbox=args.codex_sandbox,
+        auth_json_link=args.codex_auth_link,
     )
     config = RunConfig(data_dir=data_dir, reasoning_effort=args.reasoning_effort,
                        timeout_seconds=float(limits_cfg["run_timeout_seconds"]),

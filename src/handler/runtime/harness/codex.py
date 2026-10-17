@@ -200,6 +200,7 @@ class CodexHarness:
         sandbox: str = "workspace-write",
         approval_policy: str = "never",
         auth_json: Path | None = None,
+        auth_json_link: bool = False,
         extra_args: list[str] | None = None,
         env_allowlist: tuple[str, ...] | list[str] = DEFAULT_ENV_ALLOWLIST,
     ) -> None:
@@ -216,6 +217,10 @@ class CodexHarness:
         self.sandbox = sandbox
         self.approval_policy = approval_policy
         self.auth_json = auth_json
+        # Link instead of copy: every run shares one login file, so token
+        # refreshes by one Codex process are seen by all (copies would drift
+        # and rotated refresh tokens would invalidate each other).
+        self.auth_json_link = auth_json_link
         self.extra_args = list(extra_args or [])
         self.env_allowlist = tuple(env_allowlist)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
@@ -242,7 +247,12 @@ class CodexHarness:
     def _prepare(self, req: RunRequest) -> dict[str, str]:
         req.home.mkdir(parents=True, exist_ok=True)
         req.workspace.mkdir(parents=True, exist_ok=True)
-        if self.auth_json is not None:
+        if self.auth_json is not None and self.auth_json_link:
+            target, source = req.home / "auth.json", self.auth_json.resolve()
+            if not (target.is_symlink() and target.resolve() == source):
+                target.unlink(missing_ok=True)
+                os.symlink(source, target)
+        elif self.auth_json is not None:
             try:
                 fd = os.open(req.home / "auth.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             except FileExistsError:

@@ -558,3 +558,21 @@ def test_sandbox_mode_is_validated_and_explicit(request_for):
     argv = CodexHarness("codex-test", sandbox="danger-full-access")._argv(request_for())
     assert argv[argv.index("-s") + 1] == "danger-full-access"
     assert "shell_environment_policy.inherit=\"core\"" in argv
+
+
+def test_auth_json_link_mode(request_for, tmp_path):
+    source = tmp_path / "login" / "auth.json"
+    source.parent.mkdir()
+    source.write_text('{"token":"a"}')
+    req = request_for()
+    harness = CodexHarness("codex-test", auth_json=source, auth_json_link=True)
+    harness._prepare(req)
+    target = req.home / "auth.json"
+    assert target.is_symlink() and target.resolve() == source.resolve()
+    source.write_text('{"token":"refreshed"}')  # a refresh by any run is shared
+    assert target.read_text() == '{"token":"refreshed"}'
+    # A copy left by copy mode (or a stale link) is replaced by the link.
+    target.unlink()
+    target.write_text("stale copy")
+    harness._prepare(req)
+    assert target.is_symlink() and target.read_text() == '{"token":"refreshed"}'
