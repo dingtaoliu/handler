@@ -1,0 +1,18 @@
+# Model prices in USD per million tokens.
+# TODO: verify -- rates are intentionally null until confirmed against the
+# vendor's published pricing. Unpriced usage yields cost_usd = None.
+# `model` may be an exact name or a glob; exact beats glob, and the latest
+# effective_from <= the usage time wins.
+prices:
+  - model: "gpt-5*"          # TODO: verify
+    effective_from: 2025-01-01
+    input_per_mtok: null
+    cached_input_per_mtok: null
+    cache_write_per_mtok: null
+    output_per_mtok: null
+  - model: "gpt-6*"          # TODO: verify
+    effective_from: 2025-01-01
+    input_per_mtok: null
+    cached_input_per_mtok: null
+    cache_write_per_mtok: null
+    output_per_mtok: null
