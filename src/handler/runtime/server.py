@@ -29,6 +29,7 @@ from .observability.pricing import PriceTable
 from .run import RunConfig, RunExecutor
 from .scheduler import Scheduler
 from .settings import SettingsService
+from .store.postgres import PostgresStore
 from .store.sqlite import SQLiteStore
 from .tools.automation import AutomationTools
 from .tools.notify import NotifyTools
@@ -39,7 +40,7 @@ from .web.settings_api import settings_router
 logger = logging.getLogger("handler.runtime.server")
 
 
-def thread_router(store: SQLiteStore):
+def thread_router(store: SQLiteStore | PostgresStore):
     """Route an event (e.g. approval.resolved) into its existing thread."""
 
     async def emit(event: Event) -> None:
@@ -59,6 +60,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     sub = p.add_subparsers(dest="command", required=True)
     s = sub.add_parser("serve", help="run the web API, MCP gateway, dispatcher and scheduler")
     s.add_argument("--data-dir", default=os.environ.get("HANDLER_RT_DATA_DIR", "~/.handler-rt"))
+    s.add_argument("--database-url", default=os.environ.get("DATABASE_URL"),
+                   help="Postgres URL; when set, use PostgresStore instead of SQLite")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8100)
     s.add_argument("--model", default=os.environ.get("HANDLER_RT_MODEL"),
@@ -77,7 +80,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 async def serve(args: argparse.Namespace) -> None:
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
-    store = SQLiteStore(data_dir / "handler.db")
+    store = (PostgresStore(args.database_url) if args.database_url
+             else SQLiteStore(data_dir / "handler.db"))
     bus = RunEventBus()
 
     settings = SettingsService(store)
