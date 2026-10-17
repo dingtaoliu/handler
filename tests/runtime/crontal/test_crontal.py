@@ -41,7 +41,9 @@ def test_signature_verify():
     assert not verify(SECRET, "garbage", body) and not verify(SECRET, None, body)
 
 
-async def test_ingest_routes_notifications_to_entity_threads(tmp_path):
+async def test_ingest_routes_notifications_to_entity_threads(tmp_path, caplog):
+    # INFO on: the ingest log line once crashed only when INFO was enabled.
+    caplog.set_level("INFO")
     store = SQLiteStore(tmp_path / "h.db")
     app = FastAPI()
     app.include_router(crontal_ingest_router(store, SECRET))

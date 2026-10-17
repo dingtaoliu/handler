@@ -76,7 +76,7 @@ def crontal_ingest_router(
                           owner_user_id=recipient, harness=harness_name)
         new = await queue.put(event, spec)
         logger.info("crontal notification", extra={"notification_id": note_id,
-                                                   "thread": key, "duplicate": not new})
+                                                   "thread_key": key, "duplicate": not new})
         return JSONResponse({"thread_key": key, "duplicate": not new},
                             status_code=202 if new else 200)
 
