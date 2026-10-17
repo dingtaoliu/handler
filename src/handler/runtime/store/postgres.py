@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from collections.abc import Callable
 from dataclasses import asdict, fields
 from datetime import datetime, timedelta
@@ -11,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
@@ -38,6 +39,7 @@ T = TypeVar("T")
 CHANNEL = "handler_work"
 _JSON_FIELDS = {"payload", "blocks", "raw", "data", "usage", "trigger_event_ids"}
 _SCHEMA_LOCK = 7_283_001
+_SCHEMA_NAME = re.compile(r"[a-z_][a-z0-9_]{0,39}")
 
 
 def _values(record: Any) -> dict[str, Any]:
@@ -79,7 +81,8 @@ async def _insert(conn: AsyncConnection, table: str, values: dict[str, Any]) -> 
 
 
 async def _notify(conn: AsyncConnection) -> None:
-    await conn.execute("SELECT pg_notify(%s, '')", (CHANNEL,))
+    """Wake listeners of this connection's schema (the channel includes it)."""
+    await conn.execute("SELECT pg_notify(%s || '_' || current_schema(), '')", (CHANNEL,))
 
 
 async def _put_event(
@@ -121,13 +124,18 @@ class PostgresCore:
 
     def __init__(
         self, dsn: str, *, clock: Callable[[], datetime] = utcnow,
-        min_size: int = 1, max_size: int = 5,
+        min_size: int = 1, max_size: int = 5, schema: str | None = None,
     ) -> None:
+        if schema is not None and not _SCHEMA_NAME.fullmatch(schema):
+            raise ValueError(f"invalid schema name {schema!r}: use [a-z0-9_], max 40")
         self._dsn = dsn
         self._clock = clock
+        self._schema = schema
+        self._options = "-c timezone=UTC" + (
+            f" -c search_path={schema}" if schema else "")
         self._pool = AsyncConnectionPool(
             dsn, min_size=min_size, max_size=max_size, open=False,
-            kwargs={"row_factory": dict_row, "options": "-c timezone=UTC"},
+            kwargs={"row_factory": dict_row, "options": self._options},
         )
         self._wake = asyncio.Event()
         self._ready: asyncio.Task[None] | None = None
@@ -140,6 +148,9 @@ class PostgresCore:
         await self._pool.open()
         async with self._pool.connection() as conn:
             await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK,))
+            if self._schema:
+                await conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    sql.Identifier(self._schema)))
             for schema in sorted(Path(__file__).parent.glob("schema_pg*.sql")):
                 await conn.execute(schema.read_text())
         self._listener = asyncio.create_task(self._listen())
@@ -169,9 +180,13 @@ class PostgresCore:
     async def _listen(self) -> None:
         while not self._closed:
             try:
-                conn = await AsyncConnection.connect(self._dsn, autocommit=True)
+                conn = await AsyncConnection.connect(
+                    self._dsn, autocommit=True, options=self._options)
                 async with conn:
-                    await conn.execute(f"LISTEN {CHANNEL}")
+                    cursor = await conn.execute(
+                        "SELECT %s || '_' || current_schema() AS channel", (CHANNEL,))
+                    row = await cursor.fetchone()
+                    await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(row[0])))
                     self._listening.set()
                     self._wake.set()
                     async for _ in conn.notifies():
