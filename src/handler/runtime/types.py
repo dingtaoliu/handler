@@ -1,0 +1,196 @@
+"""Core data types for the handler runtime.
+
+These are the shared contracts between the event queue, dispatcher, harness
+adapters, observability and the web API. See docs/agent-runtime-design.md.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import StrEnum
+from typing import Any
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+class Lane(StrEnum):
+    INTERACTIVE = "interactive"
+    BACKGROUND = "background"
+
+
+class ThreadType(StrEnum):
+    CHAT = "chat"
+    GMAIL = "gmail"
+    AUTOMATION = "automation"
+
+
+class EventStatus(StrEnum):
+    ROUTED = "routed"
+    IGNORED = "ignored"
+
+
+class RunStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class Role(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+    EVENT = "event"
+
+
+@dataclass(frozen=True)
+class Event:
+    """Something that happened. Immutable once written to the event queue."""
+
+    type: str  # e.g. "chat.message", "automation.fired"
+    source: str  # producer name, e.g. "web", "scheduler"
+    payload: dict[str, Any]
+    idempotency_key: str
+    thread_key: str | None = None
+    user_id: str | None = None
+    id: str = field(default_factory=lambda: new_id("evt"))
+    received_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(frozen=True)
+class ThreadSpec:
+    """How a routed event's thread should be created if it doesn't exist yet."""
+
+    key: str
+    type: ThreadType
+    lane: Lane
+    owner_user_id: str | None = None
+    harness: str = "codex"
+    model: str | None = None
+    priority: int = 0  # lower runs first
+
+
+@dataclass
+class Thread:
+    key: str
+    type: ThreadType
+    lane: Lane
+    owner_user_id: str | None
+    harness: str
+    model: str | None
+    priority: int
+    session_id: str | None
+    pending_since: datetime | None
+    available_at: datetime | None
+    attempts: int
+    last_error: str | None
+    dead: bool
+    lease_owner: str | None
+    lease_until: datetime | None
+    lease_version: int
+    summary: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class Lease:
+    """Proof that a worker holds a thread. Writes are fenced on `version`."""
+
+    thread_key: str
+    owner: str
+    version: int
+    until: datetime
+
+
+@dataclass
+class TokenUsage:
+    input_tokens: int = 0  # total input, including cached
+    cached_input_tokens: int = 0  # subset of input served from cache
+    cache_write_tokens: int = 0
+    output_tokens: int = 0  # total output, including reasoning
+    reasoning_tokens: int = 0  # subset of output
+
+    def __add__(self, other: TokenUsage) -> TokenUsage:
+        return TokenUsage(
+            self.input_tokens + other.input_tokens,
+            self.cached_input_tokens + other.cached_input_tokens,
+            self.cache_write_tokens + other.cache_write_tokens,
+            self.output_tokens + other.output_tokens,
+            self.reasoning_tokens + other.reasoning_tokens,
+        )
+
+
+@dataclass
+class Run:
+    id: str
+    thread_key: str
+    lease_version: int
+    trigger_event_ids: list[str]
+    status: RunStatus
+    harness: str
+    model: str | None
+    parent_run_id: str | None = None
+    started_at: datetime = field(default_factory=utcnow)
+    finished_at: datetime | None = None
+    error: str | None = None
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    cost_usd: float | None = None  # None = unpriced
+
+
+@dataclass
+class Message:
+    """A turn in a thread's official record (harness-independent).
+
+    `blocks` is a list of normalized content blocks, e.g.
+    {"type": "text", "text": ...}, {"type": "tool_call", "id", "name", "input"},
+    {"type": "tool_result", "id", "output", "is_error"}.
+    `raw` keeps the harness-native payload for fidelity.
+    """
+
+    thread_key: str
+    role: Role
+    blocks: list[dict[str, Any]]
+    run_id: str | None = None
+    raw: dict[str, Any] | None = None
+    id: str = field(default_factory=lambda: new_id("msg"))
+    created_at: datetime = field(default_factory=utcnow)
+
+
+class StepKind(StrEnum):
+    LLM_CALL = "llm_call"
+    REASONING = "reasoning"
+    ASSISTANT_TEXT = "assistant_text"
+    TOOL_CALL = "tool_call"  # built-in (shell, file edit) or MCP
+    PERMISSION = "permission"
+    SUBAGENT = "subagent"
+    COMPACTION = "compaction"
+    ERROR = "error"
+    RETRY = "retry"
+
+
+@dataclass
+class RunStep:
+    """One observable step of a run (§11.2)."""
+
+    run_id: str
+    seq: int
+    kind: StepKind
+    name: str
+    source: str  # "stream" | "hook" | "gateway" | "proxy"
+    started_at: datetime = field(default_factory=utcnow)
+    ended_at: datetime | None = None
+    status: str = "ok"  # "ok" | "error" | "denied" | "running"
+    model: str | None = None
+    usage: TokenUsage | None = None
+    cost_usd: float | None = None
+    data: dict[str, Any] = field(default_factory=dict)  # small summary fields only
+    raw_ref: str | None = None  # pointer to the full payload in file storage
+    parent_seq: int | None = None

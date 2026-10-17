@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a14b0b-f792-7693-8670-4c8b06271552"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc \"printf 'hi' > hello.txt && cat hello.txt\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc \"printf 'hi' > hello.txt && cat hello.txt\"","aggregated_output":"hi","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":30066,"cached_input_tokens":26496,"cache_write_input_tokens":0,"output_tokens":47,"reasoning_output_tokens":0}}
