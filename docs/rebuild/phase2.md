@@ -126,3 +126,41 @@ Design reference: `docs/agent-runtime-design.md` (§3 thread types, §6 gateway 
 - Executor: issue a run token and pass the gateway MCP server to the harness. Build instructions from settings + memory. Use per-thread-type harness and model from settings.
 - Server: mount `/mcp`, the approvals, settings and notifications routers; run the scheduler; route `approval.resolved` and `task.completed` events into their threads; wire `GrantPolicy` from the `grants` settings.
 - End-to-end test, plus a live check that Codex calls a handler tool over MCP.
+
+---
+
+## Phase 2b
+
+### J. Postgres domain tables
+
+**Files**: `store/postgres_domains.py`, `store/schema_pg_domains.sql`, `store/sqlite_connections.py`, `store/schema_connections.sql`, `tests/runtime/store_pg/test_domains.py` (and any shared fixtures it needs), plus the `--database-url` option in `runtime/server.py` (only that option and the store selection).
+
+- **Postgres mixins** with the same semantics as the SQLite ones, for every phase 2 store:
+  - `ScheduleStore`, including the atomic compare-and-set `fire_schedule` that reuses the core event insert and routing, in one transaction;
+  - `ApprovalStore`, `AuditStore`, `MemoryStore` and `SettingsStore`;
+  - the notifications store defined in `store/sqlite_memory.py`;
+  - `ConnectionStore`.
+
+  Compose them into `PostgresStore` in `store/postgres.py`.
+- `ConnectionStore` has no SQLite implementation yet: add `ConnectionMixin` (`sqlite_connections.py` + `schema_connections.sql`) and compose it into `SQLiteStore`.
+- A parametrized contract suite runs the domain behaviors against both backends: schedule CAS (concurrent fires → one winner), approvals CAS, memory version conflicts, settings history, notifications, connections.
+- Server: `--database-url` (default `$DATABASE_URL`). When set, use `PostgresStore`; otherwise `SQLiteStore` in the data dir.
+
+### K. Upstream MCP connectors
+
+**Files**: `gateway/upstream.py`, `gateway/credentials.py`, `tests/runtime/upstream/`.
+
+- **`CredentialProvider` protocol**: `async resolve(connector: str, owner: str) -> UpstreamAccess | None`. `UpstreamAccess` has `url`, `headers` and an optional `expires_at`. `None` means the owner has no active connection.
+  - `StaticCredentials(config)`: url and headers from configuration (secret values read from environment variables named in config).
+  - `ConnectionCredentials(store: ConnectionStore, resolvers: dict[provider, Callable])`: looks up the connection for (connector, owner) and dispatches on its `provider`.
+  - A `needs_reauth` connection or a 401 from upstream marks the connection `needs_reauth` and returns an error result explaining that the user must reconnect.
+- **`UpstreamConnector(name, credentials, tools: dict[upstream_tool_name, {risk, description?, rename?}], owner_for: Callable[[RunContext], str])`** implementing `ToolProvider`:
+  - Exposes only the curated tools, named `<name>_<tool>` with action id `<name>.<tool>` and the given risk.
+  - Input schemas and descriptions are fetched from the upstream once via an MCP `list_tools` call with any available credential, then cached. Unknown curated names are an error at startup.
+  - A call resolves the credential for `owner_for(ctx)` (default: `user:<acting_as>`, falling back to `instance`), opens an MCP client session over streamable HTTP to that url with those headers, calls the tool, and maps the result to a `ToolResult`. Connection errors become error results; nothing raises.
+- **Tests**: a fake upstream MCP server built with the installed `mcp` SDK, run with uvicorn on a free localhost port, with two tools, header-based auth and a 401 path. Cover:
+  - curation, schemas and renaming;
+  - per-owner credential selection (two users get different headers);
+  - missing connection;
+  - 401 → `needs_reauth`;
+  - registering the connector with a `Gateway` and calling through it.
