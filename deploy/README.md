@@ -38,7 +38,8 @@ heroku config:set -a crontal-agent \
   HANDLER_DB_SCHEMA=handler_crontal \
   HANDLER_RT_MODEL=<model name> \
   HANDLER_FILE_STORE=s3 \
-  HANDLER_FILE_PREFIX=handler/crontal/
+  HANDLER_FILE_PREFIX=handler/crontal/ \
+  HANDLER_CODEX_SANDBOX=danger-full-access
 ```
 
 - `CODEX_API_KEY`: Codex reads it from the environment; no `codex login` is needed.
@@ -48,6 +49,15 @@ heroku config:set -a crontal-agent \
 - `HANDLER_FILE_STORE=s3` enables durable workspace and session storage (package N).
   Bucketeer provides `BUCKETEER_*` vars itself; `HANDLER_FILE_PREFIX` keeps handler's
   objects apart from Crontal's.
+- `HANDLER_CODEX_SANDBOX=danger-full-access`: Codex's own sandbox (bubblewrap) needs
+  unprivileged user namespaces, which unprivileged containers like Heroku dynos don't
+  allow (see `docs/rebuild/known-issues.md` §2). On the first deploy, confirm with
+  `heroku run -a crontal-agent -- codex sandbox -c 'sandbox_mode="workspace-write"' -- true`:
+  if it fails with a namespace error, keep `danger-full-access`. The dyno is then the
+  isolation boundary. Secrets stay protected because the harness passes Codex only an
+  allowlisted environment, and Codex's shell policy strips key/token/secret variables
+  from the commands the agent runs. Acceptable for the admin-only pilot; revisit before
+  non-admin users.
 - Optional: `HANDLER_RT_EFFORT` (default `low`), `HANDLER_RT_USERS`.
 
 `PORT` is set by Heroku; the entrypoint binds `0.0.0.0:$PORT`.

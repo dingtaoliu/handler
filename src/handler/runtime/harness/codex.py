@@ -17,6 +17,25 @@ logger = logging.getLogger(__name__)
 _STDERR_BYTES = 4096
 _TOOL_TYPES = {"command_execution", "mcp_tool_call", "file_change", "web_search"}
 
+SANDBOX_MODES = ("workspace-write", "read-only", "danger-full-access")
+
+# The Codex process inherits only these variables from handler's environment.
+# Everything else (DATABASE_URL, HANDLER_ADMIN_KEY, storage credentials, ...) is
+# withheld, because commands the agent runs can read Codex's environment.
+DEFAULT_ENV_ALLOWLIST = (
+    "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+)
+# Needed by the Codex process itself to call the model; hidden from the commands
+# it runs by the shell environment policy below.
+CODEX_CREDENTIAL_ENV = ("CODEX_API_KEY", "OPENAI_API_KEY")
+# Glob patterns (case-insensitive in Codex) removed from every command's env.
+SHELL_ENV_EXCLUDE = (
+    "CODEX_API_KEY", "OPENAI_API_KEY", "*_KEY", "*KEY_*", "*TOKEN*", "*SECRET*",
+    "*PASSWORD*", "*DATABASE_URL*", "AWS_*", "BUCKETEER_*",
+)
+
 
 def codex_binary() -> str:
     binary = os.environ.get("HANDLER_CODEX_BIN") or shutil.which("codex")
@@ -182,7 +201,15 @@ class CodexHarness:
         approval_policy: str = "never",
         auth_json: Path | None = None,
         extra_args: list[str] | None = None,
+        env_allowlist: tuple[str, ...] | list[str] = DEFAULT_ENV_ALLOWLIST,
     ) -> None:
+        if sandbox not in SANDBOX_MODES:
+            raise ValueError(f"sandbox must be one of {SANDBOX_MODES}, got {sandbox!r}")
+        if sandbox == "danger-full-access":
+            logger.warning(
+                "Codex sandbox disabled (danger-full-access): agent commands run with the "
+                "container's full permissions; only the environment allowlist protects secrets"
+            )
         self.binary = str(binary)
         self.default_model = default_model
         self.default_reasoning_effort = default_reasoning_effort
@@ -190,6 +217,7 @@ class CodexHarness:
         self.approval_policy = approval_policy
         self.auth_json = auth_json
         self.extra_args = list(extra_args or [])
+        self.env_allowlist = tuple(env_allowlist)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
 
     def _argv(self, req: RunRequest) -> list[str]:
@@ -197,6 +225,8 @@ class CodexHarness:
             self.binary, "exec", "--json", "--ignore-user-config", "--skip-git-repo-check",
             "-s", self.sandbox, "-C", str(req.workspace),
             "-c", f'approval_policy="{self.approval_policy}"',
+            "-c", 'shell_environment_policy.inherit="core"',
+            "-c", "shell_environment_policy.exclude=" + _toml(list(SHELL_ENV_EXCLUDE)),
         ]
         if model := req.model or self.default_model:
             argv.extend(["-m", model])
@@ -228,7 +258,11 @@ class CodexHarness:
                         raise
         if req.instructions:
             (req.workspace / "AGENTS.md").write_text(req.instructions, encoding="utf-8")
-        return {**os.environ, "CODEX_HOME": str(req.home), **req.env}
+        env = {k: os.environ[k] for k in (*self.env_allowlist, *CODEX_CREDENTIAL_ENV)
+               if k in os.environ}
+        env.update({"CODEX_HOME": str(req.home), "HOME": str(req.home)})
+        env.update(req.env)
+        return env
 
     async def run(self, req: RunRequest) -> AsyncIterator[RunEvent]:
         process = None

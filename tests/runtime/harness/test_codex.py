@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from handler.runtime.harness.base import HarnessError, McpServerSpec, RunEventKind, RunLimits, RunRequest
-from handler.runtime.harness.codex import CodexHarness, codex_binary
+from handler.runtime.harness.codex import SHELL_ENV_EXCLUDE, CodexHarness, _toml, codex_binary
 from handler.runtime.types import TokenUsage
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "codex"
@@ -114,7 +114,7 @@ async def test_argv_and_environment(fake_codex, request_for, tmp_path, monkeypat
     recorded = json.loads((tmp_path / "record.json").read_text())
     expected = [
         "exec", "--json", "--ignore-user-config", "--skip-git-repo-check", "-s", "read-only",
-        "-C", str(req.workspace), "-c", 'approval_policy="never"',
+        "-C", str(req.workspace), "-c", 'approval_policy="never"', *SHELL_POLICY_ARGS,
         "-m", "requested-model", "-c", "model_reasoning_effort=high",
         "--color", "never",
     ]
@@ -122,7 +122,7 @@ async def test_argv_and_environment(fake_codex, request_for, tmp_path, monkeypat
         expected += ["resume", session_id]
     assert recorded["argv"] == expected + [req.prompt]
     assert recorded["env"]["CODEX_HOME"] == str(req.home)
-    assert recorded["env"]["PARENT_VALUE"] == "inherited"
+    assert "PARENT_VALUE" not in recorded["env"]  # only allowlisted vars are inherited
     assert recorded["env"]["REQUEST_VALUE"] == "merged"
     copied = req.home / "auth.json"
     assert copied.read_bytes() == auth.read_bytes()
@@ -158,6 +158,7 @@ def test_default_and_minimal_argv(request_for):
     base = [
         "codex-test", "exec", "--json", "--ignore-user-config", "--skip-git-repo-check",
         "-s", "workspace-write", "-C", str(req.workspace), "-c", 'approval_policy="never"',
+        *SHELL_POLICY_ARGS,
     ]
     assert CodexHarness("codex-test")._argv(req) == base + [req.prompt]
     assert CodexHarness("codex-test", "model-default", "medium")._argv(req) == base + [
@@ -526,3 +527,34 @@ async def test_child_stdin_is_closed(tmp_path):
                      home=tmp_path / "home", prompt="hi")
     events = [ev async for ev in CodexHarness(script).run(req)]
     assert events[-1].data["session_id"] == "s1"
+
+
+SHELL_POLICY_ARGS = [
+    "-c", 'shell_environment_policy.inherit="core"',
+    "-c", "shell_environment_policy.exclude=" + _toml(list(SHELL_ENV_EXCLUDE)),
+]
+
+
+async def test_environment_is_an_allowlist(fake_codex, request_for, tmp_path, monkeypatch):
+    """Secrets in handler's environment never reach Codex (or the commands it runs)."""
+    monkeypatch.setenv("DATABASE_URL", "postgres://user:pw@db/prod")
+    monkeypatch.setenv("HANDLER_ADMIN_KEY", "admin-secret")
+    monkeypatch.setenv("BUCKETEER_AWS_SECRET_ACCESS_KEY", "s3-secret")
+    monkeypatch.setenv("CODEX_API_KEY", "sk-codex")
+    monkeypatch.setenv("TZ", "UTC")
+    req = request_for()
+    harness = CodexHarness(fake_codex)
+    [ev async for ev in harness.run(req)]
+    env = json.loads(Path(req.env["RECORD"]).read_text())["env"]
+    assert "DATABASE_URL" not in env and "HANDLER_ADMIN_KEY" not in env
+    assert "BUCKETEER_AWS_SECRET_ACCESS_KEY" not in env
+    assert env["CODEX_API_KEY"] == "sk-codex"  # Codex itself needs it
+    assert env["TZ"] == "UTC" and env["HOME"] == str(req.home) == env["CODEX_HOME"]
+
+
+def test_sandbox_mode_is_validated_and_explicit(request_for):
+    with pytest.raises(ValueError):
+        CodexHarness("codex-test", sandbox="off")
+    argv = CodexHarness("codex-test", sandbox="danger-full-access")._argv(request_for())
+    assert argv[argv.index("-s") + 1] == "danger-full-access"
+    assert "shell_environment_policy.inherit=\"core\"" in argv

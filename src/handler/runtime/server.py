@@ -24,7 +24,7 @@ from .gateway.gateway import Gateway
 from .gateway.mcp_server import create_mcp_app
 from .gateway.policy import GrantPolicy
 from .gateway.tokens import RunTokens
-from .harness.codex import CodexHarness, codex_binary
+from .harness.codex import SANDBOX_MODES, CodexHarness, codex_binary
 from .memory import MemoryTools
 from .observability.logging import configure_json_logging
 from .observability.pricing import PriceTable
@@ -109,6 +109,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                    default=int(os.environ["HANDLER_MAX_CONCURRENT"])
                    if os.environ.get("HANDLER_MAX_CONCURRENT") else None,
                    help="maximum active runs across all lanes")
+    s.add_argument("--codex-sandbox",
+                   default=os.environ.get("HANDLER_CODEX_SANDBOX", "workspace-write"),
+                   choices=SANDBOX_MODES,
+                   help="Codex sandbox mode; use danger-full-access only where the container "
+                        "itself is the isolation boundary (e.g. Heroku dynos)")
     s.add_argument("--admin-key", default=os.environ.get("HANDLER_ADMIN_KEY"),
                    help="instance admin key (bearer credential with admin rights)")
     s.add_argument("--log-level", default="INFO")
@@ -152,6 +157,7 @@ async def serve(args: argparse.Namespace) -> None:
         default_model=args.model,
         default_reasoning_effort=args.reasoning_effort,
         auth_json=Path(args.codex_auth_json).expanduser() if args.codex_auth_json else None,
+        sandbox=args.codex_sandbox,
     )
     config = RunConfig(data_dir=data_dir, reasoning_effort=args.reasoning_effort,
                        timeout_seconds=float(limits_cfg["run_timeout_seconds"]),
