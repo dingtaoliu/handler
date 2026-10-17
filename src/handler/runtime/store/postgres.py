@@ -82,6 +82,36 @@ async def _notify(conn: AsyncConnection) -> None:
     await conn.execute("SELECT pg_notify(%s, '')", (CHANNEL,))
 
 
+async def _put_event(
+    conn: AsyncConnection, event: Event, thread: ThreadSpec | None, now: datetime
+) -> bool:
+    """Insert an event idempotently and route its thread; False if a duplicate."""
+    values = _values(event)
+    values["thread_key"] = thread.key if thread else event.thread_key
+    values["status"] = EventStatus.ROUTED.value if thread else EventStatus.IGNORED.value
+    columns = ", ".join(values)
+    placeholders = ", ".join(f"%({name})s" for name in values)
+    cursor = await conn.execute(
+        f"INSERT INTO events ({columns}) VALUES ({placeholders}) "
+        "ON CONFLICT (idempotency_key) DO NOTHING", values,
+    )
+    if not cursor.rowcount:
+        return False
+    if thread is not None:
+        await conn.execute(
+            "INSERT INTO threads (key, type, lane, owner_user_id, harness, "
+            "model, priority, created_at, pending_since) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET "
+            "pending_since = COALESCE(threads.pending_since, "
+            "excluded.pending_since)",
+            (thread.key, thread.type.value, thread.lane.value,
+             thread.owner_user_id, thread.harness, thread.model,
+             thread.priority, now, now),
+        )
+    return True
+
+
 class PostgresCore:
     """Core tables (events, threads, runs, messages, steps) on Postgres.
 
@@ -167,33 +197,9 @@ class PostgresCore:
 
     # --- queue ------------------------------------------------------------
     async def put(self, event: Event, thread: ThreadSpec | None) -> bool:
-        values = _values(event)
-        values["thread_key"] = thread.key if thread else event.thread_key
-        values["status"] = (
-            EventStatus.ROUTED.value if thread else EventStatus.IGNORED.value
-        )
-        columns = ", ".join(values)
-        placeholders = ", ".join(f"%({name})s" for name in values)
         async with self._conn() as conn:
-            cursor = await conn.execute(
-                f"INSERT INTO events ({columns}) VALUES ({placeholders}) "
-                "ON CONFLICT (idempotency_key) DO NOTHING", values,
-            )
-            if not cursor.rowcount:
+            if not await _put_event(conn, event, thread, self._clock()):
                 return False
-            if thread is not None:
-                now = self._clock()
-                await conn.execute(
-                    "INSERT INTO threads (key, type, lane, owner_user_id, harness, "
-                    "model, priority, created_at, pending_since) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
-                    "ON CONFLICT (key) DO UPDATE SET "
-                    "pending_since = COALESCE(threads.pending_since, "
-                    "excluded.pending_since)",
-                    (thread.key, thread.type.value, thread.lane.value,
-                     thread.owner_user_id, thread.harness, thread.model,
-                     thread.priority, now, now),
-                )
             await _notify(conn)
         self._wake.set()
         return True
@@ -429,5 +435,19 @@ class PostgresCore:
             await self._pool.close()
 
 
-class PostgresStore(PostgresCore):
-    """The full Postgres store: core plus every domain mixin (composed as they land)."""
+from .postgres_domains import (  # noqa: E402
+    ApprovalMixin,
+    AuditMixin,
+    ConnectionMixin,
+    MemoryMixin,
+    NotificationMixin,
+    ScheduleMixin,
+    SettingsMixin,
+)
+
+
+class PostgresStore(
+    ScheduleMixin, ApprovalMixin, AuditMixin, MemoryMixin, SettingsMixin,
+    NotificationMixin, ConnectionMixin, PostgresCore,
+):
+    """The full Postgres store: core plus every domain mixin."""

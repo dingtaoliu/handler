@@ -421,6 +421,7 @@ class SQLiteCore:
 
 
 # Domain mixins import the helpers above, so they're imported after them.
+from .sqlite_connections import ConnectionMixin  # noqa: E402
 from .sqlite_gateway import ApprovalMixin, AuditMixin  # noqa: E402
 from .sqlite_memory import MemoryMixin, NotificationMixin, SettingsMixin  # noqa: E402
 from .sqlite_schedules import ScheduleMixin  # noqa: E402
@@ -428,6 +429,6 @@ from .sqlite_schedules import ScheduleMixin  # noqa: E402
 
 class SQLiteStore(
     ScheduleMixin, ApprovalMixin, AuditMixin, MemoryMixin, SettingsMixin,
-    NotificationMixin, SQLiteCore,
+    NotificationMixin, ConnectionMixin, SQLiteCore,
 ):
     """The full SQLite store: core plus every domain mixin."""

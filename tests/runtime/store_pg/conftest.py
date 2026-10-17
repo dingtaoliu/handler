@@ -11,8 +11,8 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from handler.runtime.store.postgres import PostgresCore
-from handler.runtime.store.sqlite import SQLiteCore
+from handler.runtime.store.postgres import PostgresCore, PostgresStore
+from handler.runtime.store.sqlite import SQLiteCore, SQLiteStore
 from handler.runtime.types import Event, Lane, Run, RunStatus, ThreadSpec, ThreadType
 
 BIN_DIRS = ["/opt/homebrew/opt/postgresql@17/bin", "/opt/homebrew/opt/postgresql@16/bin"]
@@ -88,6 +88,19 @@ async def store(request, tmp_path, clock):
         instance = SQLiteCore(tmp_path / "store.sqlite", clock=clock)
     else:
         instance = PostgresCore(request.getfixturevalue("pg_dsn"), clock=clock)
+    try:
+        yield instance
+    finally:
+        await instance.close()
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+async def domain_store(request, tmp_path, clock):
+    """The full store (core plus every phase 2 domain) on each backend."""
+    if request.param == "sqlite":
+        instance = SQLiteStore(tmp_path / "store.sqlite", clock=clock)
+    else:
+        instance = PostgresStore(request.getfixturevalue("pg_dsn"), clock=clock)
     try:
         yield instance
     finally:
