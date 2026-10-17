@@ -458,11 +458,12 @@ from .postgres_domains import (  # noqa: E402
     NotificationMixin,
     ScheduleMixin,
     SettingsMixin,
+    UsersMixin,
 )
 
 
 class PostgresStore(
     ScheduleMixin, ApprovalMixin, AuditMixin, MemoryMixin, SettingsMixin,
-    NotificationMixin, ConnectionMixin, PostgresCore,
+    NotificationMixin, ConnectionMixin, UsersMixin, PostgresCore,
 ):
     """The full Postgres store: core plus every domain mixin."""

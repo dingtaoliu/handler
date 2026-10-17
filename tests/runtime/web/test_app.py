@@ -6,7 +6,10 @@ import json
 import httpx
 import pytest
 
+from handler.runtime.auth import Authenticator
 from handler.runtime.bus import BusMessage, RunEventBus
+from handler.runtime.store.sqlite import SQLiteStore
+from handler.runtime.store.sqlite_users import User
 from handler.runtime.types import (
     Event,
     Lane,
@@ -83,10 +86,22 @@ def bus():
 
 
 @pytest.fixture
-async def client(store, bus):
-    app = create_app(store, bus)
+async def users(tmp_path):
+    db = SQLiteStore(tmp_path / "users.db")
+    await db.create_user(User("u1", "User One"))
+    yield db
+    await db.close()
+
+
+@pytest.fixture
+async def client(store, bus, users):
+    _, token = await users.create_token("u1")
+    app = create_app(store, bus, Authenticator(users, "admin-key-for-tests"))
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://t",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as c:
         yield c
 
 
@@ -94,7 +109,7 @@ async def test_chat_creates_event_and_thread(client, store, bus):
     async with bus.subscribe("*") as q:
         r = await client.post(
             "/api/chat",
-            json={"user_id": "u1", "text": "hi", "conversation_id": "c1",
+            json={"text": "hi", "conversation_id": "c1",
                   "client_message_id": "m1"},
         )
         msg = q.get_nowait()
@@ -105,16 +120,16 @@ async def test_chat_creates_event_and_thread(client, store, bus):
     event, spec = store.events[body["event_id"]]
     assert event.type == "chat.message" and event.source == "web"
     assert event.payload == {"text": "hi"}
-    assert event.idempotency_key == "m1" and event.user_id == "u1"
+    assert event.idempotency_key == "u1:m1" and event.user_id == "u1"
     assert spec == ThreadSpec("chat:u1:c1", ThreadType.CHAT, Lane.INTERACTIVE,
                               owner_user_id="u1", harness="codex")
     assert msg.type == "event_queued" and msg.thread_key == "chat:u1:c1"
 
 
 async def test_chat_defaults_and_duplicate(client):
-    r1 = (await client.post("/api/chat", json={"user_id": "u", "text": "a"})).json()
+    r1 = (await client.post("/api/chat", json={"text": "a"})).json()
     assert r1["conversation_id"]
-    payload = {"user_id": "u", "text": "a", "conversation_id": "c",
+    payload = {"text": "a", "conversation_id": "c",
                "client_message_id": "same"}
     assert (await client.post("/api/chat", json=payload)).json()["duplicate"] is False
     assert (await client.post("/api/chat", json=payload)).json()["duplicate"] is True
@@ -122,7 +137,7 @@ async def test_chat_defaults_and_duplicate(client):
 
 async def test_listing_endpoints(client, store):
     key = "chat:u1:c1"
-    await client.post("/api/chat", json={"user_id": "u1", "text": "x",
+    await client.post("/api/chat", json={"text": "x",
                                          "conversation_id": "c1"})
     store.messages.append(Message(key, Role.USER, [{"type": "text", "text": "x"}]))
     run = Run("run_1", key, 1, ["e"], RunStatus.COMPLETED, "codex", "m",

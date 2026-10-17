@@ -15,6 +15,7 @@ from pathlib import Path
 
 import uvicorn
 
+from .auth import Authenticator, add_cli_commands, run_cli
 from .bus import RunEventBus
 from .dispatcher import Dispatcher
 from .files import LocalFileStore, S3FileStore
@@ -108,7 +109,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                    default=int(os.environ["HANDLER_MAX_CONCURRENT"])
                    if os.environ.get("HANDLER_MAX_CONCURRENT") else None,
                    help="maximum active runs across all lanes")
+    s.add_argument("--admin-key", default=os.environ.get("HANDLER_ADMIN_KEY"),
+                   help="instance admin key (bearer credential with admin rights)")
     s.add_argument("--log-level", default="INFO")
+    add_cli_commands(sub)
     return p.parse_args(argv)
 
 
@@ -168,10 +172,13 @@ async def serve(args: argparse.Namespace) -> None:
                        Lane.BACKGROUND: int(limits_cfg["background_capacity"])},
     )
 
-    app = create_app(store, bus, default_harness=threads_cfg["chat"]["harness"])
+    auth = Authenticator(store, args.admin_key)
+    if not args.admin_key:
+        logger.warning("no admin key set; only user tokens can authenticate")
+    app = create_app(store, bus, auth, default_harness=threads_cfg["chat"]["harness"])
     app.mount("/mcp", mcp_app)
-    app.include_router(approvals_router(gateway, store))
-    app.include_router(settings_router(settings))
+    app.include_router(approvals_router(gateway, store, auth))
+    app.include_router(settings_router(settings, auth))
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
@@ -180,7 +187,7 @@ async def serve(args: argparse.Namespace) -> None:
 
     app.router.lifespan_context = lifespan
     server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port,
-                                           log_config=None, lifespan="on"))
+                                           log_config=None, access_log=False, lifespan="on"))
     server.install_signal_handlers = lambda: None  # we handle signals ourselves
 
     stop = asyncio.Event()
@@ -210,7 +217,7 @@ async def serve(args: argparse.Namespace) -> None:
         asyncio.create_task(server.serve(), name="web"),
         asyncio.create_task(housekeeping(), name="housekeeping"),
     ]
-    logger.info("handler-rt serving", extra={"url": f"http://{args.host}:{args.port}/timeline",
+    logger.info("handler-rt serving", extra={"url": f"http://{args.host}:{args.port}/login",
                                               "data_dir": str(data_dir),
                                               "tools": [s.name for s in gateway.specs()]})
     await stop.wait()
@@ -221,9 +228,11 @@ async def serve(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
-    configure_json_logging(args.log_level)
     if args.command == "serve":
+        configure_json_logging(args.log_level)
         asyncio.run(serve(args))
+    else:
+        raise SystemExit(run_cli(args))
 
 
 if __name__ == "__main__":

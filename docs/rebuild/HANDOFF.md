@@ -39,26 +39,37 @@ Crontal (the `hephaestus` repo) is the first application built on top of it. It'
 | File storage | `files.py` (local + S3/Bucketeer) | Done, not yet used by the executor (package N) |
 | Server | `server.py` (`python -m handler.runtime.server serve ...`) | Wires all of the above for SQLite or Postgres (`--database-url`) |
 
-### In flight when the previous driver stopped (phase 3a/3b)
+### Phase 3 packages (driver update, 2026-10-17)
 
-Three packages, specified in `docs/rebuild/phase3.md`, were being built in git worktrees under `/Users/dannyliu/dev/repos/handler-wt/`. **None were committed or reviewed.** Their builders may have stopped mid-way.
+Packages L, M and N have been completed and reviewed; final integration results
+are recorded below. Their original worktrees remain under `handler-wt/`.
 
-| Package | Worktree / branch | Snapshot of what existed |
-|---|---|---|
-| L. Auth + users | `handler-wt/p3-l` / `rb3-l` | `sqlite_users.py`, `schema_users.sql`, edits to `sqlite.py`, `postgres*.py`. No `auth.py` or API yet; looked early-stage |
-| M. Docker + Heroku | `handler-wt/p3-m` / `rb3-m` | **Finished and committed on `rb3-m`** (347 passed, 2 skipped in its worktree). It needs review and merge. The image builds (1.96 GB, `codex-cli 0.162.0` pinned with a SHA256). It adds `PostgresCore(schema=...)` with per-schema NOTIFY channels and new `server.py` flags (`--db-schema`, `--harness-env-file`, env defaults, MCP url uses 127.0.0.1 when binding 0.0.0.0). Flags to resolve: (1) Codex's `workspace-write` sandbox may not work in a Heroku dyno (no user namespaces), so decide the harness sandbox mode for the hosted profile; (2) the file-store env var name is a placeholder until package N wires the file store; (3) `/healthz` comes from package L |
-| N. Durable workspaces + session recovery | `handler-wt/p3-n` / `rb3-n` | `workspaces.py`, edits to `run.py` |
+- **L — Auth/users:** hashed user tokens, admin key/acting user, user/token CLI,
+  API authorization, private chat visibility and authenticated SSE. Open `/login`
+  for the browser login shell; `/timeline` itself requires authentication.
+  SSE connections recheck credentials, and server access logging is disabled to
+  avoid logging query tokens. Admin-key impersonation uses the selected user's role.
+- **M — Packaging:** pinned/checksummed Codex image, non-root container, schema
+  isolation and schema-specific notifications, environment configuration, and
+  deployment instructions in `deploy/README.md`. Container defaults
+  `HANDLER_MAX_CONCURRENT=1` to cap runs across both lanes. Outside the container,
+  use `--max-concurrent 1` for the same behavior.
+- **N — Durability:** sanitized workspace/home backups, restore, conservative
+  one-time missing-session retry with a recap and RETRY step. No extra recovery
+  retry after tool/output progress. Known lease loss/cancellation skips uploads.
+  `HANDLER_FILE_STORE=s3` and `HANDLER_FILE_PREFIX=handler/crontal/` select Bucketeer;
+  default local backups under `<data-dir>/files` need persistent disk.
 
-**What to do with them:**
-1. For each worktree, run `git -C <wt> status`, `git -C <wt> log rebuild..HEAD` and `git -C <wt> diff`, then compare what exists against its section in `phase3.md`.
-2. Run the full suite in that worktree (command in §5).
-3. Finish what's missing, review it critically (security matters for L), commit, and merge into `rebuild` with `git merge --no-ff`.
-4. **L, M and N all edit `runtime/server.py`.** Merge one at a time and resolve carefully.
-5. If a worktree is a mess, it's fine to `git worktree remove --force` it and redo the package from the brief.
+Remaining deployment caveats: hosted sandbox compatibility still needs a real
+Heroku check; keep `workspace-write` rather than silently disabling isolation.
+FileStore sync uploads do not remove remote files deleted locally. Arbitrarily
+named files containing secrets are not detected by the filename exclusions.
+The Google OAuth client JSON was absent at review time. No live model calls or
+cloud provisioning were performed during this driver pass.
 
 ## 3. What's next, in order
 
-1. **Finish and merge L, M, N** (above).
+1. ~~L, M, N integration~~ **Done 2026-10-17:** all three merged into `rebuild`; full suite 447 passed, 2 skipped (run outside the Codex sandbox, which blocks localhost binding).
 2. **Google Workspace spike.** The owner chose a **self-hosted open-source Google Workspace MCP server** (e.g. `taylorwilsdon/google_workspace_mcp`) over Composio, to avoid vendor lock-in. Handler should own OAuth, and tool servers should accept a bearer token per request (design §6.1–6.2). The owner has GCP project `crontal-test` (number 447602706589) and was creating a Web OAuth client with these redirect URIs:
    - `http://localhost:8100/oauth/google/callback`
    - `http://localhost:8000/oauth2callback`
@@ -110,7 +121,9 @@ PYTHONPATH=src .venv/bin/python -m pytest tests/runtime -q -p no:cacheprovider
 HANDLER_CODEX_BIN=$(ls -d ~/.vscode/extensions/openai.chatgpt-*/bin/macos-aarch64/codex | tail -1) \
   .venv/bin/python -m handler.runtime.server serve --data-dir /tmp/handler-dev --port 8100 \
   --model gpt-6-luna --reasoning-effort low --codex-auth-json ~/.codex/auth.json --users danny
-# then: POST /api/chat {"user_id","conversation_id","text"}; open http://localhost:8100/timeline
+# after package L: create a user/token with handler-rt user add / token create;
+# open http://localhost:8100/login; POST /api/chat uses a Bearer token,
+# with {"conversation_id","text"} (user_id is derived from authentication)
 # delete copied auth.json files under <data-dir>/harness_homes afterwards
 ```
 

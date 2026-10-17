@@ -5,25 +5,28 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
 from ..bus import BusMessage, RunEventBus
 from ..store.base import Store
 from ..types import Event, Lane, ThreadSpec, ThreadType
+from .auth_api import auth_router
 
 HEARTBEAT_SECONDS = 15.0
+MEMBER_SCAN_LIMIT = 1000  # threads scanned when filtering a member's list
 TIMELINE_HTML = Path(__file__).resolve().parent / "static" / "timeline.html"
 
 
 class ChatRequest(BaseModel):
-    user_id: str
+    # The user comes from the principal, never from the body.
     text: str
     conversation_id: str | None = None
     client_message_id: str | None = None
@@ -38,8 +41,13 @@ async def sse_stream(
     thread_key: str,
     request: Request | None = None,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
+    visible: Callable[[str], bool] | None = None,
+    authorized: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[str]:
-    """Yield SSE frames for bus messages, with comment heartbeats when idle."""
+    """Yield SSE frames for bus messages, with comment heartbeats when idle.
+
+    `visible` filters messages by thread key (used to hide other users' chats).
+    """
     async with bus.subscribe(thread_key) as queue:
         yield ": connected\n\n"
         while True:
@@ -50,35 +58,55 @@ async def sse_stream(
             except asyncio.TimeoutError:
                 if request is not None and await request.is_disconnected():
                     return
+                if authorized is not None and not await authorized():
+                    return
                 yield ": heartbeat\n\n"
                 continue
-            yield f"data: {json.dumps(_json(msg))}\n\n"
+            if authorized is not None and not await authorized():
+                return
+            if visible is None or visible(msg.thread_key):
+                yield f"data: {json.dumps(_json(msg))}\n\n"
 
 
 def create_app(
-    store: Store, bus: RunEventBus, *, default_harness: str = "codex"
+    store: Store, bus: RunEventBus, auth: Authenticator, *, default_harness: str = "codex"
 ) -> FastAPI:
-    app = FastAPI(title="handler runtime")
-    # TODO(auth): phase 1 is local only; add authentication before exposing.
+    # No interactive docs / OpenAPI: the API is authenticated, its schema needn't be public.
+    app = FastAPI(title="handler runtime", docs_url=None, redoc_url=None, openapi_url=None)
     router = APIRouter()
+    principal_dep = Depends(auth.require_principal)
+    sse_dep = Depends(auth.require_sse_principal)
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, bool]:
+        return {"ok": True}
+
+    def visible_thread(principal: Principal, key: str) -> None:
+        # 404 rather than 403 so other users' thread keys aren't confirmed.
+        if not can_see_thread(principal, key):
+            raise HTTPException(404, "thread not found")
 
     @router.post("/api/chat")
-    async def chat(body: ChatRequest) -> dict[str, Any]:
+    async def chat(body: ChatRequest, request: Request,
+                   principal: Principal = principal_dep) -> dict[str, Any]:
+        user_id = principal.user_id
+        if user_id is None:
+            raise HTTPException(400, f"{ACT_AS_HEADER} is required for admin-key chat")
         conversation_id = body.conversation_id or uuid.uuid4().hex
-        key = f"chat:{body.user_id}:{conversation_id}"
+        key = f"chat:{user_id}:{conversation_id}"
         event = Event(
             type="chat.message",
             source="web",
             payload={"text": body.text},
-            idempotency_key=body.client_message_id or uuid.uuid4().hex,
-            user_id=body.user_id,
+            idempotency_key=f"{user_id}:{body.client_message_id or uuid.uuid4().hex}",
+            user_id=user_id,
             thread_key=key,
         )
         spec = ThreadSpec(
             key=key,
             type=ThreadType.CHAT,
             lane=Lane.INTERACTIVE,
-            owner_user_id=body.user_id,
+            owner_user_id=user_id,
             harness=default_harness,
         )
         stored = await store.put(event, spec)
@@ -99,52 +127,79 @@ def create_app(
         }
 
     @router.get("/api/threads")
-    async def list_threads(user_id: str | None = None) -> Any:
-        return _json(await store.list_threads(owner_user_id=user_id))
+    async def list_threads(user_id: str | None = None,
+                           principal: Principal = principal_dep) -> Any:
+        if principal.is_admin:
+            return _json(await store.list_threads(owner_user_id=user_id))
+        threads = await store.list_threads(owner_user_id=user_id, limit=MEMBER_SCAN_LIMIT)
+        return _json([t for t in threads if can_see_thread(principal, t.key)][:100])
 
     @router.get("/api/runs/{run_id}")
-    async def get_run(run_id: str) -> Any:
+    async def get_run(run_id: str, principal: Principal = principal_dep) -> Any:
         run = await store.get_run(run_id)
         if run is None:
+            raise HTTPException(404, "run not found")
+        if not can_see_thread(principal, run.thread_key):
             raise HTTPException(404, "run not found")
         steps = await store.list_steps(run_id)
         return {"run": _json(run), "steps": _json(steps)}
 
     @router.get("/api/stream")
-    async def stream_all(request: Request) -> StreamingResponse:
-        return _sse_response(request, "*")
+    async def stream_all(request: Request,
+                         principal: Principal = sse_dep) -> StreamingResponse:
+        return _sse_response(request, "*", principal)
 
     # Suffixed routes must precede the greedy bare {key:path} route.
     @router.get("/api/threads/{key:path}/stream")
-    async def stream_thread(key: str, request: Request) -> StreamingResponse:
-        return _sse_response(request, key)
+    async def stream_thread(key: str, request: Request,
+                            principal: Principal = sse_dep) -> StreamingResponse:
+        visible_thread(principal, key)
+        return _sse_response(request, key, principal)
 
     @router.get("/api/threads/{key:path}/messages")
-    async def thread_messages(key: str) -> Any:
+    async def thread_messages(key: str, principal: Principal = principal_dep) -> Any:
+        visible_thread(principal, key)
         return _json(await store.list_messages(key))
 
     @router.get("/api/threads/{key:path}/runs")
-    async def thread_runs(key: str) -> Any:
+    async def thread_runs(key: str, principal: Principal = principal_dep) -> Any:
+        visible_thread(principal, key)
         return _json(await store.list_runs(key))
 
     @router.get("/api/threads/{key:path}")
-    async def get_thread(key: str) -> Any:
+    async def get_thread(key: str, principal: Principal = principal_dep) -> Any:
+        visible_thread(principal, key)
         thread = await store.get_thread(key)
         if thread is None:
             raise HTTPException(404, "thread not found")
         pending = await store.pending_events(key)
         return {"thread": _json(thread), "pending_events": _json(pending)}
 
-    def _sse_response(request: Request, key: str) -> StreamingResponse:
+    def _sse_response(request: Request, key: str, principal: Principal) -> StreamingResponse:
+        async def authorized() -> bool:
+            # Revocation, disabling and role changes apply to already open streams.
+            try:
+                return await auth.require_sse_principal(request) == principal
+            except HTTPException:
+                return False
+
         return StreamingResponse(
-            sse_stream(bus, key, request),
+            sse_stream(bus, key, request, visible=lambda k: can_see_thread(principal, k),
+                       authorized=authorized),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @router.get("/login")
+    async def login() -> FileResponse:
+        return FileResponse(TIMELINE_HTML.with_name("login.html"), media_type="text/html",
+                            headers={"Cache-Control": "no-store"})
+
     @router.get("/timeline")
-    async def timeline() -> FileResponse:
-        return FileResponse(TIMELINE_HTML, media_type="text/html")
+    async def timeline(_: Principal = principal_dep) -> FileResponse:
+        return FileResponse(TIMELINE_HTML, media_type="text/html",
+                            headers={"Cache-Control": "no-store"})
 
     app.include_router(router)
+    app.include_router(auth_router(auth))
     return app

@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from pydantic import ValidationError
 
 from handler.runtime.bus import RunEventBus
+from handler.runtime.auth import Authenticator
 from handler.runtime.context import RunContext
 from handler.runtime.gateway.base import ToolResult
 from handler.runtime.instructions import build_instructions
@@ -224,8 +225,11 @@ async def test_notify_fanout(store, ctx):
 async def test_api(store, ctx):
     service = SettingsService(store)
     app = FastAPI()
-    app.include_router(settings_router(service))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    app.include_router(settings_router(service, Authenticator(store, "test-admin-key")))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+        headers={"Authorization": "Bearer test-admin-key"},
+    ) as client:
         response = await client.get("/api/settings")
         assert set(response.json()) == {"persona", "threads", "grants", "limits"}
         assert response.json()["persona"]["version"] is None
@@ -238,7 +242,7 @@ async def test_api(store, ctx):
         assert (await client.get("/api/settings/persona")).json()["value"]["system"] == "two"
         assert len((await client.get("/api/settings/persona/history")).json()) == 2
         response = await client.post("/api/settings/persona/rollback", json={"version": 1, "updated_by": "bob"})
-        assert response.json()["version"] == 3 and response.json()["updated_by"] == "bob"
+        assert response.json()["version"] == 3 and response.json()["updated_by"] == "admin"
         assert (await client.post("/api/settings/persona/rollback", json={"version": 99})).status_code == 404
         assert (await client.put("/api/settings/limits", json={"max_attempts": 0})).status_code == 422
         assert (await client.put("/api/settings/persona", json={}, headers={"If-Match": "bad"})).status_code == 422
