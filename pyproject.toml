@@ -33,6 +33,7 @@ license = "MIT"
 
 [project.scripts]
 handler = "handler.cli:cli"
+handler-rt = "handler.runtime.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -41,6 +42,7 @@ where = ["src"]
 "handler.channels" = ["static/*"]
 "handler.runtime.web" = ["static/*"]
 "handler.runtime.observability" = ["*.yaml"]
+"handler.runtime.store" = ["*.sql"]
 
 [project.optional-dependencies]
 dev = [
