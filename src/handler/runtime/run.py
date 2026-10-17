@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .bus import BusMessage, RunEventBus
@@ -41,10 +41,12 @@ from .types import (
     Role,
     Run,
     RunStatus,
+    StepKind,
     Thread,
     new_id,
     utcnow,
 )
+from .workspaces import WorkspaceSync
 
 logger = logging.getLogger("handler.runtime.run")
 
@@ -142,6 +144,37 @@ class RunPlan:
     max_attempts: int
 
 
+class _RunRecorder(StepRecorder):
+    async def session_retry(self, reason: str) -> None:
+        event = RunEvent(RunEventKind.TURN_STARTED)
+        await self.store.add_step(self._next(
+            event, StepKind.RETRY, "session_recovery", ended_at=event.at,
+            data={"reason": reason[:500]},
+        ))
+
+
+def _missing_session(error: HarnessError, session_id: str) -> bool:
+    message = str(error).lower()
+    identifier = re.escape(session_id.lower())
+    session_end = (rf"(?: (?:with id |id )?['\"]?{identifier}['\"]?(?=$|[.\s:])"
+                   r"|(?=$|[.\n:]))")
+    return any(re.search(pattern, message) for pattern in (
+        r"\bno (?:saved )?session found\b",
+        rf"\b(?:session|conversation)(?: (?:with id |id )?['\"]?{identifier}['\"]?)? "
+        r"(?:not found|does not exist|doesn't exist)\b",
+        r"\b(?:could not|cannot|unable to) find (?:a |the )?(?:session|rollout for session)"
+        + session_end,
+        r"\bunknown session(?: id)?" + session_end,
+        r"\bsession rollout files are missing\b",
+    ))
+
+
+def _has_rollout(home: Path, session_id: str) -> bool:
+    return any(path.is_file() and path.name.endswith(f"-{session_id}.jsonl")
+               for directory in ("sessions", "archived_sessions")
+               for path in (home / directory).rglob("rollout-*.jsonl"))
+
+
 class RunExecutor:
     def __init__(
         self,
@@ -155,6 +188,7 @@ class RunExecutor:
         mcp_url: str | None = None,
         settings: SettingsService | None = None,
         memory_tools: MemoryTools | None = None,
+        workspace_sync: WorkspaceSync | None = None,
     ) -> None:
         self.store = store
         self.tokens = tokens
@@ -166,6 +200,7 @@ class RunExecutor:
         self.config = config
         self.prices = prices
         self.raw_sink = RawSink(config.raw_dir)
+        self.workspace_sync = workspace_sync or WorkspaceSync(None, config.data_dir)
 
     async def execute(self, lease: Lease) -> None:
         thread = await self.store.get_thread(lease.thread_key)
@@ -228,7 +263,7 @@ class RunExecutor:
 
     async def _run(self, lease: Lease, thread: Thread, run: Run, events: list[Event]) -> None:
         harness = self.harnesses.get(thread.harness)
-        recorder = StepRecorder(self.store, run.id, model=thread.model, prices=self.prices,
+        recorder = _RunRecorder(self.store, run.id, model=thread.model, prices=self.prices,
                                 raw_sink=self.raw_sink)
         transcript = event_messages(thread.key, run.id, events)
         slug = thread_slug(thread.key)
@@ -239,6 +274,7 @@ class RunExecutor:
                 raise HarnessError(f"unknown harness {thread.harness!r}", retryable=False)
             workspace = self.config.workspaces_dir / slug
             home = self.config.homes_dir / slug
+            await self.workspace_sync.restore(slug)
             workspace.mkdir(parents=True, exist_ok=True)
             home.mkdir(parents=True, exist_ok=True)
             mcp_servers: list[McpServerSpec] = []
@@ -259,29 +295,29 @@ class RunExecutor:
                 home=home,
                 prompt=render_turn(events),
                 instructions=plan.instructions,
-                session_id=thread.session_id,
+                session_id=thread.session_id or None,
                 model=plan.model,
                 reasoning_effort=plan.reasoning_effort,
                 mcp_servers=mcp_servers,
                 env=dict(self.config.harness_env),
                 limits=RunLimits(timeout_seconds=plan.timeout_seconds),
             )
-            final_text = ""
-            async for ev in harness.run(req):
-                await recorder.on_event(ev)
-                self._publish(thread.key, run.id, "run_event",
-                              {"kind": str(ev.kind), "data": _preview(ev.data)})
-                if ev.kind is RunEventKind.SESSION:
-                    sid = ev.data.get("session_id")
-                    if sid and sid != thread.session_id:
-                        if not await self.store.set_session(lease, sid):
-                            raise LeaseLost(thread.key)
-                        thread.session_id = sid
-                elif ev.kind is RunEventKind.FINAL:
-                    final_text = ev.data.get("text", "")
-                msg = transcript_message(thread.key, run.id, ev)
-                if msg is not None:
-                    transcript.append(msg)
+            try:
+                final_text = await self._stream(
+                    lease, thread, run, harness, req, recorder, transcript,
+                )
+            except (asyncio.CancelledError, LeaseLost):
+                # A stale owner must not overwrite the next owner's durable files.
+                raise
+            except Exception:
+                try:
+                    await self.workspace_sync.persist(slug)
+                except Exception:
+                    logger.exception("workspace persistence failed after harness failure")
+                raise
+            else:
+                # Keep the heartbeat and lease until the durable copy finishes.
+                await self.workspace_sync.persist(slug)
 
             usage, cost = recorder.totals()
             run.status, run.usage, run.cost_usd, run.finished_at = (
@@ -306,6 +342,66 @@ class RunExecutor:
         finally:
             if mcp_token is not None and self.tokens is not None:
                 self.tokens.revoke(mcp_token)
+
+    async def _stream(
+        self, lease: Lease, thread: Thread, run: Run, harness: Harness,
+        req: RunRequest, recorder: _RunRecorder, transcript: list[Message],
+    ) -> str:
+        input_count = len(transcript)
+        for attempt in range(2):
+            final_text = ""
+            progressed = False
+            try:
+                if (req.session_id and harness.name == "codex"
+                        and not await asyncio.to_thread(_has_rollout, req.home, req.session_id)):
+                    raise HarnessError("Session rollout files are missing from the harness home")
+                async for ev in harness.run(req):
+                    if ev.kind not in (RunEventKind.SESSION, RunEventKind.TURN_STARTED,
+                                       RunEventKind.ERROR):
+                        progressed = True
+                    await recorder.on_event(ev)
+                    self._publish(thread.key, run.id, "run_event",
+                                  {"kind": str(ev.kind), "data": _preview(ev.data)})
+                    if ev.kind is RunEventKind.SESSION:
+                        sid = ev.data.get("session_id")
+                        if sid and sid != thread.session_id:
+                            if not await self.store.set_session(lease, sid):
+                                raise LeaseLost(thread.key)
+                            thread.session_id = sid
+                    elif ev.kind is RunEventKind.FINAL:
+                        final_text = ev.data.get("text", "")
+                    msg = transcript_message(thread.key, run.id, ev)
+                    if msg is not None:
+                        transcript.append(msg)
+                return final_text
+            except HarnessError as exc:
+                if (attempt or progressed or not req.session_id
+                        or not _missing_session(exc, req.session_id)):
+                    raise
+                if not await self.store.set_session(lease, ""):
+                    raise LeaseLost(thread.key)
+                thread.session_id = None
+                await recorder.session_retry(str(exc))
+                req = replace(req, session_id=None,
+                              prompt=await self._recap(thread.key) + "\n\nCurrent turn:\n" + req.prompt)
+                del transcript[input_count:]
+        raise AssertionError("unreachable")
+
+    async def _recap(self, thread_key: str) -> str:
+        # Store pages start with the oldest messages, so grow the window until
+        # it includes the tail rather than mistaking the first 20 for the last.
+        limit = 200
+        while True:
+            messages = await self.store.list_messages(thread_key, limit=limit)
+            if len(messages) < limit:
+                break
+            limit *= 2
+        lines = ["Recent official transcript (context for the recovered session):"]
+        for message in messages[-20:]:
+            content = json.dumps(message.blocks, ensure_ascii=False, default=str)
+            excerpt = content if len(content) <= 500 else content[:500] + "…"
+            lines.append(f"{message.role}: {excerpt}")
+        return "\n".join(lines)
 
     async def _plan(self, thread: Thread) -> "RunPlan":
         """Resolve instructions, model and limits from settings (with config fallbacks)."""
