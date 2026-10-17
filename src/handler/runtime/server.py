@@ -15,6 +15,7 @@ from pathlib import Path
 
 import uvicorn
 
+from .auth import Authenticator, add_cli_commands, run_cli
 from .bus import RunEventBus
 from .dispatcher import Dispatcher
 from .gateway.api import approvals_router
@@ -73,7 +74,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     s.add_argument("--agent-md", default=None, help="seed persona from this AGENT.md once")
     s.add_argument("--users", default=os.environ.get("HANDLER_RT_USERS", ""),
                    help="comma-separated user ids (for notify to 'all')")
+    s.add_argument("--admin-key", default=os.environ.get("HANDLER_ADMIN_KEY"),
+                   help="instance admin key (bearer credential with admin rights)")
     s.add_argument("--log-level", default="INFO")
+    add_cli_commands(sub)
     return p.parse_args(argv)
 
 
@@ -125,10 +129,13 @@ async def serve(args: argparse.Namespace) -> None:
                        Lane.BACKGROUND: int(limits_cfg["background_capacity"])},
     )
 
-    app = create_app(store, bus, default_harness=threads_cfg["chat"]["harness"])
+    auth = Authenticator(store, args.admin_key)
+    if not args.admin_key:
+        logger.warning("no admin key set; only user tokens can authenticate")
+    app = create_app(store, bus, auth, default_harness=threads_cfg["chat"]["harness"])
     app.mount("/mcp", mcp_app)
-    app.include_router(approvals_router(gateway, store))
-    app.include_router(settings_router(settings))
+    app.include_router(approvals_router(gateway, store, auth))
+    app.include_router(settings_router(settings, auth))
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
@@ -181,6 +188,8 @@ def main(argv: list[str] | None = None) -> None:
     configure_json_logging(args.log_level)
     if args.command == "serve":
         asyncio.run(serve(args))
+    else:
+        raise SystemExit(run_cli(args))
 
 
 if __name__ == "__main__":

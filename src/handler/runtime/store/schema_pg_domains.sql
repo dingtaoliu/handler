@@ -104,3 +104,25 @@ CREATE TABLE IF NOT EXISTS connections (
 );
 CREATE INDEX IF NOT EXISTS connections_lookup ON connections(connector, owner, status);
 CREATE INDEX IF NOT EXISTS connections_owner ON connections(owner, created_at);
+
+-- users
+CREATE TABLE IF NOT EXISTS users (
+    seq BIGSERIAL,
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    created_at TIMESTAMPTZ NOT NULL,
+    disabled BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS user_tokens (
+    seq BIGSERIAL,
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    token_hash TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL,
+    last_used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS user_tokens_user ON user_tokens(user_id, created_at);

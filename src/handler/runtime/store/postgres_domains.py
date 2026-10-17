@@ -29,6 +29,7 @@ from ..types import (
 from .postgres import _insert, _notify, _put_event
 from . import sqlite as _sqlite  # noqa: F401  (sqlite_memory needs sqlite imported first)
 from .sqlite_memory import Notification
+from .sqlite_users import ROLES, User, UserToken, check_user, hash_token, new_token
 
 T = TypeVar("T")
 _JSON = {"args", "result", "notify", "scopes"}
@@ -334,4 +335,81 @@ class ConnectionMixin(_Rows):
         return await self._fetch(
             Connection, f"SELECT {_columns(Connection)} FROM connections {where}"
             "ORDER BY created_at, seq", params,
+        )
+
+
+class UsersMixin(_Rows):
+    async def create_user(self, user: User) -> bool:
+        check_user(user)
+        values = _row_values(user)
+        columns = ", ".join(values)
+        placeholders = ", ".join(f"%({name})s" for name in values)
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                f"INSERT INTO users ({columns}) VALUES ({placeholders}) "
+                "ON CONFLICT (id) DO NOTHING", values,
+            )
+            return bool(cursor.rowcount)
+
+    async def get_user(self, user_id: str) -> User | None:
+        return await self._fetch_one(
+            User, f"SELECT {_columns(User)} FROM users WHERE id = %s", (user_id,)
+        )
+
+    async def list_users(self) -> list[User]:
+        return await self._fetch(
+            User, f"SELECT {_columns(User)} FROM users ORDER BY created_at, seq"
+        )
+
+    async def update_user(
+        self, user_id: str, *, display_name: str | None = None,
+        role: str | None = None, disabled: bool | None = None,
+    ) -> User | None:
+        if role is not None and role not in ROLES:
+            raise ValueError(f"role must be one of {ROLES}")
+        changes = {"display_name": display_name, "role": role, "disabled": disabled}
+        changes = {name: value for name, value in changes.items() if value is not None}
+        if not changes:
+            return await self.get_user(user_id)
+        assignments = ", ".join(f"{name} = %({name})s" for name in changes)
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                f"UPDATE users SET {assignments} WHERE id = %(id)s "
+                f"RETURNING {_columns(User)}", {**changes, "id": user_id},
+            )
+            row = await cursor.fetchone()
+        return _from_row(User, row) if row else None
+
+    async def create_token(self, user_id: str, label: str = "") -> tuple[str, str]:
+        token, token_id = new_token(), new_id("tok")
+        async with self._conn() as conn:
+            await _insert(conn, "user_tokens", {
+                "id": token_id, "user_id": user_id, "token_hash": hash_token(token),
+                "label": label, "created_at": self._clock(),
+            })
+        return token_id, token
+
+    async def resolve_token(self, token: str) -> User | None:
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "UPDATE user_tokens t SET last_used_at = %s FROM users u "
+                "WHERE u.id = t.user_id AND t.token_hash = %s AND t.revoked_at IS NULL "
+                "AND NOT u.disabled RETURNING u.id",
+                (self._clock(), hash_token(token)),
+            )
+            row = await cursor.fetchone()
+        return await self.get_user(row["id"]) if row else None
+
+    async def revoke_token(self, token_id: str) -> bool:
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "UPDATE user_tokens SET revoked_at = %s WHERE id = %s AND revoked_at IS NULL",
+                (self._clock(), token_id),
+            )
+            return bool(cursor.rowcount)
+
+    async def list_tokens(self, user_id: str) -> list[UserToken]:
+        return await self._fetch(
+            UserToken, f"SELECT {_columns(UserToken)} FROM user_tokens "
+            "WHERE user_id = %s ORDER BY created_at, seq", (user_id,),
         )

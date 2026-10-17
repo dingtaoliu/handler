@@ -57,13 +57,36 @@ th { color: var(--muted); font-weight: 500; }
 .track i { position: absolute; top: 0; bottom: 0; background: var(--bar);
   border-radius: 3px; min-width: 2px; }
 .step { cursor: pointer; }
+#login { position: fixed; inset: 0; display: flex; align-items: center;
+  justify-content: center; background: var(--bg); z-index: 10; }
+#login form { display: flex; flex-direction: column; gap: 8px; width: 320px;
+  padding: 20px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; }
+#login[hidden] { display: none; }
+#login input { padding: 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text); }
+#login .err { color: var(--err); min-height: 1em; }
+#who { display: flex; gap: 8px; align-items: center; padding: 8px 12px;
+  border-bottom: 1px solid var(--border); background: var(--panel);
+  color: var(--muted); font-size: 12px; }
+#who button { padding: 2px 8px; font-size: 12px; }
 pre { margin: 0; padding: 8px; background: var(--asst); border-radius: 4px;
   overflow-x: auto; font-size: 12px; }
 </style>
 </head>
 <body>
+<div id="login" hidden>
+  <form id="login-form">
+    <b>Sign in</b>
+    <input id="token" type="password" placeholder="Access token" autocomplete="off">
+    <input id="act-as" placeholder="Act as user (admin key only)" autocomplete="off">
+    <button type="submit">Sign in</button>
+    <div class="err" id="login-err"></div>
+  </form>
+</div>
 <div id="threads"><h2>Threads</h2><div id="thread-list"></div></div>
 <div id="main">
+  <div id="who"><span id="who-text"></span><button id="logout" type="button">Log out</button></div>
   <div id="empty">Select a thread, or send a message to start one.</div>
   <div id="thread-view" hidden>
     <h3 id="thread-title"></h3>
@@ -73,19 +96,38 @@ pre { margin: 0; padding: 8px; background: var(--asst); border-radius: 4px;
     <div id="steps"></div>
   </div>
   <form id="chat">
-    <input id="user" size="8" value="me" title="user id">
     <input id="text" placeholder="Message..." autocomplete="off">
     <button type="submit">Send</button>
   </form>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
-let current = null, currentRun = null, source = null;
+let current = null, currentRun = null, source = null, me = null;
+
+const store = {
+  get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { sessionStorage.setItem(k, v); } catch {} },
+  del: (k) => { try { sessionStorage.removeItem(k); } catch {} },
+};
+function logout(message) {
+  store.del("handler.token"); store.del("handler.actAs");
+  if (source) { source.close(); source = null; }
+  me = null; current = null; currentRun = null;
+  $("thread-list").innerHTML = ""; $("thread-view").hidden = true;
+  $("empty").hidden = false; $("who-text").textContent = "";
+  $("login-err").textContent = message || "";
+  $("login").hidden = false;
+}
 
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
   (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
-const api = async (path, opts) => {
-  const r = await fetch(path, opts);
+const api = async (path, opts = {}) => {
+  const headers = {...(opts.headers || {}),
+    Authorization: "Bearer " + (store.get("handler.token") || "")};
+  const actAs = store.get("handler.actAs");
+  if (actAs) headers["X-Handler-User"] = actAs;
+  const r = await fetch(path, {...opts, headers});
+  if (r.status === 401) { logout("Session expired or token invalid."); throw new Error("401"); }
   if (!r.ok) throw new Error(path + " " + r.status);
   return r.json();
 };
@@ -160,8 +202,12 @@ async function loadSteps() {
 
 function connect() {
   if (source) source.close();
-  source = new EventSource(current ?
-    `/api/threads/${encodeURIComponent(current)}/stream` : "/api/stream");
+  const token = encodeURIComponent(store.get("handler.token") || "");
+  source = new EventSource((current ?
+    `/api/threads/${encodeURIComponent(current)}/stream` : "/api/stream") +
+    "?access_token=" + token);
+  source.onerror = () => { if (source.readyState === EventSource.CLOSED)
+    api("/api/me").catch(() => {}); };
   source.onmessage = (e) => {
     const m = JSON.parse(e.data);
     loadThreads();
@@ -197,11 +243,10 @@ $("chat").onsubmit = async (e) => {
   e.preventDefault();
   const text = $("text").value.trim();
   if (!text) return;
-  const body = {user_id: $("user").value || "me", text,
-    client_message_id: crypto.randomUUID()};
-  if (current) {
+  const body = {text, client_message_id: crypto.randomUUID()};
+  if (current && me) {
     const parts = current.split(":");
-    if (parts[0] === "chat" && parts[1] === body.user_id)
+    if (parts[0] === "chat" && parts[1] === me.user_id)
       body.conversation_id = parts.slice(2).join(":");
   }
   $("text").value = "";
@@ -211,7 +256,25 @@ $("chat").onsubmit = async (e) => {
   else { loadMessages(); loadThreads(); }
 };
 
-loadThreads(); connect();
+async function start() {
+  try {
+    me = await api("/api/me");
+  } catch { return; }
+  $("login").hidden = true;
+  $("who-text").textContent = "Signed in as " +
+    (me.display_name || me.user_id || "admin key") + " (" + me.role + ")";
+  loadThreads(); connect();
+}
+$("login-form").onsubmit = async (e) => {
+  e.preventDefault();
+  store.set("handler.token", $("token").value.trim());
+  const actAs = $("act-as").value.trim();
+  if (actAs) store.set("handler.actAs", actAs); else store.del("handler.actAs");
+  $("token").value = "";
+  await start();
+};
+$("logout").onclick = () => logout("");
+if (store.get("handler.token")) start(); else logout("");
 </script>
 </body>
 </html>
