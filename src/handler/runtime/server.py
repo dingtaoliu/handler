@@ -17,6 +17,7 @@ import uvicorn
 
 from .bus import RunEventBus
 from .dispatcher import Dispatcher
+from .files import LocalFileStore, S3FileStore
 from .gateway.api import approvals_router
 from .gateway.gateway import Gateway
 from .gateway.mcp_server import create_mcp_app
@@ -36,6 +37,7 @@ from .tools.notify import NotifyTools
 from .types import Event, Lane, ThreadSpec
 from .web.app import create_app
 from .web.settings_api import settings_router
+from .workspaces import WorkspaceSync
 
 logger = logging.getLogger("handler.runtime.server")
 
@@ -90,6 +92,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="KEY=VALUE file loaded into the environment the harness inherits")
     s.add_argument("--host", default=os.environ.get("HANDLER_RT_HOST", "127.0.0.1"))
     s.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8100)))
+    s.add_argument("--file-store", choices=("local", "s3"),
+                   default=os.environ.get("HANDLER_FILE_STORE", "local"),
+                   help="workspace backups: local data-dir/files or Bucketeer S3")
     s.add_argument("--model", default=os.environ.get("HANDLER_RT_MODEL"),
                    help="default model when the thread-type settings don't set one")
     s.add_argument("--reasoning-effort", default=os.environ.get("HANDLER_RT_EFFORT", "low"))
@@ -148,10 +153,13 @@ async def serve(args: argparse.Namespace) -> None:
                        timeout_seconds=float(limits_cfg["run_timeout_seconds"]),
                        max_attempts=int(limits_cfg["max_attempts"]))
     local_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+    file_store = (S3FileStore.from_env(prefix=os.environ.get("HANDLER_FILE_PREFIX", ""))
+                  if args.file_store == "s3" else LocalFileStore(data_dir / "files"))
     executor = RunExecutor(
         store, {"codex": harness}, bus, config, PriceTable.from_yaml(),
         tokens=tokens, mcp_url=f"http://{local_host}:{args.port}/mcp/",
         settings=settings, memory_tools=memory_tools,
+        workspace_sync=WorkspaceSync(file_store, data_dir),
     )
     dispatcher = Dispatcher(
         store, executor, lease_seconds=config.lease_seconds,
