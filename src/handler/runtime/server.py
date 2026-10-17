@@ -55,6 +55,28 @@ def thread_router(store: SQLiteStore | PostgresStore):
     return emit
 
 
+def load_env_file(path: str | Path) -> dict[str, str]:
+    """Load KEY=VALUE lines into os.environ (existing variables win).
+
+    Codex inherits the process environment, so this is how a deployment hands
+    secrets such as CODEX_API_KEY to the harness from a file.
+    """
+    loaded: dict[str, str] = {}
+    for line in Path(path).expanduser().read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded[key] = value
+    return loaded
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="handler-rt", description="Handler runtime (rebuild)")
     sub = p.add_subparsers(dest="command", required=True)
@@ -62,8 +84,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     s.add_argument("--data-dir", default=os.environ.get("HANDLER_RT_DATA_DIR", "~/.handler-rt"))
     s.add_argument("--database-url", default=os.environ.get("DATABASE_URL"),
                    help="Postgres URL; when set, use PostgresStore instead of SQLite")
-    s.add_argument("--host", default="127.0.0.1")
-    s.add_argument("--port", type=int, default=8100)
+    s.add_argument("--db-schema", default=os.environ.get("HANDLER_DB_SCHEMA"),
+                   help="Postgres schema for all tables (created if missing)")
+    s.add_argument("--harness-env-file", default=os.environ.get("HANDLER_HARNESS_ENV_FILE"),
+                   help="KEY=VALUE file loaded into the environment the harness inherits")
+    s.add_argument("--host", default=os.environ.get("HANDLER_RT_HOST", "127.0.0.1"))
+    s.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8100)))
     s.add_argument("--model", default=os.environ.get("HANDLER_RT_MODEL"),
                    help="default model when the thread-type settings don't set one")
     s.add_argument("--reasoning-effort", default=os.environ.get("HANDLER_RT_EFFORT", "low"))
@@ -80,7 +106,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 async def serve(args: argparse.Namespace) -> None:
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
-    store = (PostgresStore(args.database_url) if args.database_url
+    if args.harness_env_file:
+        load_env_file(args.harness_env_file)
+    store = (PostgresStore(args.database_url, schema=args.db_schema)
+             if args.database_url
              else SQLiteStore(data_dir / "handler.db"))
     bus = RunEventBus()
 
@@ -114,9 +143,10 @@ async def serve(args: argparse.Namespace) -> None:
     config = RunConfig(data_dir=data_dir, reasoning_effort=args.reasoning_effort,
                        timeout_seconds=float(limits_cfg["run_timeout_seconds"]),
                        max_attempts=int(limits_cfg["max_attempts"]))
+    local_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
     executor = RunExecutor(
         store, {"codex": harness}, bus, config, PriceTable.from_yaml(),
-        tokens=tokens, mcp_url=f"http://{args.host}:{args.port}/mcp/",
+        tokens=tokens, mcp_url=f"http://{local_host}:{args.port}/mcp/",
         settings=settings, memory_tools=memory_tools,
     )
     dispatcher = Dispatcher(
