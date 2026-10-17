@@ -10,6 +10,9 @@ from typing import IO
 
 from ..context import current_run
 
+# Attributes every LogRecord has; anything else came from `extra=` and is logged.
+_STANDARD_ATTRS = set(vars(logging.makeLogRecord({}))) | {"message", "asctime", "taskName"}
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -23,6 +26,9 @@ class JsonFormatter(logging.Formatter):
         if ctx is not None:
             out["run_id"] = ctx.run_id
             out["thread_key"] = ctx.thread_key
+        for key, value in vars(record).items():
+            if key not in _STANDARD_ATTRS and key not in out:
+                out[key] = value
         if record.exc_info:
             out["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(out, ensure_ascii=False, default=str)

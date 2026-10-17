@@ -32,3 +32,21 @@ async def test_bus_delivers_to_thread_and_wildcard():
         bus.publish(BusMessage(thread_key="chat:u:1", run_id=None, type="event_queued"))
         assert (await q1.get()).type == "event_queued"
         assert (await qall.get()).thread_key == "chat:u:1"
+
+
+def test_json_logs_include_extra_fields():
+    import io
+    import json
+    import logging
+
+    from handler.runtime.observability.logging import JsonFormatter
+
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setFormatter(JsonFormatter())
+    log = logging.getLogger("extra-test")
+    log.addHandler(handler)
+    log.propagate = False
+    log.warning("run failed", extra={"error": "boom", "retry_in": 10})
+    line = json.loads(buf.getvalue())
+    assert line["error"] == "boom" and line["retry_in"] == 10 and line["msg"] == "run failed"
