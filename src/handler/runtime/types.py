@@ -30,6 +30,7 @@ class ThreadType(StrEnum):
     CHAT = "chat"
     GMAIL = "gmail"
     AUTOMATION = "automation"
+    CRONTAL = "crontal"  # Crontal notifications (RFQs, bids, ...), per entity
 
 
 class EventStatus(StrEnum):

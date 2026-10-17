@@ -32,6 +32,7 @@ class ThreadsSettings(Section):
     chat: ThreadSettings = Field(default_factory=ThreadSettings)
     gmail: ThreadSettings = Field(default_factory=ThreadSettings)
     automation: ThreadSettings = Field(default_factory=ThreadSettings)
+    crontal: ThreadSettings = Field(default_factory=ThreadSettings)
 
 
 class GrantsSettings(Section):

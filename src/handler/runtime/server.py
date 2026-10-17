@@ -20,6 +20,7 @@ from .bus import RunEventBus
 from .dispatcher import Dispatcher
 from .files import LocalFileStore, S3FileStore
 from .gateway.api import approvals_router
+from .gateway.crontal import crontal_connector
 from .gateway.gateway import Gateway
 from .gateway.mcp_server import create_mcp_app
 from .gateway.policy import GrantPolicy
@@ -37,6 +38,7 @@ from .tools.automation import AutomationTools
 from .tools.notify import NotifyTools
 from .types import Event, Lane, ThreadSpec
 from .web.app import create_app
+from .web.ingest import crontal_ingest_router
 from .web.settings_api import settings_router
 from .workspaces import WorkspaceSync
 
@@ -114,6 +116,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                    choices=SANDBOX_MODES,
                    help="Codex sandbox mode; use danger-full-access only where the container "
                         "itself is the isolation boundary (e.g. Heroku dynos)")
+    s.add_argument("--crontal-url", default=os.environ.get("CRONTAL_URL"),
+                   help="Crontal MCP endpoint, e.g. https://crontal.ai/api/v1/agent-mcp "
+                        "(token from $CRONTAL_AGENT_TOKEN)")
     s.add_argument("--admin-key", default=os.environ.get("HANDLER_ADMIN_KEY"),
                    help="instance admin key (bearer credential with admin rights)")
     s.add_argument("--log-level", default="INFO")
@@ -185,6 +190,14 @@ async def serve(args: argparse.Namespace) -> None:
     app.mount("/mcp", mcp_app)
     app.include_router(approvals_router(gateway, store, auth))
     app.include_router(settings_router(settings, auth))
+    webhook_secret = os.environ.get("HANDLER_WEBHOOK_SECRET")
+    if webhook_secret:
+
+        async def crontal_harness() -> str:
+            threads, _ = await settings.get("threads")
+            return threads.get("crontal", {}).get("harness", "codex")
+
+        app.include_router(crontal_ingest_router(store, webhook_secret, harness=crontal_harness))
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
@@ -217,7 +230,31 @@ async def serve(args: argparse.Namespace) -> None:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=15)
 
+    async def start_crontal_connector() -> None:
+        """Discover Crontal's tools (retrying until reachable), then expose them."""
+        token = os.environ.get("CRONTAL_AGENT_TOKEN")
+        if not args.crontal_url or not token:
+            if args.crontal_url:
+                logger.error("CRONTAL_URL set but CRONTAL_AGENT_TOKEN missing; Crontal tools off")
+            return
+        connector = crontal_connector(args.crontal_url, token)
+        delay = 5.0
+        while not stop.is_set():
+            try:
+                await connector.start()
+                gateway.register(connector)
+                logger.info("crontal tools registered",
+                            extra={"tools": [s.name for s in connector.tools()]})
+                return
+            except Exception as exc:
+                logger.warning("crontal connector not ready, retrying",
+                               extra={"error": str(exc), "retry_in": delay})
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=delay)
+                delay = min(delay * 2, 300.0)
+
     tasks = [
+        asyncio.create_task(start_crontal_connector(), name="crontal-connector"),
         asyncio.create_task(dispatcher.run_forever(stop), name="dispatcher"),
         asyncio.create_task(scheduler.run_forever(stop), name="scheduler"),
         asyncio.create_task(server.serve(), name="web"),
