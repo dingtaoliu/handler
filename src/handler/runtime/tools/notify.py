@@ -21,6 +21,8 @@ class NotifyTools:
 
     async def _notify(self, ctx: RunContext, args: dict) -> ToolResult:
         recipients = args["to"]
+        if recipients == ["all"]:
+            recipients = "all"
         if recipients == "all":
             if self.users_provider is None:
                 return ToolResult("Broadcast needs a users_provider", is_error=True)
@@ -43,6 +45,7 @@ class NotifyTools:
             "notify", "notify.send", Risk.WRITE_INTERNAL, "Notify users about something worth their attention",
             {"type": "object", "properties": {
                 "message": {"type": "string"},
-                "to": {"oneOf": [{"const": "all"}, {"type": "array", "items": {"type": "string"}}]},
+                "to": {"type": "array", "items": {"type": "string"},
+                       "description": "User ids to notify, or [\"all\"] for every user."},
             }, "required": ["message", "to"], "additionalProperties": False}, self._notify,
         )]

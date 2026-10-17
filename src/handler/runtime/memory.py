@@ -64,19 +64,36 @@ class MemoryTools:
         return ToolResult({"deleted": deleted})
 
     def tools(self) -> list[ToolSpec]:
-        specs = []
-        for action, fields, handler in [
-            ("list", [], self._list), ("read", ["name"], self._read),
-            ("save", ["name", "content", "description"], self._save),
-            ("rewrite", ["name", "content", "description", "new_name"], self._rewrite),
-            ("delete", ["name"], self._delete),
-        ]:
-            specs.append(ToolSpec(
-                f"memory_{action}", f"memory.{action}",
-                Risk.READ if action in {"list", "read"} else Risk.WRITE_INTERNAL,
-                f"{action.capitalize()} shared memory topics",
-                {"type": "object", "properties": {f: {"type": "string"} for f in fields},
-                 "required": [f for f in fields if f != "new_name"], "additionalProperties": False},
-                handler,
-            ))
-        return specs
+        name = {"type": "string", "description": "Topic name, e.g. 'people/danny' or "
+                "'suppliers/acme'. Lowercase letters, digits, '/', '_', '-'."}
+        content = {"type": "string", "description": "Markdown text."}
+        description = {"type": "string", "description": "One-line summary shown in the "
+                       "memory index, so future runs know what the topic holds."}
+
+        def obj(props: dict, required: list[str]) -> dict:
+            return {"type": "object", "properties": props, "required": required,
+                    "additionalProperties": False}
+
+        return [
+            ToolSpec("memory_list", "memory.list", Risk.READ,
+                     "List every shared memory topic as 'name: description'.",
+                     obj({}, []), self._list),
+            ToolSpec("memory_read", "memory.read", Risk.READ,
+                     "Read the full content of one memory topic.",
+                     obj({"name": name}, ["name"]), self._read),
+            ToolSpec("memory_save", "memory.save", Risk.WRITE_INTERNAL,
+                     "Save durable knowledge for future runs and other users: facts, "
+                     "preferences, decisions, commitments. Appends to the topic if it "
+                     "exists, otherwise creates it. Use this instead of writing files.",
+                     obj({"name": name, "content": content, "description": description},
+                         ["name", "content", "description"]), self._save),
+            ToolSpec("memory_rewrite", "memory.rewrite", Risk.WRITE_INTERNAL,
+                     "Replace a topic's whole content and description, e.g. to correct "
+                     "or reorganize it. Optionally rename it with new_name.",
+                     obj({"name": name, "content": content, "description": description,
+                          "new_name": name}, ["name", "content", "description"]),
+                     self._rewrite),
+            ToolSpec("memory_delete", "memory.delete", Risk.WRITE_INTERNAL,
+                     "Delete a memory topic that is obsolete or merged into another.",
+                     obj({"name": name}, ["name"]), self._delete),
+        ]

@@ -20,15 +20,22 @@ class AutomationTools:
         return [
             ToolSpec(
                 name="automation_create", action="automation.create", risk=Risk.WRITE_INTERNAL,
-                description="Create a scheduled automation.",
+                description=("Schedule work for yourself: at each firing you receive `prompt` as a new "
+                             "turn in the automation's own thread. Use for reminders, recurring "
+                             "checks, digests and follow-ups."),
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string"},
-                        "prompt": {"type": "string"},
-                        "schedule": {"type": "string"},
-                        "timezone": {"type": "string", "default": "UTC"},
-                        "notify": {"type": "array", "items": {"type": "string"}},
+                        "name": {"type": "string", "description": "Short label, e.g. 'daily digest'."},
+                        "prompt": {"type": "string", "description": "Full instructions for the "
+                                   "future run; it won't see this conversation."},
+                        "schedule": {"type": "string", "description": "One of: 'every 30m' "
+                                     "(s/m/h/d), 'cron: 0 7 * * 1-5' (5-field cron in "
+                                     "`timezone`), or 'at: 2026-10-20T09:00' (runs once)."},
+                        "timezone": {"type": "string", "default": "UTC",
+                                     "description": "IANA zone, e.g. 'America/New_York'."},
+                        "notify": {"type": "array", "items": {"type": "string"},
+                                   "description": "User ids to report results to."},
                     },
                     "required": ["name", "prompt", "schedule"],
                     "additionalProperties": False,
@@ -36,13 +43,13 @@ class AutomationTools:
             ),
             ToolSpec(
                 name="automation_list", action="automation.list", risk=Risk.READ,
-                description="List enabled and disabled automations.",
+                description="List automations with their id, schedule, next run and whether enabled.",
                 input_schema={"type": "object", "properties": {}, "additionalProperties": False},
                 handler=self._list,
             ),
             ToolSpec(
                 name="automation_delete", action="automation.delete", risk=Risk.WRITE_INTERNAL,
-                description="Delete a scheduled automation.",
+                description="Delete an automation by id (see automation_list).",
                 input_schema={
                     "type": "object", "properties": {"schedule_id": {"type": "string"}},
                     "required": ["schedule_id"], "additionalProperties": False,
