@@ -84,3 +84,13 @@ async def test_default_has_no_schema_and_rejects_bad_names(pg_dsn):
         assert core._schema is None
     finally:
         await core.close()
+
+
+async def test_schema_named_with_sql_keyword(pg_dsn, spec, event):
+    core = PostgresCore(pg_dsn, schema="select")
+    try:
+        await core.put(event("keyword-schema"), spec)
+        assert await core.get_thread(spec.key) is not None
+        assert core._listening.is_set()
+    finally:
+        await core.close()

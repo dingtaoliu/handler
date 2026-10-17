@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
@@ -149,7 +149,8 @@ class PostgresCore:
         async with self._pool.connection() as conn:
             await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK,))
             if self._schema:
-                await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self._schema}")
+                await conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    sql.Identifier(self._schema)))
             for schema in sorted(Path(__file__).parent.glob("schema_pg*.sql")):
                 await conn.execute(schema.read_text())
         self._listener = asyncio.create_task(self._listen())
@@ -185,7 +186,7 @@ class PostgresCore:
                     cursor = await conn.execute(
                         "SELECT %s || '_' || current_schema() AS channel", (CHANNEL,))
                     row = await cursor.fetchone()
-                    await conn.execute(f'LISTEN "{row[0]}"')
+                    await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(row[0])))
                     self._listening.set()
                     self._wake.set()
                     async for _ in conn.notifies():

@@ -6,6 +6,8 @@ to its own schema (`handler_crontal`); Crontal's Bucketeer is shared, with
 handler under its own key prefix. Design: `docs/agent-runtime-design.md` §10.1.
 
 These are steps for a human (or the driver) to run later. Nothing here has been run.
+Get the owner's approval before creating resources or deploying, and use a dedicated
+OpenAI API key chosen by the owner. Never copy a personal ChatGPT login into the image.
 
 ## 1. Create the app on the container stack
 
@@ -35,16 +37,17 @@ heroku config:set -a crontal-agent \
   HANDLER_ADMIN_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))') \
   HANDLER_DB_SCHEMA=handler_crontal \
   HANDLER_RT_MODEL=<model name> \
-  HANDLER_BUCKET_PREFIX=handler/crontal/
+  HANDLER_FILE_STORE=s3 \
+  HANDLER_FILE_PREFIX=handler/crontal/
 ```
 
 - `CODEX_API_KEY`: Codex reads it from the environment; no `codex login` is needed.
 - `HANDLER_ADMIN_KEY`: the instance admin key (package L). Crontal's backend uses it with
   `X-Handler-User` to act for users. Keep it in Crontal's own config as well.
 - `HANDLER_DB_SCHEMA`: defaults to `handler_crontal` if unset. Created on first start.
-- `HANDLER_BUCKET_PREFIX`: Bucketeer provides `BUCKETEER_*` vars itself; the prefix keeps
-  handler's objects apart from Crontal's. The file-store wiring in `server.py` is not part
-  of this package; confirm the variable name used when it lands.
+- `HANDLER_FILE_STORE=s3` enables durable workspace and session storage (package N).
+  Bucketeer provides `BUCKETEER_*` vars itself; `HANDLER_FILE_PREFIX` keeps handler's
+  objects apart from Crontal's.
 - Optional: `HANDLER_RT_EFFORT` (default `low`), `HANDLER_RT_USERS`.
 
 `PORT` is set by Heroku; the entrypoint binds `0.0.0.0:$PORT`.
@@ -89,8 +92,10 @@ schema as the dyno via the config vars.)
 ## Operating notes
 
 - **Memory**: a Basic dyno has 512 MB. Handler plus a running Codex process can approach it.
-  Keep one concurrent run (set `limits.interactive_capacity` and `background_capacity` to 1
-  in the settings), watch `heroku logs` for `R14`/`R15` errors, and move to Standard-2X if needed.
+  The capacities are per lane: setting both to 1 permits two simultaneous runs.
+  Until a global cap is configured, set `limits.interactive_capacity=1` and
+  `background_capacity=0` (background jobs remain queued), restart after changing
+  limits, watch `heroku logs` for `R14`/`R15` errors, and move to Standard-2X if needed.
 - **Ephemeral disk**: the data dir is `/tmp/handler` and is wiped on every restart and at
   least daily. Durable state is in Postgres and Bucketeer only.
 - **Sandbox**: Codex's `workspace-write` sandbox may not work inside a Heroku dyno
