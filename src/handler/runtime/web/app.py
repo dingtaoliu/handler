@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +42,7 @@ async def sse_stream(
     request: Request | None = None,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
     visible: Callable[[str], bool] | None = None,
+    authorized: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[str]:
     """Yield SSE frames for bus messages, with comment heartbeats when idle.
 
@@ -57,8 +58,12 @@ async def sse_stream(
             except asyncio.TimeoutError:
                 if request is not None and await request.is_disconnected():
                     return
+                if authorized is not None and not await authorized():
+                    return
                 yield ": heartbeat\n\n"
                 continue
+            if authorized is not None and not await authorized():
+                return
             if visible is None or visible(msg.thread_key):
                 yield f"data: {json.dumps(_json(msg))}\n\n"
 
@@ -93,7 +98,7 @@ def create_app(
             type="chat.message",
             source="web",
             payload={"text": body.text},
-            idempotency_key=body.client_message_id or uuid.uuid4().hex,
+            idempotency_key=f"{user_id}:{body.client_message_id or uuid.uuid4().hex}",
             user_id=user_id,
             thread_key=key,
         )
@@ -171,18 +176,29 @@ def create_app(
         return {"thread": _json(thread), "pending_events": _json(pending)}
 
     def _sse_response(request: Request, key: str, principal: Principal) -> StreamingResponse:
+        async def authorized() -> bool:
+            # Revocation, disabling and role changes apply to already open streams.
+            try:
+                return await auth.require_sse_principal(request) == principal
+            except HTTPException:
+                return False
+
         return StreamingResponse(
-            sse_stream(bus, key, request, visible=lambda k: can_see_thread(principal, k)),
+            sse_stream(bus, key, request, visible=lambda k: can_see_thread(principal, k),
+                       authorized=authorized),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    # The page is a static shell holding only the login box: it carries no data
-    # and must load before the browser has a token. Everything it shows comes
-    # from authenticated /api calls.
+    @router.get("/login")
+    async def login() -> FileResponse:
+        return FileResponse(TIMELINE_HTML.with_name("login.html"), media_type="text/html",
+                            headers={"Cache-Control": "no-store"})
+
     @router.get("/timeline")
-    async def timeline() -> FileResponse:
-        return FileResponse(TIMELINE_HTML, media_type="text/html")
+    async def timeline(_: Principal = principal_dep) -> FileResponse:
+        return FileResponse(TIMELINE_HTML, media_type="text/html",
+                            headers={"Cache-Control": "no-store"})
 
     app.include_router(router)
     app.include_router(auth_router(auth))

@@ -2,6 +2,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from handler.runtime.auth import Authenticator
 from handler.runtime.context import RunContext
 from handler.runtime.gateway import approvals_router
 
@@ -11,9 +12,11 @@ CTX = RunContext(run_id="run1", thread_key="chat:u:1", user_id="u1", acting_as="
 @pytest.fixture
 async def client(gateway, store):
     app = FastAPI()
-    app.include_router(approvals_router(gateway, store))
+    # The admin key never touches the users store, so the gateway store stands in.
+    app.include_router(approvals_router(gateway, store, Authenticator(store, "test-admin-key")))
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+    async with httpx.AsyncClient(transport=transport, base_url="http://t",
+                                 headers={"Authorization": "Bearer test-admin-key"}) as c:
         yield c
 
 

@@ -144,7 +144,7 @@ async def serve(args: argparse.Namespace) -> None:
 
     app.router.lifespan_context = lifespan
     server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port,
-                                           log_config=None, lifespan="on"))
+                                           log_config=None, access_log=False, lifespan="on"))
     server.install_signal_handlers = lambda: None  # we handle signals ourselves
 
     stop = asyncio.Event()
@@ -174,7 +174,7 @@ async def serve(args: argparse.Namespace) -> None:
         asyncio.create_task(server.serve(), name="web"),
         asyncio.create_task(housekeeping(), name="housekeeping"),
     ]
-    logger.info("handler-rt serving", extra={"url": f"http://{args.host}:{args.port}/timeline",
+    logger.info("handler-rt serving", extra={"url": f"http://{args.host}:{args.port}/login",
                                               "data_dir": str(data_dir),
                                               "tools": [s.name for s in gateway.specs()]})
     await stop.wait()
@@ -185,8 +185,8 @@ async def serve(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
-    configure_json_logging(args.log_level)
     if args.command == "serve":
+        configure_json_logging(args.log_level)
         asyncio.run(serve(args))
     else:
         raise SystemExit(run_cli(args))

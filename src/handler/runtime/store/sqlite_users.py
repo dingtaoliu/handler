@@ -80,7 +80,7 @@ def new_token() -> str:
 
 
 def check_user(user: User) -> None:
-    if not USER_ID.match(user.id):
+    if not USER_ID.fullmatch(user.id):
         raise ValueError("user id must match " + USER_ID.pattern)
     if user.role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}")

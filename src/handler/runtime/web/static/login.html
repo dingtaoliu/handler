@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handler sign in</title>
+<style>
+body { font: 16px system-ui; max-width: 320px; margin: 15vh auto; padding: 20px; }
+form { display: grid; gap: 12px; } input, button { padding: 10px; }
+#error { color: #c22; }
+</style>
+<h1>Sign in to Handler</h1>
+<form id="login">
+<input id="token" type="password" placeholder="Access token" autocomplete="off" required>
+<input id="act-as" placeholder="Act as user (admin key only)" autocomplete="off">
+<button>Sign in</button>
+<p id="error" role="alert"></p>
+</form>
+<script>
+async function enter(token, actAs) {
+  try {
+    const headers = {Authorization: "Bearer " + token};
+    if (actAs) headers["X-Handler-User"] = actAs;
+    const response = await fetch("/timeline", {headers, cache: "no-store"});
+    if (!response.ok) throw new Error("Sign in failed. Check your token and user.");
+    const html = await response.text();
+    sessionStorage.setItem("handler.token", token);
+    if (actAs) sessionStorage.setItem("handler.actAs", actAs);
+    else sessionStorage.removeItem("handler.actAs");
+    // Only the authenticated, same-origin static page is executed; input is
+    // never interpolated into markup. Keep /login as the reloadable address.
+    document.open(); document.write(html); document.close();
+  } catch (error) {
+    document.getElementById("error").textContent = error.message;
+  }
+}
+document.getElementById("login").onsubmit = (event) => {
+  event.preventDefault();
+  enter(document.getElementById("token").value.trim(),
+        document.getElementById("act-as").value.trim());
+};
+try {
+  const token = sessionStorage.getItem("handler.token");
+  if (token) enter(token, sessionStorage.getItem("handler.actAs") || "");
+} catch {}
+</script>
+</html>

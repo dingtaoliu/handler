@@ -205,9 +205,9 @@ function connect() {
   const token = encodeURIComponent(store.get("handler.token") || "");
   source = new EventSource((current ?
     `/api/threads/${encodeURIComponent(current)}/stream` : "/api/stream") +
-    "?access_token=" + token);
-  source.onerror = () => { if (source.readyState === EventSource.CLOSED)
-    api("/api/me").catch(() => {}); };
+    "?access_token=" + token + "&act_as=" +
+    encodeURIComponent(store.get("handler.actAs") || ""));
+  source.onerror = () => { api("/api/me").catch(() => {}); };
   source.onmessage = (e) => {
     const m = JSON.parse(e.data);
     loadThreads();

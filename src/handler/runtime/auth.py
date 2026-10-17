@@ -90,7 +90,10 @@ class Authenticator:
             credential = request.query_params.get("access_token") or None
         if credential is None:
             raise HTTPException(401, "Authentication required", headers=_BEARER)
-        principal = await self.authenticate(credential, request.headers.get(ACT_AS_HEADER))
+        act_as = request.headers.get(ACT_AS_HEADER)
+        if act_as is None and allow_query:
+            act_as = request.query_params.get("act_as")
+        principal = await self.authenticate(credential, act_as)
         if principal is None:
             raise HTTPException(401, "Invalid credentials", headers=_BEARER)
         return principal
@@ -159,7 +162,7 @@ async def _run_cli(args: argparse.Namespace, store=None) -> int:
     store = store or open_store(args)
     try:
         if args.command == "user":
-            if not USER_ID.match(args.user_id):
+            if not USER_ID.fullmatch(args.user_id):
                 print(f"error: invalid user id (use {USER_ID.pattern})", file=sys.stderr)
                 return 2
             user = User(args.user_id, args.display_name or args.user_id,

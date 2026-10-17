@@ -394,11 +394,12 @@ class UsersMixin(_Rows):
             cursor = await conn.execute(
                 "UPDATE user_tokens t SET last_used_at = %s FROM users u "
                 "WHERE u.id = t.user_id AND t.token_hash = %s AND t.revoked_at IS NULL "
-                "AND NOT u.disabled RETURNING u.id",
+                "AND NOT u.disabled RETURNING "
+                + ", ".join(f"u.{name}" for name in User.__dataclass_fields__),
                 (self._clock(), hash_token(token)),
             )
             row = await cursor.fetchone()
-        return await self.get_user(row["id"]) if row else None
+        return _from_row(User, row) if row else None
 
     async def revoke_token(self, token_id: str) -> bool:
         async with self._conn() as conn:
