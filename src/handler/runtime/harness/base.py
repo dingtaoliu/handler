@@ -67,6 +67,7 @@ class RunRequest:
     reasoning_effort: str | None = None
     mcp_servers: list[McpServerSpec] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)  # extra env for the process
+    images: list[Path] = field(default_factory=list)  # image attachments for this turn
     limits: RunLimits = field(default_factory=RunLimits)
 
 
