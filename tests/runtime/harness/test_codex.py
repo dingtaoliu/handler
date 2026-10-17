@@ -114,7 +114,8 @@ async def test_argv_and_environment(fake_codex, request_for, tmp_path, monkeypat
     recorded = json.loads((tmp_path / "record.json").read_text())
     expected = [
         "exec", "--json", "--ignore-user-config", "--skip-git-repo-check", "-s", "read-only",
-        "-C", str(req.workspace), "-m", "requested-model", "-c", "model_reasoning_effort=high",
+        "-C", str(req.workspace), "-c", 'approval_policy="never"',
+        "-m", "requested-model", "-c", "model_reasoning_effort=high",
         "--color", "never",
     ]
     if session_id:
@@ -156,7 +157,7 @@ def test_default_and_minimal_argv(request_for):
     req = request_for()
     base = [
         "codex-test", "exec", "--json", "--ignore-user-config", "--skip-git-repo-check",
-        "-s", "workspace-write", "-C", str(req.workspace),
+        "-s", "workspace-write", "-C", str(req.workspace), "-c", 'approval_policy="never"',
     ]
     assert CodexHarness("codex-test")._argv(req) == base + [req.prompt]
     assert CodexHarness("codex-test", "model-default", "medium")._argv(req) == base + [
@@ -178,7 +179,8 @@ def test_mcp_argv_toml_roundtrip(request_for):
     ]
     req = request_for(session_id=SESSION_ID, mcp_servers=servers)
     argv = CodexHarness("codex-test", extra_args=["--color", "never"])._argv(req)
-    overrides = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-c"]
+    overrides = [argv[i + 1] for i, arg in enumerate(argv)
+                 if arg == "-c" and argv[i + 1].startswith("mcp_servers.")]
     parsed = {}
     for override in overrides:
         result = tomllib.loads(override)["mcp_servers"]
@@ -186,9 +188,12 @@ def test_mcp_argv_toml_roundtrip(request_for):
             parsed.setdefault(name, {}).update(settings)
         assert argv.index(override) < argv.index("--color") < argv.index("resume")
     assert parsed == {
-        servers[0].name: {"url": servers[0].url, "http_headers": servers[0].headers},
-        "local": {"command": servers[1].command[0], "args": servers[1].command[1:], "env": servers[1].env},
-        "empty": {"command": "server", "args": [], "env": {}},
+        servers[0].name: {"url": servers[0].url, "http_headers": servers[0].headers,
+                          "default_tools_approval_mode": "approve"},
+        "local": {"command": servers[1].command[0], "args": servers[1].command[1:],
+                  "env": servers[1].env, "default_tools_approval_mode": "approve"},
+        "empty": {"command": "server", "args": [], "env": {},
+                  "default_tools_approval_mode": "approve"},
     }
 
 

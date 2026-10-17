@@ -40,6 +40,9 @@ def _mcp_args(servers: list[McpServerSpec]) -> list[str]:
     for server in servers:
         prefix = f"mcp_servers.{_toml_key(server.name)}"
         settings: dict[str, str | list[str] | dict[str, str]] = {}
+        # Handler's gateway authorizes every MCP call (grants + approvals), so
+        # Codex must not hold calls for a human prompt nobody can answer.
+        settings["default_tools_approval_mode"] = "approve"
         if server.url is not None:
             settings["url"] = server.url
             if server.headers:
@@ -176,6 +179,7 @@ class CodexHarness:
         default_model: str | None = None,
         default_reasoning_effort: str | None = None,
         sandbox: str = "workspace-write",
+        approval_policy: str = "never",
         auth_json: Path | None = None,
         extra_args: list[str] | None = None,
     ) -> None:
@@ -183,6 +187,7 @@ class CodexHarness:
         self.default_model = default_model
         self.default_reasoning_effort = default_reasoning_effort
         self.sandbox = sandbox
+        self.approval_policy = approval_policy
         self.auth_json = auth_json
         self.extra_args = list(extra_args or [])
         self._processes: dict[str, asyncio.subprocess.Process] = {}
@@ -191,6 +196,7 @@ class CodexHarness:
         argv = [
             self.binary, "exec", "--json", "--ignore-user-config", "--skip-git-repo-check",
             "-s", self.sandbox, "-C", str(req.workspace),
+            "-c", f'approval_policy="{self.approval_policy}"',
         ]
         if model := req.model or self.default_model:
             argv.extend(["-m", model])
