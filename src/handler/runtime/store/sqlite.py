@@ -126,6 +126,8 @@ class SQLiteCore:
                 db.execute("PRAGMA journal_mode = WAL")
                 db.execute("PRAGMA foreign_keys = ON")
                 for schema in sorted(Path(__file__).parent.glob("schema*.sql")):
+                    if schema.name.startswith("schema_pg"):
+                        continue
                     db.executescript(schema.read_text())
             except BaseException:
                 db.close()
