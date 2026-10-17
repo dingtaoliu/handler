@@ -82,7 +82,7 @@ async def test_roundtrip_standalone(mcp_app, tokens, store, tools):
             boom = await s.call_tool("boom", {"text": "a"})
             assert boom.isError
     assert len(tools.calls) == 1
-    assert len(await store.list_audit("run-mcp")) == 6
+    assert len(await store.list_audit("run-mcp")) == 4
 
 
 async def test_mounted_under_fastapi_with_host_lifespan(mcp_app, tokens, tools):
