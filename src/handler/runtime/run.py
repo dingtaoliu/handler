@@ -18,9 +18,21 @@ from pathlib import Path
 
 from .bus import BusMessage, RunEventBus
 from .context import RunContext, reset_current_run, set_current_run
-from .harness.base import Harness, HarnessError, RunEvent, RunEventKind, RunRequest
+from .gateway.tokens import RunTokens
+from .harness.base import (
+    Harness,
+    HarnessError,
+    McpServerSpec,
+    RunEvent,
+    RunEventKind,
+    RunLimits,
+    RunRequest,
+)
+from .instructions import build_instructions
+from .memory import MemoryTools
 from .observability.pricing import PriceTable
 from .observability.recorder import RawSink, StepRecorder
+from .settings import SettingsService
 from .store.base import Store
 from .types import (
     Event,
@@ -121,6 +133,15 @@ def transcript_message(thread_key: str, run_id: str, ev: RunEvent) -> Message | 
     return None
 
 
+@dataclass
+class RunPlan:
+    instructions: str
+    model: str | None
+    reasoning_effort: str | None
+    timeout_seconds: float
+    max_attempts: int
+
+
 class RunExecutor:
     def __init__(
         self,
@@ -129,8 +150,17 @@ class RunExecutor:
         bus: RunEventBus,
         config: RunConfig,
         prices: PriceTable,
+        *,
+        tokens: RunTokens | None = None,
+        mcp_url: str | None = None,
+        settings: SettingsService | None = None,
+        memory_tools: MemoryTools | None = None,
     ) -> None:
         self.store = store
+        self.tokens = tokens
+        self.mcp_url = mcp_url
+        self.settings = settings
+        self.memory_tools = memory_tools
         self.harnesses = harnesses
         self.bus = bus
         self.config = config
@@ -202,6 +232,8 @@ class RunExecutor:
                                 raw_sink=self.raw_sink)
         transcript = event_messages(thread.key, run.id, events)
         slug = thread_slug(thread.key)
+        plan = await self._plan(thread)
+        mcp_token: str | None = None
         try:
             if harness is None:
                 raise HarnessError(f"unknown harness {thread.harness!r}", retryable=False)
@@ -209,17 +241,30 @@ class RunExecutor:
             home = self.config.homes_dir / slug
             workspace.mkdir(parents=True, exist_ok=True)
             home.mkdir(parents=True, exist_ok=True)
+            mcp_servers: list[McpServerSpec] = []
+            if self.tokens is not None and self.mcp_url:
+                mcp_token = self.tokens.issue(
+                    RunContext(run_id=run.id, thread_key=thread.key,
+                               user_id=thread.owner_user_id, acting_as=thread.owner_user_id),
+                    ttl_seconds=plan.timeout_seconds + 300,
+                )
+                mcp_servers.append(McpServerSpec(
+                    name="handler", url=self.mcp_url,
+                    headers={"Authorization": f"Bearer {mcp_token}"},
+                ))
             req = RunRequest(
                 run_id=run.id,
                 thread_key=thread.key,
                 workspace=workspace,
                 home=home,
                 prompt=render_turn(events),
-                instructions=self.config.instructions,
+                instructions=plan.instructions,
                 session_id=thread.session_id,
-                model=thread.model,
-                reasoning_effort=self.config.reasoning_effort,
+                model=plan.model,
+                reasoning_effort=plan.reasoning_effort,
+                mcp_servers=mcp_servers,
                 env=dict(self.config.harness_env),
+                limits=RunLimits(timeout_seconds=plan.timeout_seconds),
             )
             final_text = ""
             async for ev in harness.run(req):
@@ -257,16 +302,44 @@ class RunExecutor:
         except LeaseLost:
             logger.warning("lease lost while committing run %s", run.id)
         except Exception as exc:  # harness errors and unexpected failures
-            await self._fail(lease, thread, run, recorder, exc)
+            await self._fail(lease, thread, run, recorder, exc, plan.max_attempts)
+        finally:
+            if mcp_token is not None and self.tokens is not None:
+                self.tokens.revoke(mcp_token)
+
+    async def _plan(self, thread: Thread) -> "RunPlan":
+        """Resolve instructions, model and limits from settings (with config fallbacks)."""
+        plan = RunPlan(
+            instructions=self.config.instructions,
+            model=thread.model,
+            reasoning_effort=self.config.reasoning_effort,
+            timeout_seconds=self.config.timeout_seconds,
+            max_attempts=self.config.max_attempts,
+        )
+        if self.settings is None:
+            return plan
+        threads, _ = await self.settings.get("threads")
+        per_type = threads.get(str(thread.type), {}) or {}
+        plan.model = thread.model or per_type.get("model")
+        plan.reasoning_effort = per_type.get("reasoning_effort") or plan.reasoning_effort
+        limits, _ = await self.settings.get("limits")
+        plan.timeout_seconds = float(limits.get("run_timeout_seconds", plan.timeout_seconds))
+        plan.max_attempts = int(limits.get("max_attempts", plan.max_attempts))
+        if self.memory_tools is not None:
+            speaker = thread.owner_user_id if str(thread.type) == "chat" else None
+            built = await build_instructions(self.settings, self.memory_tools,
+                                             speaker=speaker, thread_type=thread.type)
+            plan.instructions = "\n\n".join(p for p in (built, self.config.instructions) if p)
+        return plan
 
     async def _fail(self, lease: Lease, thread: Thread, run: Run, recorder: StepRecorder,
-                    exc: Exception) -> None:
+                    exc: Exception, max_attempts: int) -> None:
         retryable = isinstance(exc, HarnessError) and exc.retryable
         if not isinstance(exc, HarnessError):
             logger.exception("run crashed")
         attempt = thread.attempts + 1
         retry_in: float | None = None
-        if retryable and attempt < self.config.max_attempts:
+        if retryable and attempt < max_attempts:
             backoff = self.config.retry_backoff_seconds
             retry_in = backoff[min(attempt - 1, len(backoff) - 1)]
         usage, cost = recorder.totals()
