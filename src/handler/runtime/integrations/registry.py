@@ -65,6 +65,7 @@ class LoadedIntegrations:
     settings_sections: dict[str, tuple[str, SettingsSection]] = field(default_factory=dict)
     prompt_fragments: list[tuple[str, PromptFragment]] = field(default_factory=list)
     ui_entries: list[tuple[str, UIManifestEntry]] = field(default_factory=list)
+    configured: bool = True  # False when HANDLER_INTEGRATIONS is unset
 
     @property
     def names(self) -> list[str]:
@@ -126,6 +127,7 @@ class LoadedIntegrations:
     def manifest(self) -> dict[str, Any]:
         return {
             "instance": self.instance_name or "main",
+            "configured": self.configured,
             "integrations": [{"name": i.name, "label": i.label or i.name,
                               "requires": list(i.requires)} for i in self.integrations],
             "entries": [entry.to_dict(name) for name, entry in self.ui_entries],

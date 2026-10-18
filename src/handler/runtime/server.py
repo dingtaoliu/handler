@@ -38,6 +38,14 @@ from .harness.codex import SANDBOX_MODES, CodexHarness, codex_binary
 from .gateway.crontal_api import CrontalApiTools, crontal_base_url
 from .harness.openai_agents import OpenAIAgentsHarness
 from .integrations.crontal.sink import crontal_sink_from_config
+from .integrations.base import IntegrationContext
+from .integrations.registry import (
+    IntegrationRegistry,
+    LoadedIntegrations,
+    default_registry,
+    enabled_names,
+    route_keys,
+)
 from .memory import MemoryTools
 from .notifications import FailureNotifier, Notifier
 from .observability.logging import configure_json_logging
@@ -61,6 +69,7 @@ from .web.google_api import google_router
 from .web.ingest import crontal_ingest_router
 from .web.settings_api import settings_router
 from .web.tasks_api import tasks_router
+from .web.ui_manifest_api import ui_manifest_router
 from .workspaces import WorkspaceSync
 
 logger = logging.getLogger("handler.runtime.server")
@@ -292,7 +301,11 @@ _PRIVATE_ENV = {
     "HANDLER_TRUSTED_USER", "HANDLER_TRUSTED_DEVICE_USERS",
     "HANDLER_HARNESS_ENV_FILE", "HANDLER_RT_CODEX_AUTH", "HANDLER_RT_USERS",
     "HANDLER_RT_LOG_FILE", "CRONTAL_URL", "CRONTAL_AGENT_TOKEN",
+    "HANDLER_INTEGRATIONS",  # each instance chooses its own integrations
 }
+
+# Thread types the core owns; integrations may not redefine them.
+CORE_THREAD_TYPES = frozenset({"chat", "automation"})
 
 
 def instance_configs(args: argparse.Namespace, env: Mapping[str, str]):
@@ -403,8 +416,19 @@ async def serve(args: argparse.Namespace) -> None:
 
 @contextlib.asynccontextmanager
 async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
-                           base_path: str = "", instance_name: str = ""):
+                           base_path: str = "", instance_name: str = "",
+                           registry: IntegrationRegistry | None = None):
     """Own one instance and close all its resources when the host stops."""
+    integration_names = enabled_names(env)
+    if integration_names is None:
+        # Unconfigured: legacy wiring only (phase 1 keeps it in every case).
+        integrations = LoadedIntegrations(instance_name, [], configured=False)
+    else:
+        integrations = (registry or default_registry).load(
+            integration_names, instance_name=instance_name, env=env, base_path=base_path,
+            reserved_thread_types=CORE_THREAD_TYPES)
+        logger.info("integrations enabled", extra={"instance": instance_name or "main",
+                                                   "integrations": integrations.names})
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     env = dict(env)
@@ -541,6 +565,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         if webhook_secret:
             app.include_router(crontal_ingest_router(store, webhook_secret,
                                                      harness=settings.harness_source("crontal")))
+        app.include_router(ui_manifest_router(integrations, auth))
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -590,6 +615,26 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                         await asyncio.wait_for(stop.wait(), timeout=delay)
                     delay = min(delay * 2, 300.0)
 
+        # Integration contributions, after all core wiring so duplicates of core
+        # routes and tools are reported with the integration's name.
+        contributions = integrations.collect_runtime(
+            IntegrationContext(
+                instance_name=instance_name, base_path=base_path, env=env, store=store,
+                bus=bus, settings=settings, gateway=gateway, outbox=outbox,
+                notifier=notifier, auth=auth, workspaces_dir=config.workspaces_dir,
+                workspace_sync=workspace_sync, file_store=file_store),
+            reserved_routes=set(route_keys(app)),
+            reserved_tools={spec.name for spec in gateway.specs()})
+        for _, tool_set in contributions.tool_sets:
+            gateway.register(tool_set)
+        for _, sink in contributions.sinks:
+            outbox.register(sink)
+        for _, router in contributions.routers:
+            app.include_router(router)
+        app.state.integrations = integrations
+        app.state.identity_provider = (contributions.identity_provider[1]
+                                       if contributions.identity_provider else None)
+
         async with mcp_app.lifespan():
             tasks = [
                 asyncio.create_task(start_crontal_connector(), name="crontal-connector"),
@@ -600,6 +645,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                 asyncio.create_task(workspace_sync.run_periodic(stop, args.sync_interval),
                                     name="workspace-sync"),
             ]
+            tasks.extend(asyncio.create_task(task.run(stop), name=f"{owner}:{task.name}")
+                         for owner, task in contributions.background_tasks)
             logger.info("handler-rt serving", extra={"url": f"http://{args.host}:{args.port}/login",
                                                       "data_dir": str(data_dir),
                                                       "tools": [s.name for s in gateway.specs()]})
