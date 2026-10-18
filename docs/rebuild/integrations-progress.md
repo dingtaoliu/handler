@@ -79,4 +79,14 @@ Branch `feat/integrations-p2-crontal` (worktree `../handler-wt-int-crontal`), fr
   without crontal) has no Crontal at all; unset keeps legacy exactly. Integrations now load
   after the harness env-file merge, with `CRONTAL_URL` = `args.crontal_url` (CLI wins).
   Email/google legacy blocks are still unconditional.
-- [ ] tests (parity, empty list, multi-instance)
+- [x] tests `tests/runtime/integrations/test_crontal_integration.py`: enabled == legacy
+  (routes, tools, sinks, thread types, connector start) per instance; `""` has no Crontal;
+  enabled on bss only leaves main without Crontal. Suite: 765 passed, 2 skipped.
+
+**Phase 2 crontal done** (not merged). Not moved yet: crontal thread instructions stay in
+`settings.py` defaults, `web/ingest.py` and `gateway/crontal*.py` stay at their paths (the
+integration imports them). Integration config stays optional (each piece on when its vars
+are set), matching legacy; no startup failure for missing Crontal vars.
+
+Next: phase 2 step 2, `email_intake` (same pattern: gate the legacy block on
+`not integrations.configured`, parity test like the crontal one).
