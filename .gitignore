@@ -18,3 +18,7 @@ __pycache__/
 /mail/database/
 # build artifacts
 /build/
+
+# Cloudflare Worker local state
+deploy/cloudflare-email-worker/.wrangler/
+deploy/cloudflare-email-worker/node_modules/
