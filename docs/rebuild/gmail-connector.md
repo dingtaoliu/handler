@@ -1,6 +1,6 @@
 # Gmail connector
 
-Built on `feat/gmail-connector` (2026-10-18). It gives the Crontal admin instance (Heroku `crontal-agent`) access to the shared mailbox `crontal.contacts@gmail.com`. That mailbox receives `contact@crontal.ai` mail, which includes the business operation emails the first client forwards. The agent can **search, read, download attachments and draft**. It can **never send, delete or relabel**.
+Built on `feat/gmail-connector` (2026-10-18). It gives the Crontal admin instance (Heroku `crontal-agent`) access to the shared mailbox `crontal.contacts@gmail.com`. That mailbox receives `contact@crontal.ai` mail, which includes the business operation emails the first client forwards. The agent can **search, read, download attachments, draft and send**. Every send waits for a human's approval (§1.1). It can **never delete or relabel**.
 
 ## 1. Design
 
@@ -42,7 +42,16 @@ harness ──MCP──▶ gateway ── gmail_* tools (gateway/gmail.py) ─�
   - draft tools accept `gmail.modify`, `gmail.compose` or `mail.google.com`.
 
   If the needed scope is missing, the tool asks for a reconnect with `gmail.modify`.
-- **The scope does not decide what the agent can do.** The token's scope (`gmail.modify` also allows sending and labels) is an upper bound. The agent is limited by the **tool set and grants**. No send, delete, trash, label or modify tool exists, so the agent can't do those things whatever the token allows. Adding such a tool later is a code change plus a grant decision.
+- **The scope does not decide what the agent can do.** The token's scope (`gmail.modify` also allows labels) is an upper bound. The agent is limited by the **tool set and grants**. No delete, trash, label or modify tool exists, so the agent can't do those things whatever the token allows. Adding such a tool later is a code change plus a grant decision. Send tools accept `gmail.modify`, `gmail.compose`, `gmail.send` or `mail.google.com`, so the existing connection needs no new scope.
+
+### 1.1 Sending (added 2026-10-18)
+
+- **Tools.** `gmail_send` sends a new email or a reply (same fields as `gmail_create_draft`; workspace files as attachments; large emails use the multipart upload endpoint). `gmail_send_draft(draft_id)` sends an existing draft as it is.
+- **Always approved by a human.** Both are `write_external`, whose default is `ask`, and both are marked `explicit_allow_only`: a glob rule (`gmail.*`, `*`) or a risk default that says `allow` is turned into `ask`. Only an exact rule (`{"gmail.send": "allow"}` or `{"gmail.send_draft": "allow"}`) can skip approval, and nothing sets one by default. Globs and defaults can still `deny`.
+- **What the approver sees.** Before the call is parked, the tool resolves the email and writes a summary into the approval's `reason`, which the Approvals tab shows above the raw arguments: the recipients (To/Cc/Bcc, with a reply's `to` resolved from Reply-To/From), the subject (with `Re:`), the first 600 characters of the body and each attachment's name and size. For `gmail_send_draft` it reads the draft itself.
+- **What runs is what was shown.** The stored arguments carry the resolved `to` and `subject`, a SHA-256 of each attachment and, for a draft, the draft's current message id. After approval, a changed attachment or an edited draft (Gmail gives an updated draft a new message id) refuses the send with "… changed after the send was approved; not sent".
+- **Before parking**, the same checks as the call run: missing scope, not connected, needs reconnect, missing `to`/`subject`, attachment paths outside the workspace and drafts with no recipients all fail at once, and no approval is created.
+- **Results.** A sent email returns `status: "sent"`, the message and thread ids, the recipients, the subject and a Gmail link. The prompt (`instructions.py`) and the tool descriptions tell the agent to send only when asked and never to claim an email was sent before a result says `sent`.
 
 ### Tools
 
@@ -55,13 +64,15 @@ harness ──MCP──▶ gateway ── gmail_* tools (gateway/gmail.py) ─�
 | `gmail_create_draft(to?, subject?, body, cc?, bcc?, reply_to_message_id?, attachments?)` | `gmail.create_draft` | write_internal → allow | Builds the MIME message. For a reply it sets `threadId`, `In-Reply-To`, `References` (the original's references plus its Message-ID) and a `Re:` subject, and `to` defaults to Reply-To or From. Attachments are workspace paths. Returns `draft_id`, `message_id`, `thread_id` and a Gmail link |
 | `gmail_update_draft(draft_id, …same fields)` | `gmail.update_draft` | write_internal → allow | Fields you leave out keep their current values, existing attachments included. Passing `attachments` replaces them |
 | `gmail_list_drafts(max_results=20)` | `gmail.list_drafts` | read → allow | id, to, subject, snippet and link for each draft |
+| `gmail_send(to?, subject?, body, cc?, bcc?, reply_to_message_id?, attachments?)` | `gmail.send` | write_external → **ask** (exact rule only) | Sends after approval; see §1.1 |
+| `gmail_send_draft(draft_id)` | `gmail.send_draft` | write_external → **ask** (exact rule only) | Sends an existing draft after approval; refused if the draft changed |
 
 Notes on the tools:
 - **Body text.** `text/plain` parts are preferred; when there are none, HTML is converted with html2text. Quoted and forwarded text is kept. A body that is cut short says so (`body_truncated`), and its full text is saved to `downloads/gmail/<id>/body.txt`.
 - **Draft size.** Drafts up to 4 MB go as JSON `raw`. Larger ones (up to the ~25 MB attachment limit) go through Gmail's multipart upload endpoint, because the plain JSON endpoint rejects bodies over about 5 MB.
 - **Why drafts are `write_internal`.** A draft never leaves the mailbox, so the default grants allow it with no approval step.
 - **Grant rules.** `gmail.*` works as a grant rule; for example, `{"gmail.*": "deny", "gmail.search": "allow"}`.
-- **Drafts are for a human to send.** Every draft tool's description says drafts wait for a human to review and send, and that the agent must never claim an email was sent. The shared instructions (`instructions.py`) carry the same line.
+- **Drafts are for a human to send.** Every draft tool's description says drafts wait for a human to review and send, and that a draft is not sent. Sending goes through `gmail_send`/`gmail_send_draft` and an approval (§1.1).
 - **When the tools exist.** The tools are registered only when `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` are set. Before a connection exists, they return "Gmail is not connected …".
 
 ### Configuration
@@ -75,7 +86,7 @@ Notes on the tools:
 | `HANDLER_RETURN_TO_ORIGINS` | for Crontal | Comma-separated origins that `start`'s `return_to` may point at, for example `https://crontal.ai` (Crontal builds `return_to` from its `PUBLIC_APP_URL`). Empty means no `return_to` is accepted |
 | `GOOGLE_OAUTH_SCOPES` | no | Space-separated scopes to request. The default is `openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.modify` |
 
-`gmail.modify` covers search, read, attachments and drafts. It also covers send and labels for later, which no tool exposes today. It does not cover permanent delete. If the agent later needs to read Google Drive links, add `https://www.googleapis.com/auth/drive.readonly` to `GOOGLE_OAUTH_SCOPES` and to the consent screen's Data Access page, then reconnect.
+`gmail.modify` covers search, read, attachments, drafts and send. It also covers labels, which no tool exposes. It does not cover permanent delete. If the agent later needs to read Google Drive links, add `https://www.googleapis.com/auth/drive.readonly` to `GOOGLE_OAUTH_SCOPES` and to the consent screen's Data Access page, then reconnect.
 
 ## 2. Owner setup (Google Cloud, Heroku, then connect)
 
@@ -155,4 +166,29 @@ First deploy a build that contains this branch. Then:
 - **Missing permission errors** mean a scope checkbox was unticked during consent. Reconnect and tick every box.
 - **Disconnect** revokes the grant at Google and deletes the connection and its encrypted token. If Google can't be reached, the toast says so; you can also remove the app at <https://myaccount.google.com/permissions>.
 - **Audit.** Every tool call is audited under its `gmail.*` action, like other gateway tools.
-- **Not built:** push or new-mail triggers (the separate email-intake feature covers inbound mail), per-user Google connections, and send/label tools.
+- **Sends** appear in the Approvals tab (and the pending badge). Approving runs the send and posts the result into the thread; denying sends nothing.
+- **Not built:** push or new-mail triggers (the separate email-intake feature covers inbound mail), per-user Google connections, and label/delete tools.
+
+## 4. Upstream MCP evaluation (2026-10-18, not switched)
+
+We looked at replacing these native tools with an upstream Google MCP server (design §6.1). Per the owner's timebox, the switch is left for a follow-up and the native tools stay.
+
+**Google's official servers** (`https://gmailmcp.googleapis.com/mcp/v1`, `https://drivemcp.googleapis.com/mcp/v1`; streamable HTTP, OAuth bearer):
+- They are Developer Preview only. Using them needs the Cloud project enrolled in the Workspace Developer Preview Program, and the application asks for a **Google Workspace account**. `crontal-test` is owned by a consumer account. Our agentic client is required (enforced from 2026-11-11) and is in place.
+- To set them up you would enable `gmailmcp.googleapis.com` and `drivemcp.googleapis.com` as well as the REST APIs. They use the scopes `gmail.readonly` + `gmail.compose` and `drive.readonly`/`drive.file`. No quotas or pricing are published.
+- Gmail has 10 tools: search_threads, get_thread, get_message, create_draft, list_drafts, list/label/unlabel. It has **no send**, no attachment download, no draft update, and drafts can't carry attachments yet. Drive is good: `read_file_content` returns text for Docs/Sheets/Slides/PDF/Office, and `download_file_content` returns the file as inline base64.
+- Not usable for us now.
+
+**Fallback `taylorwilsdon/google_workspace_mcp`** (PyPI `workspace-mcp`, v2.1.0 from 2026-10-09; MIT; about 3.4k stars):
+- This can work. In `MCP_ENABLE_OAUTH21=true EXTERNAL_OAUTH21_PROVIDER=true WORKSPACE_MCP_STATELESS_MODE=true` mode it takes the caller's `ya29.` bearer on each request, validates it against userinfo (so it needs `userinfo.email`) and writes nothing to disk. It does not run its own OAuth flow and stores no tokens. A bad token gets HTTP 401. A token Google rejects mid-call comes back as a tool error, "Authentication error occurred …". Checked locally.
+- To keep sends inside handler's approval flow, run it with `--permissions gmail:drafts drive:readonly`, which drops its send tool, and `--disabled-tools` for the label and sharing tools.
+- The costs:
+  - It needs its own venv: it installs top-level packages named `auth`, `core`, `gmail`, `main`. That is a 187 MB venv and about **127 MB RSS** idle (measured on macOS arm64).
+  - It needs a sidecar process on a 512 MB dyno.
+  - Tool results are formatted text rather than JSON.
+  - It has no list-drafts or update-draft tools.
+  - A stateless attachment download carries no filename.
+  - Draft attachments take server-local `path` or `url` values, which handler would have to replace with base64 content to avoid file exfiltration or SSRF.
+- Handler would still need thin native tools for drafts, attachment saving and approval-gated send. So the gain is mostly Drive.
+
+**Recommendation:** keep the native Gmail tools. Add Drive as small native read-only tools on the same `GoogleOAuth` connection: search/list, metadata, and export/download into the workspace with text extracted. They need `drive.readonly` plus the Drive API, and the owner reconnects. Revisit the official servers when they reach GA for consumer accounts, or the sidecar when several more Workspace services are wanted.

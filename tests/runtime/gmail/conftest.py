@@ -79,6 +79,7 @@ class FakeGoogle:
         self.attachments: dict[str, bytes] = {}
         self.drafts: dict[str, dict] = {}
         self.uploads: list[httpx.Request] = []
+        self.sent: list[dict] = []
 
     def _token(self) -> str:
         self.issued += 1
@@ -120,6 +121,25 @@ class FakeGoogle:
         upload = path.startswith("/upload/")
         path = path.removeprefix("/upload").removeprefix("/gmail/v1/users/me")
         method = request.method
+        if path == "/messages/send" and method == "POST":
+            if upload:
+                meta, raw = self._draft_body(request, upload)
+            else:
+                meta = json.loads(request.content)
+                raw = meta["raw"]
+            sent = {"id": f"s{len(self.sent) + 1}",
+                    "threadId": meta.get("threadId") or f"ts{len(self.sent) + 1}",
+                    "labelIds": ["SENT"], "raw": raw}
+            self.sent.append(sent)
+            return httpx.Response(200, json={k: sent[k] for k in ("id", "threadId", "labelIds")})
+        if path == "/drafts/send" and method == "POST":
+            draft = self.drafts.pop(json.loads(request.content)["id"], None)
+            if draft is None:
+                return httpx.Response(404, json={"error": {"message": "Not Found"}})
+            sent = {"id": f"s{len(self.sent) + 1}", "threadId": draft["message"]["threadId"],
+                    "labelIds": ["SENT"], "raw": draft["message"]["raw"]}
+            self.sent.append(sent)
+            return httpx.Response(200, json={k: sent[k] for k in ("id", "threadId", "labelIds")})
         if path == "/messages" and method == "GET":
             ids = sorted(self.messages)[: int(params.get("maxResults", 100))]
             body = {"messages": [{"id": i, "threadId": self.messages[i]["threadId"]}

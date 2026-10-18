@@ -14,12 +14,13 @@ from handler.runtime.gateway.gmail import (
     reply_subject,
 )
 from handler.runtime.settings import GrantsSettings
-from handler.runtime.types import Decision
+from handler.runtime.types import Decision, Risk
 
 from .conftest import ACCOUNT, message, parse_raw, part
 
 NAMES = {"gmail_search", "gmail_read_thread", "gmail_read_message", "gmail_get_attachment",
          "gmail_create_draft", "gmail_update_draft", "gmail_list_drafts"}
+SEND_NAMES = {"gmail_send", "gmail_send_draft"}
 
 
 @pytest.fixture
@@ -39,17 +40,21 @@ async def connected(world):
 
 # ---- surface and grants --------------------------------------------------------
 
-def test_tool_set_has_no_send_delete_or_modify(world):
-    assert set(world.tools) == NAMES
+def test_tool_set_has_no_delete_or_modify(world):
+    assert set(world.tools) == NAMES | SEND_NAMES
     assert {s.action for s in world.tools.values()} == {
-        n.replace("gmail_", "gmail.") for n in NAMES}
+        n.replace("gmail_", "gmail.") for n in NAMES | SEND_NAMES}
     for name in world.tools:
-        assert not any(word in name for word in ("send", "delete", "trash", "label", "modify"))
+        assert not any(word in name for word in ("delete", "trash", "label", "modify"))
     for name in ("gmail_create_draft", "gmail_update_draft", "gmail_list_drafts"):
         assert "review and send" in world.tools[name].description
+    for name in SEND_NAMES:
+        spec = world.tools[name]
+        assert spec.risk == Risk.WRITE_EXTERNAL and spec.explicit_allow_only
+        assert spec.approval_preview is not None and "approval" in spec.description
 
 
-def test_grant_defaults_allow_read_and_draft(world):
+def test_grant_defaults_allow_read_and_draft_but_ask_for_send(world):
     async def emit(event):
         pass
 
@@ -57,10 +62,27 @@ def test_grant_defaults_allow_read_and_draft(world):
     gateway = Gateway(object(), policy, emit_event=emit)
     for spec in world.tools.values():
         gateway.register(spec)
-        assert gateway.decide(world.ctx, spec)[0] == Decision.ALLOW, spec.name
-    deny = GrantPolicy({"actions": {"gmail.*": "deny", "gmail.search": "allow"}})
-    assert deny.decide(world.ctx, world.tools["gmail_create_draft"], {})[0] == Decision.DENY
-    assert deny.decide(world.ctx, world.tools["gmail_search"], {})[0] == Decision.ALLOW
+        expected = Decision.ASK if spec.name in SEND_NAMES else Decision.ALLOW
+        assert gateway.decide(world.ctx, spec)[0] == expected, spec.name
+
+
+@pytest.mark.parametrize("grants", [
+    {"actions": {"gmail.*": "allow"}},
+    {"actions": {"*": "allow"}},
+    {"defaults": {"write_external": "allow"}},
+])
+def test_send_is_never_allowed_by_globs_or_defaults(world, grants):
+    policy = GrantPolicy(GrantsSettings.model_validate(grants).model_dump(mode="json"))
+    for name in SEND_NAMES:
+        decision, reason = policy.decide(world.ctx, world.tools[name], {})
+        assert decision == Decision.ASK and "exact grant rule" in reason
+    assert policy.decide(world.ctx, world.tools["gmail_search"], {})[0] == Decision.ALLOW
+
+
+def test_send_exact_rules_decide(world):
+    allow = GrantPolicy({"actions": {"gmail.send": "allow", "gmail.*": "deny"}})
+    assert allow.decide(world.ctx, world.tools["gmail_send"], {})[0] == Decision.ALLOW
+    assert allow.decide(world.ctx, world.tools["gmail_send_draft"], {})[0] == Decision.DENY
 
 
 # ---- connection errors -------------------------------------------------------------

@@ -47,14 +47,16 @@ GMAIL_FULL = "https://mail.google.com/"
 GMAIL_MODIFY = "https://www.googleapis.com/auth/gmail.modify"
 GMAIL_READONLY = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL_COMPOSE = "https://www.googleapis.com/auth/gmail.compose"
+GMAIL_SEND = "https://www.googleapis.com/auth/gmail.send"
 USERINFO_EMAIL = "https://www.googleapis.com/auth/userinfo.email"
 # Email-focused default. gmail.modify covers search, read, attachments and
-# drafts (and send/labels, which no tool exposes), but not permanent delete.
+# drafts and send (labels: no tool exposes them), but not permanent delete.
 # What the agent can do is decided by the tool set and grants, not the token.
 DEFAULT_SCOPES = ("openid", USERINFO_EMAIL, GMAIL_MODIFY)
 # Any one of these is enough for a capability (Gmail's scopes nest).
 READ_SCOPES = (GMAIL_FULL, GMAIL_MODIFY, GMAIL_READONLY)
 DRAFT_SCOPES = (GMAIL_FULL, GMAIL_MODIFY, GMAIL_COMPOSE)
+SEND_SCOPES = (GMAIL_FULL, GMAIL_MODIFY, GMAIL_COMPOSE, GMAIL_SEND)
 CALLBACK_PATH = "/oauth/google/callback"
 STATE_TTL_SECONDS = 600
 REFRESH_MARGIN_SECONDS = 120
