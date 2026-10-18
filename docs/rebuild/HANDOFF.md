@@ -241,3 +241,8 @@ Handler **v31**, image `36f4a50bfe80`, deploys `accf30e` + `0bdb6e7`:
   running assistant/tool activity, global SSE request). No test model calls.
 - Live app.js matches tested source byte-for-byte. Root/main/BSS health and
   cross-instance auth checks passed; main Gmail and BSS isolation preserved.
+- Final live schedule check found `Every-minute test message` disabled, last
+  fired at 21:33:31 UTC. It was left disabled; no extra run/notification was
+  created for verification. The authenticated global SSE endpoint opened, but
+  no automation event is expected while this schedule is disabled. No runtime
+  errors appeared after the v31 dyno started.
