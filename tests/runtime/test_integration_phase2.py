@@ -61,7 +61,7 @@ async def test_run_gets_gateway_token_instructions_and_settings(tmp_path: Path):
     settings = SettingsService(store)
     await settings.put("persona", {"system": "", "identity": "You are Handler, an ops agent.",
                                    "persona": "Be brief."}, updated_by="t", expected_version=None)
-    await settings.put("threads", {"chat": {"harness": "fake", "model": "m-chat",
+    await settings.put("threads", {"chat": {"harness": "codex", "model": "m-chat",
                                             "reasoning_effort": "medium"}},
                        updated_by="t", expected_version=None)
     memory = MemoryTools(store)

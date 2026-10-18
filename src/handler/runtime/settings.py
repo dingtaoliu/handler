@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from enum import StrEnum
 from pathlib import Path
 
 import yaml
@@ -22,17 +23,29 @@ class PersonaSettings(Section):
     persona: str = ""
 
 
+class HarnessName(StrEnum):
+    """Harnesses this runtime can run; settings UIs render it as a dropdown."""
+
+    CODEX = "codex"
+
+
 class ThreadSettings(Section):
-    harness: str = "codex"
-    model: str | None = None
-    reasoning_effort: str | None = None
+    harness: HarnessName = Field(HarnessName.CODEX, title="Harness", description="Agent harness that runs this thread type.")
+    model: str | None = Field(None, description="Model override; empty uses the instance default.")
+    reasoning_effort: str | None = Field(None, description="Reasoning effort override, e.g. low, medium or high.")
 
 
+# Each field carries its own title: settings UIs resolve the shared
+# ThreadSettings definition and would otherwise label every type the same.
 class ThreadsSettings(Section):
-    chat: ThreadSettings = Field(default_factory=ThreadSettings)
-    gmail: ThreadSettings = Field(default_factory=ThreadSettings)
-    automation: ThreadSettings = Field(default_factory=ThreadSettings)
-    crontal: ThreadSettings = Field(default_factory=ThreadSettings)
+    chat: ThreadSettings = Field(default_factory=ThreadSettings, title="Chat",
+                                 description="Conversations with users.")
+    gmail: ThreadSettings = Field(default_factory=ThreadSettings, title="Email",
+                                  description="Incoming Gmail threads.")
+    automation: ThreadSettings = Field(default_factory=ThreadSettings, title="Automations",
+                                       description="Scheduled jobs.")
+    crontal: ThreadSettings = Field(default_factory=ThreadSettings, title="Crontal",
+                                    description="Notifications from Crontal (RFQs, bids).")
 
 
 class GrantsSettings(Section):
