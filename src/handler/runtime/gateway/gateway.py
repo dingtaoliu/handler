@@ -103,6 +103,10 @@ class Gateway:
                 raise ValueError(f"duplicate tool name: {spec.name}")
             self._tools[spec.name] = spec
 
+    def decide(self, ctx: RunContext, spec: ToolSpec) -> tuple[Decision, str]:
+        """The current policy decision for `spec` (with no arguments)."""
+        return self._policy.decide(ctx, spec, {})
+
     def specs(self) -> list[ToolSpec]:
         return list(self._tools.values())
 

@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from .observability.pricing import PriceTable
 from .observability.recorder import RawSink, StepRecorder
 from .settings import SettingsService
 from .store.base import Store
+from .uploads import UploadedFile, UploadStore
 from .types import (
     Event,
     Lease,
@@ -103,11 +105,26 @@ def render_turn(events: list[Event]) -> str:
     return "\n\n".join(parts)
 
 
-def event_messages(thread_key: str, run_id: str, events: list[Event]) -> list[Message]:
+def event_attachments(uploads: UploadStore, ev: Event) -> list[UploadedFile]:
+    """The event's attached uploads that still exist and belong to its sender."""
+    found = []
+    for file_id in ev.payload.get("attachments") or []:
+        meta = uploads.get(file_id) if isinstance(file_id, str) else None
+        if meta is not None and meta.user_id == ev.user_id and uploads.path(meta) is not None:
+            found.append(meta)
+    return found
+
+
+def event_messages(thread_key: str, run_id: str, events: list[Event],
+                   uploads: UploadStore | None = None) -> list[Message]:
     msgs: list[Message] = []
     for ev in events:
         if ev.type == "chat.message":
             role, blocks = Role.USER, [{"type": "text", "text": ev.payload.get("text", "")}]
+            if uploads is not None:
+                blocks += [{"type": "file", "file_id": m.id, "filename": m.filename,
+                            "content_type": m.content_type}
+                           for m in event_attachments(uploads, ev)]
         else:
             role, blocks = Role.EVENT, [{"type": "event", "event_type": ev.type, "payload": ev.payload}]
         msgs.append(
@@ -200,6 +217,7 @@ class RunExecutor:
         self.config = config
         self.prices = prices
         self.raw_sink = RawSink(config.raw_dir)
+        self.uploads = UploadStore(config.data_dir / "uploads")
         self.workspace_sync = workspace_sync or WorkspaceSync(None, config.data_dir)
 
     async def execute(self, lease: Lease) -> None:
@@ -265,7 +283,7 @@ class RunExecutor:
         harness = self.harnesses.get(thread.harness)
         recorder = _RunRecorder(self.store, run.id, model=thread.model, prices=self.prices,
                                 raw_sink=self.raw_sink)
-        transcript = event_messages(thread.key, run.id, events)
+        transcript = event_messages(thread.key, run.id, events, self.uploads)
         slug = thread_slug(thread.key)
         plan = await self._plan(thread)
         mcp_token: str | None = None
@@ -288,12 +306,17 @@ class RunExecutor:
                     name="handler", url=self.mcp_url,
                     headers={"Authorization": f"Bearer {mcp_token}"},
                 ))
+            images, attached = self._attachments(events, workspace)
+            prompt = render_turn(events)
+            if attached:
+                prompt += "\n\nAttached files: " + ", ".join(attached)
             req = RunRequest(
                 run_id=run.id,
                 thread_key=thread.key,
                 workspace=workspace,
                 home=home,
-                prompt=render_turn(events),
+                prompt=prompt,
+                images=images,
                 instructions=plan.instructions,
                 session_id=thread.session_id or None,
                 model=plan.model,
@@ -342,6 +365,27 @@ class RunExecutor:
         finally:
             if mcp_token is not None and self.tokens is not None:
                 self.tokens.revoke(mcp_token)
+
+    def _attachments(self, events: list[Event], workspace: Path) -> tuple[list[Path], list[str]]:
+        """Images go to the harness as-is; other files are copied under attachments/."""
+        images: list[Path] = []
+        attached: list[str] = []
+        for ev in events:
+            for meta in event_attachments(self.uploads, ev):
+                source = self.uploads.path(meta)
+                if source is None:
+                    continue
+                if meta.content_type.startswith("image/"):
+                    images.append(source)
+                    continue
+                target_dir = workspace / "attachments"
+                target_dir.mkdir(parents=True, exist_ok=True)
+                name = meta.filename
+                if (target_dir / name).exists():
+                    name = f"{meta.id[:8]}-{name}"
+                shutil.copyfile(source, target_dir / name)
+                attached.append(f"attachments/{name}")
+        return images, attached
 
     async def _stream(
         self, lease: Lease, thread: Thread, run: Run, harness: Harness,

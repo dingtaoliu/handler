@@ -37,6 +37,8 @@ from .store.sqlite import SQLiteStore
 from .tools.automation import AutomationTools
 from .tools.notify import NotifyTools
 from .types import Event, Lane, ThreadSpec
+from .uploads import UploadStore
+from .web.admin_api import admin_router
 from .web.app import create_app
 from .web.ingest import crontal_ingest_router
 from .web.settings_api import settings_router
@@ -80,6 +82,12 @@ def load_env_file(path: str | Path) -> dict[str, str]:
             os.environ[key] = value
             loaded[key] = value
     return loaded
+
+
+def _log_file(args: argparse.Namespace) -> Path:
+    if args.log_file:
+        return Path(args.log_file).expanduser()
+    return Path(args.data_dir).expanduser() / "logs" / "handler-rt.jsonl"
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -126,6 +134,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     s.add_argument("--admin-key", default=os.environ.get("HANDLER_ADMIN_KEY"),
                    help="instance admin key (bearer credential with admin rights)")
     s.add_argument("--log-level", default="INFO")
+    s.add_argument("--log-file", default=os.environ.get("HANDLER_RT_LOG_FILE"),
+                   help="rotating JSON-lines log file (default <data-dir>/logs/handler-rt.jsonl)")
     add_cli_commands(sub)
     imp = sub.add_parser("import-legacy",
                          help="copy persona, memory, users and chats from a legacy handler")
@@ -198,10 +208,14 @@ async def serve(args: argparse.Namespace) -> None:
     auth = Authenticator(store, args.admin_key)
     if not args.admin_key:
         logger.warning("no admin key set; only user tokens can authenticate")
-    app = create_app(store, bus, auth, default_harness=threads_cfg["chat"]["harness"])
+    uploads = UploadStore(data_dir / "uploads")
+    app = create_app(store, bus, auth, default_harness=threads_cfg["chat"]["harness"],
+                     uploads=uploads)
     app.mount("/mcp", mcp_app)
     app.include_router(approvals_router(gateway, store, auth))
     app.include_router(settings_router(settings, auth))
+    app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
+                                    uploads=uploads, log_file=_log_file(args)))
     webhook_secret = os.environ.get("HANDLER_WEBHOOK_SECRET")
     if webhook_secret:
 
@@ -298,7 +312,7 @@ async def _import_legacy(args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     if args.command == "serve":
-        configure_json_logging(args.log_level)
+        configure_json_logging(args.log_level, file=_log_file(args))
         asyncio.run(serve(args))
     elif args.command == "import-legacy":
         asyncio.run(_import_legacy(args))

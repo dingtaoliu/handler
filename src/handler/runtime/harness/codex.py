@@ -229,6 +229,8 @@ class CodexHarness:
         argv = [
             self.binary, "exec", "--json", "--ignore-user-config", "--skip-git-repo-check",
             "-s", self.sandbox, "-C", str(req.workspace),
+            # -i takes several values; the "-c" that follows always ends the list
+            *[arg for image in req.images for arg in ("-i", str(image))],
             "-c", f'approval_policy="{self.approval_policy}"',
             "-c", 'shell_environment_policy.inherit="core"',
             "-c", "shell_environment_policy.exclude=" + _toml(list(SHELL_ENV_EXCLUDE)),

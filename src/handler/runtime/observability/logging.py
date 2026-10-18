@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import IO
 
 from ..context import current_run
@@ -34,12 +36,22 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(out, ensure_ascii=False, default=str)
 
 
-def configure_json_logging(level: str = "INFO", stream: IO[str] | None = None) -> None:
-    handler = logging.StreamHandler(stream or sys.stderr)
-    handler.setFormatter(JsonFormatter())
+def configure_json_logging(
+    level: str = "INFO", stream: IO[str] | None = None, file: Path | None = None
+) -> None:
+    """Log JSON lines to `stream`, and also to a rotating `file` (10 MB x 5)."""
+    handlers: list[logging.Handler] = [logging.StreamHandler(stream or sys.stderr)]
+    if file is not None:
+        file = Path(file)
+        file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.handlers.RotatingFileHandler(
+            file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"))
     root = logging.getLogger()
     for h in list(root.handlers):
         if isinstance(h.formatter, JsonFormatter):
             root.removeHandler(h)
-    root.addHandler(handler)
+            h.close()
+    for handler in handlers:
+        handler.setFormatter(JsonFormatter())
+        root.addHandler(handler)
     root.setLevel(level.upper())

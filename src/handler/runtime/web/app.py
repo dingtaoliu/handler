@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
 from ..bus import BusMessage, RunEventBus
 from ..store.base import Store
+from ..uploads import UploadStore
 from ..types import Event, Lane, ThreadSpec, ThreadType
 from .auth_api import auth_router
 
@@ -28,6 +29,7 @@ TIMELINE_HTML = Path(__file__).resolve().parent / "static" / "timeline.html"
 class ChatRequest(BaseModel):
     # The user comes from the principal, never from the body.
     text: str
+    attachments: list[str] = []  # ids of the caller's own uploads
     conversation_id: str | None = None
     client_message_id: str | None = None
 
@@ -69,7 +71,8 @@ async def sse_stream(
 
 
 def create_app(
-    store: Store, bus: RunEventBus, auth: Authenticator, *, default_harness: str = "codex"
+    store: Store, bus: RunEventBus, auth: Authenticator, *, default_harness: str = "codex",
+    uploads: UploadStore | None = None,
 ) -> FastAPI:
     # No interactive docs / OpenAPI: the API is authenticated, its schema needn't be public.
     app = FastAPI(title="handler runtime", docs_url=None, redoc_url=None, openapi_url=None)
@@ -92,12 +95,21 @@ def create_app(
         user_id = principal.user_id
         if user_id is None:
             raise HTTPException(400, f"{ACT_AS_HEADER} is required for admin-key chat")
+        payload: dict[str, Any] = {"text": body.text}
+        if body.attachments:
+            if uploads is None:
+                raise HTTPException(400, "attachments are not enabled")
+            for file_id in body.attachments:
+                meta = uploads.get(file_id)
+                if meta is None or meta.user_id != user_id:
+                    raise HTTPException(404, f"attachment not found: {file_id}")
+            payload["attachments"] = list(body.attachments)
         conversation_id = body.conversation_id or uuid.uuid4().hex
         key = f"chat:{user_id}:{conversation_id}"
         event = Event(
             type="chat.message",
             source="web",
-            payload={"text": body.text},
+            payload=payload,
             idempotency_key=f"{user_id}:{body.client_message_id or uuid.uuid4().hex}",
             user_id=user_id,
             thread_key=key,
