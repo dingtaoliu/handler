@@ -59,3 +59,29 @@ class ConnectionMixin:
             )]
 
         return await self._call(read)
+
+    async def delete_connection(self, connection_id: str) -> bool:
+        cursor = await self._call(lambda db: db.execute(
+            "DELETE FROM connections WHERE id = ?", (connection_id,)))
+        return bool(cursor.rowcount)
+
+    # ---- secrets (values arrive already encrypted) -------------------------
+
+    async def put_secret(self, key: str, value: str) -> None:
+        now = self._clock().isoformat()
+        await self._call(lambda db: db.execute(
+            "INSERT INTO secrets (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at", (key, value, now)))
+
+    async def get_secret(self, key: str) -> str | None:
+        def read(db: sqlite3.Connection) -> str | None:
+            row = db.execute("SELECT value FROM secrets WHERE key = ?", (key,)).fetchone()
+            return row[0] if row else None
+
+        return await self._call(read)
+
+    async def delete_secret(self, key: str) -> bool:
+        cursor = await self._call(lambda db: db.execute(
+            "DELETE FROM secrets WHERE key = ?", (key,)))
+        return bool(cursor.rowcount)

@@ -229,6 +229,23 @@ async def test_connections(domain_store, clock):
     assert len(await store.list_connections()) == 4
 
 
+async def test_delete_connection_and_secrets(domain_store, clock):
+    store = domain_store
+    connection = Connection("google", "instance", "local", secret_ref="connection:x",
+                            created_at=clock())
+    await store.put_connection(connection)
+    assert await store.get_secret("connection:x") is None
+    await store.put_secret("connection:x", "ciphertext-1")
+    await store.put_secret("connection:x", "ciphertext-2")  # upsert
+    assert await store.get_secret("connection:x") == "ciphertext-2"
+    assert await store.delete_secret("connection:x")
+    assert not await store.delete_secret("connection:x")
+    assert await store.get_secret("connection:x") is None
+    assert await store.delete_connection(connection.id)
+    assert not await store.delete_connection(connection.id)
+    assert await store.get_connection(connection.id) is None
+
+
 # --- postgres only -------------------------------------------------------------
 async def test_two_postgres_processes_fire_one_schedule_once(pg_dsn, clock):
     first, second = PostgresStore(pg_dsn, clock=clock), PostgresStore(pg_dsn, clock=clock)

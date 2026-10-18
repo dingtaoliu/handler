@@ -337,6 +337,32 @@ class ConnectionMixin(_Rows):
             "ORDER BY created_at, seq", params,
         )
 
+    async def delete_connection(self, connection_id: str) -> bool:
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "DELETE FROM connections WHERE id = %s", (connection_id,))
+            return bool(cursor.rowcount)
+
+    # ---- secrets (values arrive already encrypted) -------------------------
+
+    async def put_secret(self, key: str, value: str) -> None:
+        async with self._conn() as conn:
+            await conn.execute(
+                "INSERT INTO secrets (key, value, updated_at) VALUES (%s, %s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at", (key, value, self._clock()))
+
+    async def get_secret(self, key: str) -> str | None:
+        async with self._conn() as conn:
+            cursor = await conn.execute("SELECT value FROM secrets WHERE key = %s", (key,))
+            row = await cursor.fetchone()
+        return row["value"] if row else None
+
+    async def delete_secret(self, key: str) -> bool:
+        async with self._conn() as conn:
+            cursor = await conn.execute("DELETE FROM secrets WHERE key = %s", (key,))
+            return bool(cursor.rowcount)
+
 
 class UsersMixin(_Rows):
     async def create_user(self, user: User) -> bool:
