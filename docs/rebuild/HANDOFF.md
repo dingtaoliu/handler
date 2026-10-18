@@ -246,3 +246,38 @@ Handler **v31**, image `36f4a50bfe80`, deploys `accf30e` + `0bdb6e7`:
   created for verification. The authenticated global SSE endpoint opened, but
   no automation event is expected while this schedule is disabled. No runtime
   errors appeared after the v31 dyno started.
+
+## 11. Crontal panel + blocklist rollout (2026-10-18)
+
+Handler **v32** (`70fd6e61e5d2`), Crontal **v106** (`ff6d080ce010`), backup
+**b018**. Source commits: Handler `79fcaf3` + `2e71be6`; Crontal `8bdac7d`,
+`668d6e9`, `3f7abb5`. Both deployed and verified.
+
+- Durable thread names, per-user read watermarks, last-message ordering and
+  batch metadata are in both stores. Tables thread_names/thread_views and
+  indexes initialize automatically. GET threads includes authorized shared
+  non-chat work; private chat ownership stays enforced. PUT title and POST read
+  return complete enriched thread objects.
+- thread_set_title is scoped to its run's chat; prompt requests a short name,
+  no extra model call. Generated names never overwrite manual names. Existing
+  chats fall back to their first message, emails to subject, automations to name.
+- Crontal panel horizontal pointer/keyboard resize restored, unread dots,
+  sort/rename, background threads, live durable run steps and explicit notify
+  message text are visible. Crontal's bell merges Handler notifications with
+  recipient checks and proxies read actions without copying records/outbox loops.
+- User explicitly changed sender policy to a BLOCKLIST. email.blocked_senders
+  is empty, so authenticated senders pass unless blocked; DKIM remains on.
+  Either header/envelope sender matching a blocked address/domain rejects mail.
+  Legacy allowed_senders settings are discarded on validation (not inverted).
+  Main email settings saved with act_as=1 and previous instructions preserved.
+- Worker delivery was already working: Danny's test at 21:19 UTC reached main,
+  Gmail copy forwarding succeeded, and the event was ignored as allowlist_empty.
+  It has no raw body to replay. A fresh email is needed for end-to-end retest.
+  Worker mail creates EMAIL threads, not GMAIL threads; connected Gmail tools
+  do not continuously import a mailbox. BSS email/Gmail remain unconfigured.
+- Handler suite: 672 passed, 2 skipped. Crontal full backend238 +22 subtests;
+  final integration61; frontend build/lint/helper regressions passed. Live Chrome
+  verified names, unread indicators, keyboard/pointer resize in Crontal. Served
+  bundle index-phSN0B3y.js matches source build; no recent runtime errors.
+- Every-minute test automation remains disabled. No mail was sent and no model
+  turn was artificially triggered for verification.
