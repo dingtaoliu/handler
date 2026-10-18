@@ -28,6 +28,7 @@ harness ──MCP──▶ gateway ── gmail_* tools (gateway/gmail.py) ─�
     - It expires after 10 minutes and works only once.
     - It is stateless, so it survives restarts.
   - `GET /oauth/google/callback` is public: the signed state authenticates it. It exchanges the code, stores the connection, and redirects to `/app?google=connected#connections`, or to `?google_error=…` on failure.
+  - **Starting from another app (Crontal).** `start` takes an optional JSON body `{"return_to": "<url>"}`. Its origin (scheme, host, port) must be in `HANDLER_RETURN_TO_ORIGINS`, otherwise `start` answers 400; URLs with userinfo, backslashes, control characters or a non-http(s) scheme are always refused. The URL is signed into the state, and the callback checks it against the allowlist again before redirecting to it with `?google=connected` or `?google=error&reason=…`. Without `return_to`, or if the state can't be verified, the callback goes to handler's own Connections tab as before.
   - `GET /api/connections/google` returns the status for the Connections tab.
   - `DELETE /api/connections/google/{id}` (admins only) revokes the grant at Google, then deletes the connection row and its secret.
   - The consent URL uses `access_type=offline` and `prompt=consent`, so Google always returns a refresh token.
@@ -71,6 +72,7 @@ Notes on the tools:
 | `GOOGLE_OAUTH_CLIENT_SECRET` | yes | That client's secret |
 | `HANDLER_PUBLIC_URL` | recommended | Handler's public origin, for example `https://crontal-agent-940cc88dda66.herokuapp.com`. The redirect URI is `<HANDLER_PUBLIC_URL>/oauth/google/callback`. When unset, it is derived from the request (`X-Forwarded-Proto` + `Host`) |
 | `HANDLER_SECRET_KEY` | recommended | Any long random string; it encrypts stored tokens and signs OAuth state. When unset, handler falls back to `HANDLER_ADMIN_KEY` (and logs a warning). **Changing the key** makes the stored token unreadable, so the connection shows "needs reconnect" |
+| `HANDLER_RETURN_TO_ORIGINS` | for Crontal | Comma-separated origins that `start`'s `return_to` may point at, for example `https://crontal.ai` (Crontal builds `return_to` from its `PUBLIC_APP_URL`). Empty means no `return_to` is accepted |
 | `GOOGLE_OAUTH_SCOPES` | no | Space-separated scopes to request. The default is `openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.modify` |
 
 `gmail.modify` covers search, read, attachments and drafts. It also covers send and labels for later, which no tool exposes today. It does not cover permanent delete. If the agent later needs to read Google Drive links, add `https://www.googleapis.com/auth/drive.readonly` to `GOOGLE_OAUTH_SCOPES` and to the consent screen's Data Access page, then reconnect.

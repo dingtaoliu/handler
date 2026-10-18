@@ -244,3 +244,137 @@ async def test_routes_when_not_configured(world):
                                   headers=admin)).status_code == 503
         callback = await client.get("/oauth/google/callback")
         assert "google_error=" in callback.headers["location"]
+
+
+# ---- return_to (Crontal's settings page) -------------------------------------------
+
+from handler.runtime.web.google_api import (  # noqa: E402
+    allowed_return_to,
+    parse_origins,
+)
+
+CRONTAL = "https://crontal.test"
+RETURN_TO = "https://crontal.test/app/settings?tab=handler"
+
+
+def test_parse_origins_normalises_and_ignores_non_origins():
+    origins = parse_origins(" https://Crontal.test/ ,http://localhost:5173,"
+                            "https://x.test/path, ftp://f.test, https://y.test:443,,")
+    assert origins == {"https://crontal.test", "http://localhost:5173",
+                       "https://y.test"}
+    assert parse_origins(None) == frozenset() == parse_origins("")
+
+
+@pytest.mark.parametrize("url, ok", [
+    (RETURN_TO, True),
+    ("https://crontal.test", True),
+    ("https://CRONTAL.test:443/x#frag", True),
+    ("http://crontal.test/x", False),           # scheme is part of the origin
+    ("https://crontal.test:8443/x", False),
+    ("https://evil.test/?u=https://crontal.test", False),
+    ("https://crontal.test.evil.test/", False),
+    ("https://crontal.test@evil.test/", False),  # userinfo
+    ("https://evil.test\\@crontal.test/", False),
+    ("//evil.test/", False),
+    ("/app/settings", False),
+    ("javascript:alert(1)", False),
+    ("https://crontal.test/\nx", False),
+    ("", False),
+    (None, False),
+])
+def test_allowed_return_to(url, ok):
+    assert allowed_return_to(url, parse_origins(CRONTAL)) is ok
+
+
+@pytest.fixture
+async def web_rt(world):
+    app = FastAPI()
+    app.include_router(google_router(world.oauth, Authenticator(world.store, ADMIN_KEY),
+                                     return_to_origins=CRONTAL))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="https://handler.test") as client:
+        yield client, {"Authorization": f"Bearer {ADMIN_KEY}"}
+
+
+async def _start(client, admin, return_to):
+    return await client.post("/api/connections/google/start", headers=admin,
+                             json={"return_to": return_to})
+
+
+async def test_return_to_success_redirects_back(web_rt):
+    client, admin = web_rt
+    response = await _start(client, admin, RETURN_TO + "&google=old&reason=stale")
+    assert response.status_code == 200
+    state = _query(response.json()["url"])["state"]
+    done = await client.get("/oauth/google/callback",
+                            params={"code": "good-code", "state": state})
+    assert done.status_code == 303
+    location = done.headers["location"]
+    assert location.startswith("https://crontal.test/app/settings?")
+    assert _query(location) == {"tab": "handler", "google": "connected"}
+
+
+async def test_return_to_error_redirects_back_with_reason(web_rt):
+    client, admin = web_rt
+    state = _query((await _start(client, admin, RETURN_TO)).json()["url"])["state"]
+    denied = await client.get("/oauth/google/callback",
+                              params={"error": "access_denied", "state": state})
+    query = _query(denied.headers["location"])
+    assert denied.headers["location"].startswith("https://crontal.test/app/settings?")
+    assert query["google"] == "error" and "access_denied" in query["reason"]
+    # A failed code exchange also goes back with a reason.
+    state = _query((await _start(client, admin, RETURN_TO)).json()["url"])["state"]
+    bad = await client.get("/oauth/google/callback",
+                           params={"code": "bad-code", "state": state})
+    assert _query(bad.headers["location"])["google"] == "error"
+    assert bad.headers["location"].startswith(CRONTAL)
+
+
+async def test_return_to_outside_allowlist_is_rejected(web_rt):
+    client, admin = web_rt
+    for url in ("https://evil.test/", "https://crontal.test@evil.test/",
+                "/relative", "javascript:alert(1)"):
+        response = await _start(client, admin, url)
+        assert response.status_code == 400, url
+        assert "HANDLER_RETURN_TO_ORIGINS" in response.json()["detail"]
+
+
+async def test_return_to_rejected_when_allowlist_empty(web):
+    client, admin, _ = web
+    assert (await _start(client, admin, RETURN_TO)).status_code == 400
+
+
+async def test_forged_or_unsigned_return_to_falls_back_home(web_rt, world):
+    client, admin = web_rt
+    # A state signed by someone else (wrong key) carrying an evil return_to.
+    forged = SecretBox("another-key-entirely-0123456789").sign(
+        {"n": "x", "by": "root", "ru": REDIRECT, "o": "instance",
+         "rt": "https://evil.test/"}, 600)
+    response = await client.get("/oauth/google/callback",
+                                params={"code": "good-code", "state": forged})
+    assert response.headers["location"].startswith("/app?google_error=")
+
+
+async def test_signed_return_to_rechecked_against_allowlist(world):
+    # Signed with the real key, but the origin isn't allowed (allowlist shrank).
+    state = _query(world.oauth.start(started_by="root", redirect_uri=REDIRECT,
+                                     return_to="https://old.test/x"))["state"]
+    app = FastAPI()
+    app.include_router(google_router(world.oauth, Authenticator(world.store, ADMIN_KEY),
+                                     return_to_origins=CRONTAL))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="https://handler.test") as client:
+        done = await client.get("/oauth/google/callback",
+                                params={"code": "good-code", "state": state})
+    assert done.headers["location"].startswith("/app?google=connected")
+
+
+async def test_return_to_origins_read_from_env(world, monkeypatch):
+    monkeypatch.setenv("HANDLER_RETURN_TO_ORIGINS", "https://crontal.test")
+    app = FastAPI()
+    app.include_router(google_router(world.oauth, Authenticator(world.store, ADMIN_KEY)))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="https://handler.test") as client:
+        admin = {"Authorization": f"Bearer {ADMIN_KEY}"}
+        assert (await _start(client, admin, RETURN_TO)).status_code == 200
+        assert (await _start(client, admin, "https://evil.test/")).status_code == 400

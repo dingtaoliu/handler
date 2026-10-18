@@ -128,10 +128,14 @@ class GoogleOAuth:
         return base + CALLBACK_PATH
 
     def start(self, *, started_by: str, redirect_uri: str,
-              owner: str = INSTANCE_OWNER) -> str:
-        state = self._box.sign(
-            {"n": secrets.token_urlsafe(16), "by": started_by, "ru": redirect_uri,
-             "o": owner}, STATE_TTL_SECONDS, now=self._clock())
+              owner: str = INSTANCE_OWNER, return_to: str | None = None) -> str:
+        """Google's consent URL. `return_to` (already checked against the
+        allowlist by the caller) is signed into the state for the callback."""
+        payload = {"n": secrets.token_urlsafe(16), "by": started_by, "ru": redirect_uri,
+                   "o": owner}
+        if return_to:
+            payload["rt"] = return_to
+        state = self._box.sign(payload, STATE_TTL_SECONDS, now=self._clock())
         query = {
             "client_id": self.config.client_id, "redirect_uri": redirect_uri,
             "response_type": "code", "scope": " ".join(self.config.scopes),
@@ -139,6 +143,16 @@ class GoogleOAuth:
             "include_granted_scopes": "true", "state": state,
         }
         return f"{AUTH_URL}?{urlencode(query)}"
+
+    def state_return_to(self, state: str) -> str | None:
+        """The `return_to` signed into a (valid, unexpired) state, else None.
+
+        Does not consume the state's nonce, so it can be read before or after
+        `complete()` and on error callbacks.
+        """
+        payload = self._box.verify(state, now=self._clock()) if state else None
+        value = payload.get("rt") if payload else None
+        return value if isinstance(value, str) and value else None
 
     def _check_state(self, state: str) -> dict[str, Any]:
         now = self._clock()
