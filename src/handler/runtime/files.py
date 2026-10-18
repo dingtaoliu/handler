@@ -6,7 +6,7 @@ import asyncio
 import mimetypes
 import os
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 
 class FileStore(Protocol):
@@ -20,12 +20,15 @@ class FileStore(Protocol):
         """Keys under `prefix` (a directory-style prefix), sorted."""
         ...
 
-    async def sync_down(self, prefix: str, local_dir: Path) -> int:
-        """Download every key under `prefix` into `local_dir`; returns the count."""
+    async def sync_down(self, prefix: str, local_dir: Path,
+                        skip: Callable[[str], bool] | None = None) -> int:
+        """Download keys under `prefix` into `local_dir` (except relative paths
+        `skip` rejects); returns the count."""
         ...
 
-    async def sync_up(self, local_dir: Path, prefix: str) -> int:
-        """Upload every file in `local_dir` under `prefix`; returns the count."""
+    async def sync_up(self, local_dir: Path, prefix: str, only: set[str] | None = None) -> int:
+        """Upload files in `local_dir` under `prefix` (only the relative paths in
+        `only`, if given); returns the count."""
         ...
 
 
@@ -106,42 +109,67 @@ class LocalFileStore:
 
         return await asyncio.to_thread(walk)
 
-    async def sync_down(self, prefix: str, local_dir: Path) -> int:
-        return await _sync_down(self, prefix, Path(local_dir))
+    async def sync_down(self, prefix: str, local_dir: Path,
+                        skip: Callable[[str], bool] | None = None) -> int:
+        return await _sync_down(self, prefix, Path(local_dir), skip)
 
-    async def sync_up(self, local_dir: Path, prefix: str) -> int:
-        return await _sync_up(self, Path(local_dir), prefix)
+    async def sync_up(self, local_dir: Path, prefix: str, only: set[str] | None = None) -> int:
+        return await _sync_up(self, Path(local_dir), prefix, only)
 
 
-async def _sync_down(store: FileStore, prefix: str, local_dir: Path) -> int:
+SYNC_CONCURRENCY = 16
+
+
+async def _bounded(coros, limit: int = SYNC_CONCURRENCY) -> list:
+    """Run coroutines concurrently, at most `limit` at a time (object stores
+    are latency-bound, so one request at a time is what made syncs slow)."""
+    semaphore = asyncio.Semaphore(limit)
+
+    async def run(coro):
+        async with semaphore:
+            return await coro
+
+    return await asyncio.gather(*(run(c) for c in coros))
+
+
+async def _sync_down(store: FileStore, prefix: str, local_dir: Path,
+                     skip: Callable[[str], bool] | None = None) -> int:
     prefix = clean_key(prefix, allow_empty=True)
     local_dir.mkdir(parents=True, exist_ok=True)
     root = local_dir.resolve()
-    count = 0
+    jobs: list[tuple[str, Path]] = []
     for key in await store.list(prefix):
         relative = key[len(prefix):].lstrip("/") if prefix else key
-        if not relative:
-            continue
-        data = await store.get(key)
-        if data is None:
+        if not relative or (skip is not None and skip(relative)):
             continue
         target = (root / clean_key(relative)).resolve()
         if root not in target.parents:
             raise ValueError(f"invalid file key: {key!r}")
+        jobs.append((key, target))
+
+    async def fetch(key: str, target: Path) -> int:
+        data = await store.get(key)
+        if data is None:
+            return 0
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        count += 1
-    return count
+        return 1
+
+    return sum(await _bounded(fetch(key, target) for key, target in jobs))
 
 
-async def _sync_up(store: FileStore, local_dir: Path, prefix: str) -> int:
+async def _sync_up(store: FileStore, local_dir: Path, prefix: str,
+                   only: set[str] | None = None) -> int:
     prefix = clean_key(prefix, allow_empty=True)
-    count = 0
-    for path in _local_files(local_dir):
+    files = [p for p in _local_files(local_dir)
+             if only is None or p.relative_to(local_dir).as_posix() in only]
+
+    async def send(path: Path) -> int:
         key = _join(prefix, path.relative_to(local_dir).as_posix())
         await store.put(key, path.read_bytes(), mimetypes.guess_type(path.name)[0])
-        count += 1
-    return count
+        return 1
+
+    return sum(await _bounded(send(p) for p in files))
 
 
 class S3FileStore:
@@ -226,8 +254,9 @@ class S3FileStore:
             return [directory] if exact is not None else []
         return keys
 
-    async def sync_down(self, prefix: str, local_dir: Path) -> int:
-        return await _sync_down(self, prefix, Path(local_dir))
+    async def sync_down(self, prefix: str, local_dir: Path,
+                        skip: Callable[[str], bool] | None = None) -> int:
+        return await _sync_down(self, prefix, Path(local_dir), skip)
 
-    async def sync_up(self, local_dir: Path, prefix: str) -> int:
-        return await _sync_up(self, Path(local_dir), prefix)
+    async def sync_up(self, local_dir: Path, prefix: str, only: set[str] | None = None) -> int:
+        return await _sync_up(self, Path(local_dir), prefix, only)

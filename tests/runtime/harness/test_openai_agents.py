@@ -126,7 +126,8 @@ async def test_new_thread_creates_a_conversation_and_maps_events(tmp_path, runne
     assert call["conversation_id"] == "conv_1" and call["input"] == "how many RFQs?"
     assert call["agent"].instructions == "Be brief."
     assert call["agent"].model_settings.reasoning.effort == "low"
-    assert {t.name for t in call["agent"].tools} == {"list_files", "read_file", "write_file"}
+    assert {t.name for t in call["agent"].tools} == {"web_search", "list_files", "read_file",
+                                                     "write_file"}
 
 
 async def test_resumed_thread_reuses_its_conversation(tmp_path, runner):

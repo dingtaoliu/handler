@@ -192,11 +192,12 @@ async def test_restored_codex_rollout_resumes_with_original_prompt(store, tmp_pa
         assert list(req.home.rglob(f"rollout-*-{OLD_SESSION}.jsonl"))
 
     harness.before_run = check_restored
-    runner = executor(store, harness, tmp_path,
-                      workspace_sync=WorkspaceSync(files, tmp_path / "data"))
+    sync = WorkspaceSync(files, tmp_path / "data")
+    runner = executor(store, harness, tmp_path, workspace_sync=sync)
     await runner.execute(await claimed(store, harness="codex"))
     req, = harness.requests
     assert req.session_id == OLD_SESSION and req.prompt == "new question"
+    await sync.flush()
     assert await files.get(f"workspaces/{slug}/note.txt") == b"saved workspace"
     assert await files.get(f"homes/{slug}/auth.json") is None
 
@@ -205,9 +206,12 @@ async def test_restored_codex_rollout_resumes_with_original_prompt(store, tmp_pa
 async def test_workspace_persisted_after_success_or_failure(store, tmp_path, fail):
     files = LocalFileStore(tmp_path / "remote")
     harness = FakeHarness(fresh_error=HarnessError("failed") if fail else None)
-    runner = executor(store, harness, tmp_path,
-                      workspace_sync=WorkspaceSync(files, tmp_path / "data"))
+    sync = WorkspaceSync(files, tmp_path / "data")
+    runner = executor(store, harness, tmp_path, workspace_sync=sync)
     await runner.execute(await claimed(store, session=None))
+    # The run itself never uploads; the thread is queued for the next flush.
+    assert await files.list() == [] and sync.dirty == {thread_slug(KEY)}
+    assert await sync.flush() == 1 and not sync.dirty
     assert await files.get(f"workspaces/{thread_slug(KEY)}/note.txt") == b"saved workspace"
     assert not any("auth.json" in key for key in await files.list())
     run, = await store.list_runs(KEY)
@@ -234,28 +238,31 @@ async def test_session_clear_is_fenced_before_retry(store, tmp_path, monkeypatch
     assert not any(s.kind is StepKind.RETRY for s in await store.list_steps(run.id))
 
 
-async def test_heartbeat_keeps_lease_until_persistence_finishes(store, tmp_path):
-    started, release = asyncio.Event(), asyncio.Event()
+async def test_run_finishes_without_waiting_for_workspace_upload(store, tmp_path):
+    uploads = []
 
     class SlowSync(WorkspaceSync):
         async def persist(self, slug):
-            started.set()
-            await release.wait()
+            uploads.append(slug)
+            await asyncio.sleep(3600)
 
-    runner = executor(store, FakeHarness(), tmp_path,
-                      workspace_sync=SlowSync(None, tmp_path / "data"))
-    lease = await claimed(store, session=None)
-    task = asyncio.create_task(runner.execute(lease))
-    try:
-        await asyncio.wait_for(started.wait(), 2)
-        await asyncio.sleep(0.03)
-        thread = await store.get_thread(KEY)
-        assert thread.lease_owner == lease.owner and thread.lease_until > lease.until
-        assert len(await store.pending_events(KEY)) == 1
-    finally:
-        release.set()
-        await task
+    sync = SlowSync(LocalFileStore(tmp_path / "remote"), tmp_path / "data")
+    runner = executor(store, FakeHarness(), tmp_path, workspace_sync=sync)
+    await asyncio.wait_for(runner.execute(await claimed(store, session=None)), 2)
+    assert uploads == [] and sync.dirty == {thread_slug(KEY)}
     assert (await store.get_thread(KEY)).lease_owner is None
+    run, = await store.list_runs(KEY)
+    assert run.status is RunStatus.COMPLETED
+
+
+async def test_failed_flush_keeps_thread_dirty(store, tmp_path):
+    class BrokenSync(WorkspaceSync):
+        async def persist(self, slug):
+            raise OSError("backup unavailable")
+
+    sync = BrokenSync(LocalFileStore(tmp_path / "remote"), tmp_path / "data")
+    sync.mark_dirty("t1")
+    assert await sync.flush() == 0 and sync.dirty == {"t1"}
 
 
 async def test_session_error_after_tool_execution_does_not_replay(store, tmp_path):
@@ -301,4 +308,4 @@ async def test_lease_loss_does_not_persist_stale_workspace(store, tmp_path, monk
     runner = executor(store, FakeHarness(), tmp_path,
                       workspace_sync=TrackingSync(None, tmp_path / "data"))
     await runner.execute(lease)
-    assert persisted == []
+    assert persisted == [] and not runner.workspace_sync.dirty

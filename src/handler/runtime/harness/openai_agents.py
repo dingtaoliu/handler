@@ -4,7 +4,8 @@ Lighter than Codex (no subprocess, no CLI install) and needs only an OpenAI
 API key. A thread's session is an OpenAI Conversation: the conversation id is
 the session id, so a turn sends only the new input and resumes server-side
 history. Tools are handler's MCP gateway (memory, automations, connectors)
-plus file tools confined to the workspace. There is deliberately no shell.
+plus OpenAI's hosted web search and file tools confined to the workspace.
+There is deliberately no shell.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from agents import (
     OpenAIResponsesModel,
     RunConfig,
     Runner,
+    WebSearchTool,
     function_tool,
     set_tracing_disabled,
 )
@@ -41,6 +43,8 @@ DEFAULT_MAX_TURNS = 40
 MAX_READ_BYTES = 200_000
 _RETRYABLE = (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError,
               openai.InternalServerError)
+
+_HOSTED_TOOLS = {"web_search_call", "file_search_call", "code_interpreter_call"}
 
 # Handler records runs itself; don't also upload SDK traces to OpenAI.
 set_tracing_disabled(True)
@@ -168,7 +172,7 @@ class OpenAIAgentsHarness:
                 reasoning=Reasoning(effort=effort, summary="auto") if effort else None,
                 include_usage=True,
             ),
-            tools=workspace_tools(req.workspace),
+            tools=[WebSearchTool(), *workspace_tools(req.workspace)],
             mcp_servers=mcp_servers,
         )
 
@@ -211,7 +215,12 @@ class OpenAIAgentsHarness:
                         names[str(call_id)] = tool
                         yield RunEvent(RunEventKind.TOOL_STARTED, {
                             "id": call_id, "tool": tool, "kind": raw.get("type", "function_call"),
-                            "input": _arguments(raw)}, raw=raw)
+                            "input": _arguments(raw) or raw.get("action")}, raw=raw)
+                        if raw.get("type") in _HOSTED_TOOLS:
+                            # Hosted tools run inside the model call; no output item follows.
+                            yield RunEvent(RunEventKind.TOOL_FINISHED, {
+                                "id": call_id, "tool": tool, "kind": raw["type"],
+                                "output": raw.get("action"), "status": raw.get("status")}, raw=raw)
                     elif event.name == "tool_output":
                         call_id = raw.get("call_id") or raw.get("id")
                         yield RunEvent(RunEventKind.TOOL_FINISHED, {

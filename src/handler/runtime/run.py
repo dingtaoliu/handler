@@ -333,14 +333,12 @@ class RunExecutor:
                 # A stale owner must not overwrite the next owner's durable files.
                 raise
             except Exception:
-                try:
-                    await self.workspace_sync.persist(slug)
-                except Exception:
-                    logger.exception("workspace persistence failed after harness failure")
+                self.workspace_sync.mark_dirty(slug)
                 raise
             else:
-                # Keep the heartbeat and lease until the durable copy finishes.
-                await self.workspace_sync.persist(slug)
+                # Uploaded later (periodically and at shutdown), not on the
+                # reply path: a per-run sync added minutes to every message.
+                self.workspace_sync.mark_dirty(slug)
 
             usage, cost = recorder.totals()
             run.status, run.usage, run.cost_usd, run.finished_at = (

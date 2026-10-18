@@ -129,6 +129,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                    choices=SANDBOX_MODES,
                    help="Codex sandbox mode; use danger-full-access only where the container "
                         "itself is the isolation boundary (e.g. Heroku dynos)")
+    s.add_argument("--sync-interval", type=float,
+                   default=float(os.environ.get("HANDLER_SYNC_INTERVAL_SECONDS", "300")),
+                   help="seconds between background workspace uploads (S3 file store)")
     s.add_argument("--default-harness", default=os.environ.get("HANDLER_DEFAULT_HARNESS"),
                    choices=[h.value for h in HarnessName],
                    help="harness for every thread type on a fresh instance "
@@ -216,11 +219,12 @@ async def serve(args: argparse.Namespace) -> None:
         logger.info("openai_agents harness off: set OPENAI_API_KEY to enable it")
     if not harnesses:
         raise SystemExit("no harness available: install Codex or set OPENAI_API_KEY")
+    workspace_sync = WorkspaceSync(file_store, data_dir)
     executor = RunExecutor(
         store, harnesses, bus, config, PriceTable.from_yaml(),
         tokens=tokens, mcp_url=f"http://{local_host}:{args.port}/mcp/",
         settings=settings, memory_tools=memory_tools,
-        workspace_sync=WorkspaceSync(file_store, data_dir),
+        workspace_sync=workspace_sync,
     )
     dispatcher = Dispatcher(
         store, executor, lease_seconds=config.lease_seconds,
@@ -305,14 +309,39 @@ async def serve(args: argparse.Namespace) -> None:
         asyncio.create_task(scheduler.run_forever(stop), name="scheduler"),
         asyncio.create_task(server.serve(), name="web"),
         asyncio.create_task(housekeeping(), name="housekeeping"),
+        asyncio.create_task(workspace_sync.run_periodic(stop, args.sync_interval),
+                            name="workspace-sync"),
     ]
     logger.info("handler-rt serving", extra={"url": f"http://{args.host}:{args.port}/login",
                                               "data_dir": str(data_dir),
                                               "tools": [s.name for s in gateway.specs()]})
     await stop.wait()
+    # Heroku kills the dyno ~30 s after SIGTERM: upload unsynced workspaces
+    # first, then wind down, and upload whatever in-flight runs touched.
+    deadline = loop.time() + SHUTDOWN_BUDGET_SECONDS
     server.should_exit = True
-    await asyncio.gather(*tasks, return_exceptions=True)
+    await _flush_until(workspace_sync, deadline - loop.time())
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True),
+                               timeout=max(deadline - loop.time() - 5, 1))
+    except TimeoutError:
+        logger.warning("shutdown: tasks still running at the deadline")
+    await _flush_until(workspace_sync, deadline - loop.time())
     await store.close()
+
+
+SHUTDOWN_BUDGET_SECONDS = 25.0
+
+
+async def _flush_until(sync: WorkspaceSync, seconds: float) -> None:
+    if not sync.dirty:
+        return
+    try:
+        synced = await asyncio.wait_for(sync.flush(), timeout=max(seconds, 1))
+        logger.info("shutdown: workspaces synced", extra={"threads": synced})
+    except TimeoutError:
+        logger.warning("shutdown: workspace sync cut short",
+                       extra={"unsynced": sorted(sync.dirty)})
 
 
 async def _import_legacy(args: argparse.Namespace) -> None:

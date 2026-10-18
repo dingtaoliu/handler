@@ -52,7 +52,7 @@ async def test_restores_workspace_and_home_independently(tmp_path):
 
 async def test_credentials_and_symlinks_never_reach_sync_up(tmp_path):
     class InspectingStore(LocalFileStore):
-        async def sync_up(self, local_dir, prefix):
+        async def sync_up(self, local_dir, prefix, only=None):
             paths = [path.relative_to(local_dir).as_posix()
                      for path in local_dir.rglob("*") if path.is_file()]
             assert paths == ["safe.txt"]
@@ -99,7 +99,7 @@ async def test_failed_restore_does_not_leave_partial_directory(tmp_path):
     class InterruptedStore(LocalFileStore):
         fail = True
 
-        async def sync_down(self, prefix, local_dir):
+        async def sync_down(self, prefix, local_dir, skip=None):
             result = await super().sync_down(prefix, local_dir)
             if self.fail:
                 raise OSError("download interrupted")
@@ -133,3 +133,52 @@ async def test_invalid_slug_cannot_escape(tmp_path, slug):
         await sync.restore(slug)
     with pytest.raises(ValueError, match="slug"):
         await sync.persist(slug)
+
+
+async def test_harness_caches_are_never_synced(tmp_path):
+    from handler.runtime.files import LocalFileStore
+    from handler.runtime.workspaces import WorkspaceSync
+
+    remote = LocalFileStore(tmp_path / "remote")
+    sync = WorkspaceSync(remote, tmp_path / "data")
+    home = tmp_path / "data" / "harness_homes" / "t1"
+    (home / ".tmp" / "plugins" / "zoom").mkdir(parents=True)
+    (home / ".tmp" / "plugins" / "zoom" / "SKILL.md").write_text("cache")
+    (home / "sessions").mkdir()
+    (home / "sessions" / "rollout-1.jsonl").write_text("session")
+    await sync.persist("t1")
+    assert await remote.list() == ["homes/t1/sessions/rollout-1.jsonl"]
+
+    # Stale cache already in the bucket is not downloaded on restore either.
+    await remote.put("homes/t2/.tmp/plugins/big.bin", b"x" * 10)
+    await remote.put("homes/t2/sessions/rollout-2.jsonl", b"s")
+    await sync.restore("t2")
+    restored = tmp_path / "data" / "harness_homes" / "t2"
+    assert (restored / "sessions" / "rollout-2.jsonl").exists()
+    assert not (restored / ".tmp").exists()
+
+
+async def test_persist_uploads_only_changed_files(tmp_path):
+    from handler.runtime.files import LocalFileStore
+    from handler.runtime.workspaces import WorkspaceSync
+
+    puts: list[str] = []
+
+    class CountingStore(LocalFileStore):
+        async def put(self, key, data, content_type=None):
+            puts.append(key)
+            await super().put(key, data, content_type)
+
+    sync = WorkspaceSync(CountingStore(tmp_path / "remote"), tmp_path / "data")
+    ws = tmp_path / "data" / "workspaces" / "t1"
+    ws.mkdir(parents=True)
+    (ws / "a.txt").write_text("a")
+    (ws / "b.txt").write_text("b")
+    await sync.persist("t1")
+    assert sorted(puts) == ["workspaces/t1/a.txt", "workspaces/t1/b.txt"]
+    puts.clear()
+    await sync.persist("t1")
+    assert puts == []
+    (ws / "b.txt").write_text("b2")
+    await sync.persist("t1")
+    assert puts == ["workspaces/t1/b.txt"]
