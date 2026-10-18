@@ -42,6 +42,7 @@ from .types import Event, Lane, ThreadSpec
 from .uploads import UploadStore
 from .web.admin_api import admin_router
 from .web.app import create_app
+from .web.email_ingest import email_ingest_router
 from .web.ingest import crontal_ingest_router
 from .web.settings_api import settings_router
 from .workspaces import WorkspaceSync
@@ -252,6 +253,12 @@ async def serve(args: argparse.Namespace) -> None:
     app.include_router(settings_router(settings, auth, memory_tools))
     app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
                                     uploads=uploads, log_file=_log_file(args)))
+    email_secret = os.environ.get("HANDLER_EMAIL_SECRET")
+    if email_secret:
+        app.include_router(email_ingest_router(store, email_secret, settings, workspace_sync,
+                                               harness=settings.harness_source("email")))
+    else:
+        logger.info("email intake off: set HANDLER_EMAIL_SECRET to enable /ingest/email")
     webhook_secret = os.environ.get("HANDLER_WEBHOOK_SECRET")
     if webhook_secret:
         app.include_router(crontal_ingest_router(store, webhook_secret,

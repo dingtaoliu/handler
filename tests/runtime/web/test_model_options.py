@@ -52,7 +52,7 @@ async def test_defaults_resolution(store, user_token):
         d = body["defaults"]
         # Instance default fills nulls; harness is always concrete.
         assert d["chat"] == {"harness": "codex", "model": "gpt-6-sol", "reasoning_effort": "medium"}
-        assert set(d) == {"chat", "gmail", "automation", "crontal"}
+        assert set(d) == {"chat", "gmail", "automation", "crontal", "email"}
         assert set(body["harness_defaults"]) == {"codex", "openai_agents"}
         await service.put("threads", {"chat": {"harness": "openai_agents", "model": "gpt-6-luna",
                                                "reasoning_effort": "high"}}, "t", None)

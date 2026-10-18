@@ -31,6 +31,7 @@ class ThreadType(StrEnum):
     GMAIL = "gmail"
     AUTOMATION = "automation"
     CRONTAL = "crontal"  # Crontal notifications (RFQs, bids, ...), per entity
+    EMAIL = "email"  # mail forwarded to the intake address, per email conversation
 
 
 class EventStatus(StrEnum):

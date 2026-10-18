@@ -231,7 +231,7 @@ async def test_api(store, ctx):
         headers={"Authorization": "Bearer test-admin-key"},
     ) as client:
         response = await client.get("/api/settings")
-        assert set(response.json()) == {"persona", "threads", "grants", "limits"}
+        assert set(response.json()) == {"persona", "threads", "grants", "limits", "email"}
         assert response.json()["persona"]["version"] is None
         assert "schema" in response.json()["persona"]
         response = await client.put("/api/settings/persona", json={"system": "one"})

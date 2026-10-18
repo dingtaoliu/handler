@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .bus import BusMessage, RunEventBus
-from .context import RunContext, reset_current_run, set_current_run
+from .context import RunContext, current_run, reset_current_run, set_current_run
 from .gateway.tokens import RunTokens
 from .harness.base import (
     Harness,
@@ -32,6 +32,7 @@ from .harness.base import (
 )
 from .harness.codex import tool_input as codex_tool_input
 from .instructions import build_instructions
+from .mail.intake import render_email_event, resolve_act_as
 from .memory import MemoryTools
 from .observability.pricing import PriceTable
 from .observability.recorder import RawSink, StepRecorder
@@ -47,6 +48,7 @@ from .types import (
     RunStatus,
     StepKind,
     Thread,
+    ThreadType,
     new_id,
     utcnow,
 )
@@ -114,6 +116,8 @@ def render_turn(events: list[Event]) -> str:
     for ev in events:
         if ev.type == "chat.message":
             parts.append(str(ev.payload.get("text", "")))
+        elif ev.type == "email.received":
+            parts.append(render_email_event(ev.payload, ev.source))
         else:
             body = json.dumps(ev.payload, ensure_ascii=False, default=str)
             parts.append(f'<event type="{ev.type}" source="{ev.source}">\n{body}\n</event>')
@@ -311,7 +315,7 @@ class RunExecutor:
 
         token = set_current_run(
             RunContext(run_id=run.id, thread_key=thread.key, user_id=thread.owner_user_id,
-                       acting_as=thread.owner_user_id)
+                       acting_as=await self._acting_as(thread))
         )
         self._publish(thread.key, run.id, "run_started", {"trigger_event_ids": run.trigger_event_ids})
         logger.info("run started", extra={"harness": run.harness, "events": len(events)})
@@ -366,9 +370,12 @@ class RunExecutor:
             home.mkdir(parents=True, exist_ok=True)
             mcp_servers: list[McpServerSpec] = []
             if self.tokens is not None and self.mcp_url:
+                current = current_run()
                 mcp_token = self.tokens.issue(
                     RunContext(run_id=run.id, thread_key=thread.key,
-                               user_id=thread.owner_user_id, acting_as=thread.owner_user_id),
+                               user_id=thread.owner_user_id,
+                               acting_as=current.acting_as if current is not None
+                               and current.run_id == run.id else thread.owner_user_id),
                     ttl_seconds=plan.timeout_seconds + 300,
                 )
                 mcp_servers.append(McpServerSpec(
@@ -524,6 +531,16 @@ class RunExecutor:
             excerpt = content if len(content) <= 500 else content[:500] + "…"
             lines.append(f"{message.role}: {excerpt}")
         return "\n".join(lines)
+
+    async def _acting_as(self, thread: Thread) -> str | None:
+        """Whose authority the run uses: the owner, or for email threads the
+        live `email.act_as` setting (falling back to the owner set at ingest)."""
+        if thread.type == ThreadType.EMAIL and self.settings is not None:
+            email, _ = await self.settings.get("email")
+            resolved = await resolve_act_as(self.store, email.get("act_as"))
+            if resolved:
+                return resolved
+        return thread.owner_user_id
 
     async def _plan(self, thread: Thread, events: list[Event] | None = None) -> "RunPlan":
         """Resolve instructions, model and limits from settings (with config fallbacks)."""

@@ -144,6 +144,26 @@ class WorkspaceSync:
         tmp.write_text(json.dumps(digests))
         tmp.replace(path)
 
+    async def put_file(self, thread_slug: str, relative: str, data: bytes) -> None:
+        """Write one file into a thread's workspace before any run touches it.
+
+        Goes straight to the durable copy (so it survives a restart before the
+        next sync), and into the local workspace only if that already exists:
+        a missing local copy is restored, new file included, at the next run.
+        """
+        prefix, local, _ = self._locations(thread_slug)[0]
+        parts = [p for p in relative.split("/") if p not in ("", ".")]
+        if not parts or ".." in parts or "\\" in relative or "\0" in relative:
+            raise ValueError(f"invalid workspace path: {relative!r}")
+        if self.file_store is not None:
+            await self.file_store.put(prefix + "/".join(parts), data)
+        if local.is_dir() or self.file_store is None:
+            target = local.joinpath(*parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(target.write_bytes, data)
+            if self.file_store is not None:
+                self.mark_dirty(thread_slug)
+
     async def restore(self, thread_slug: str) -> None:
         if self.file_store is None:
             return

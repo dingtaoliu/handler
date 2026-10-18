@@ -6,11 +6,12 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .mail.instructions import DEFAULT_EMAIL_INSTRUCTIONS
 from .store.base import SettingsStore
 from .types import Decision, Risk, SettingsVersion
 
@@ -83,6 +84,17 @@ class ThreadsSettings(Section):
                                        description="Scheduled jobs.")
     crontal: ThreadSettings = Field(default_factory=ThreadSettings, title="Crontal",
                                     description="Notifications from Crontal (RFQs, bids).")
+    email: ThreadSettings = Field(default_factory=ThreadSettings, title="Email intake",
+                                  description="Emails forwarded to the intake address.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _email_like_crontal(cls, value: Any) -> Any:
+        # Instances saved before the email type existed: start it like crontal
+        # (same background work, same harness), not on the bare default.
+        if isinstance(value, dict) and "email" not in value and "crontal" in value:
+            return {**value, "email": value["crontal"]}
+        return value
 
 
 class GrantsSettings(Section):
@@ -100,9 +112,29 @@ class LimitsSettings(Section):
     background_capacity: int = Field(default=1, ge=0)
 
 
+class EmailSettings(Section):
+    """Email intake (POST /ingest/email, fed by the Cloudflare Email Worker)."""
+
+    allowed_senders: list[str] = Field(
+        default_factory=list, title="Allowed senders",
+        description="Addresses (name@example.com) or domains (@example.com) whose forwarded "
+                    "mail the agent handles. Empty: nothing passes.")
+    require_auth: bool = Field(
+        True, title="Require DKIM",
+        description="Only accept mail with a valid DKIM signature aligned with the sender.")
+    act_as: str | None = Field(
+        None, title="Act as user",
+        description="Handler user id the agent acts for (its Crontal identity). Empty: "
+                    "emails are ignored.")
+    instructions: str = Field(
+        DEFAULT_EMAIL_INSTRUCTIONS, title="Instructions",
+        description="What the agent does with each email. Empty restores the default.")
+
+
 MODELS = {
     "persona": PersonaSettings, "threads": ThreadsSettings,
     "grants": GrantsSettings, "limits": LimitsSettings,
+    "email": EmailSettings,
 }
 
 

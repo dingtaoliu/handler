@@ -1,5 +1,6 @@
 """Render shared settings and memory for any harness."""
 
+from .mail.instructions import DEFAULT_EMAIL_INSTRUCTIONS
 from .memory import MemoryTools
 from .settings import SettingsService
 from .types import ThreadType
@@ -15,14 +16,25 @@ async def build_instructions(
                     + "\nUse memory_read for details.")
     if speaker is not None:
         sections.append(f"You are talking with {speaker}")
-    sections.append({
-        ThreadType.CHAT: "Reply to the user.",
-        ThreadType.GMAIL: "The event is an email; draft rather than send unless told otherwise.",
-        ThreadType.AUTOMATION: "This is a scheduled job; use notify to report anything worth a human's attention.",
-        ThreadType.CRONTAL: ("This is a Crontal notification about one entity (an RFQ, bid, ...). "
-                             "Look it up through Crontal's API (crontal_api_routes to find the "
-                             "endpoint, crontal_api_get to read), act within your user's "
-                             "authority, and use notify for anything they should know or decide."),
-    }[thread_type])
+    if thread_type == ThreadType.EMAIL:
+        sections.append(await email_instructions(settings))
+    else:
+        sections.append(_GUIDANCE[thread_type])
     sections.append("Durable facts go to memory_save, not files.")
     return "\n\n".join(sections)
+
+
+async def email_instructions(settings: SettingsService) -> str:
+    email, _ = await settings.get("email")
+    return (email.get("instructions") or "").strip() or DEFAULT_EMAIL_INSTRUCTIONS
+
+
+_GUIDANCE = {
+    ThreadType.CHAT: "Reply to the user.",
+    ThreadType.GMAIL: "The event is an email; draft rather than send unless told otherwise.",
+    ThreadType.AUTOMATION: "This is a scheduled job; use notify to report anything worth a human's attention.",
+    ThreadType.CRONTAL: ("This is a Crontal notification about one entity (an RFQ, bid, ...). "
+                         "Look it up through Crontal's API (crontal_api_routes to find the "
+                         "endpoint, crontal_api_get to read), act within your user's "
+                         "authority, and use notify for anything they should know or decide."),
+}
