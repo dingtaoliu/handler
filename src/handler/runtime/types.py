@@ -113,9 +113,9 @@ class Lease:
 
 @dataclass
 class TokenUsage:
-    input_tokens: int = 0  # total input, including cached
+    input_tokens: int = 0  # total input, including cache reads and writes
     cached_input_tokens: int = 0  # subset of input served from cache
-    cache_write_tokens: int = 0
+    cache_write_tokens: int = 0  # subset of input written to cache
     output_tokens: int = 0  # total output, including reasoning
     reasoning_tokens: int = 0  # subset of output
 

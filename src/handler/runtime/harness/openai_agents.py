@@ -121,10 +121,34 @@ def _arguments(raw: dict[str, Any]) -> Any:
 
 
 def _usage(usage: Any) -> TokenUsage:
-    cached = getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0
+    details = getattr(usage, "input_tokens_details", None)
+    cached = getattr(details, "cached_tokens", 0) or 0
+    # Not declared in the SDK's InputTokensDetails yet; the API sends it and the
+    # pydantic model keeps it as an extra field.
+    written = getattr(details, "cache_write_tokens", 0) or 0
     reasoning = getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0
     return TokenUsage(input_tokens=usage.input_tokens or 0, cached_input_tokens=cached,
-                      output_tokens=usage.output_tokens or 0, reasoning_tokens=reasoning)
+                      cache_write_tokens=written, output_tokens=usage.output_tokens or 0,
+                      reasoning_tokens=reasoning)
+
+
+def _usage_events(usage: Any, model: str, created: bool) -> list[RunEvent]:
+    """One USAGE event per model request, so each is priced on its own.
+
+    Per-request entries keep the API's own token details (cache writes) and let
+    pricing apply per-request rules such as the long-context tier. The SDK's
+    summed usage drops cache writes, so it is only the fallback.
+    """
+    entries = list(getattr(usage, "request_usage_entries", None) or [])
+    if not entries:
+        return [RunEvent(RunEventKind.USAGE, {"model": model}, usage=_usage(usage),
+                         raw={"requests": usage.requests, "new_conversation": created})]
+    return [
+        RunEvent(RunEventKind.USAGE, {"model": model, "single_request": True},
+                 usage=_usage(entry),
+                 raw={"request": i, "requests": len(entries), "new_conversation": created})
+        for i, entry in enumerate(entries, 1)
+    ]
 
 
 def _error(exc: BaseException, session_id: str | None) -> HarnessError:
@@ -237,9 +261,8 @@ class OpenAIAgentsHarness:
                         summary = " ".join(s.get("text", "") for s in raw.get("summary", [])
                                            if isinstance(s, dict))
                         yield RunEvent(RunEventKind.REASONING, {"text": summary}, raw=raw)
-                usage = result.context_wrapper.usage
-                yield RunEvent(RunEventKind.USAGE, {"model": model}, usage=_usage(usage),
-                               raw={"requests": usage.requests, "new_conversation": created})
+                for usage_event in _usage_events(result.context_wrapper.usage, model, created):
+                    yield usage_event
                 final = result.final_output
                 if isinstance(final, str) and final:
                     text = final

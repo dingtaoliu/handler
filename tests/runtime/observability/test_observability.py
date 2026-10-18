@@ -29,12 +29,14 @@ def prices(tmp_path):
 
 
 NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
+SHIPPED_AT = datetime(2026, 10, 18, 12, tzinfo=timezone.utc)  # prices.yaml rates verified
 
 
 def test_cost_math_cached_split_and_cache_write(prices):
     u = TokenUsage(1_000_000, 400_000, 100_000, 50_000, 20_000)
-    # 600k*2 + 400k*0.2 + 100k*4 + 50k*20 (reasoning not re-added), per Mtok
-    assert prices.cost("m-new", u, NOW) == pytest.approx(1.2 + 0.08 + 0.4 + 1.0)
+    # input includes cache reads and writes: 500k uncached*2 + 400k cached*0.2
+    # + 100k written*4 + 50k output*20 (reasoning not re-added), per Mtok
+    assert prices.cost("m-new", u, NOW) == pytest.approx(1.0 + 0.08 + 0.4 + 1.0)
 
 
 def test_exact_beats_glob_and_effective_dates(prices):
@@ -53,11 +55,90 @@ def test_unpriced_and_null_rates(prices):
     assert prices.cost("nullrate", TokenUsage(1_000_000, 5), NOW) is None
 
 
-def test_shipped_prices_yaml_loads_unpriced():
+LONG = """
+prices:
+  - model: lc
+    effective_from: 2025-01-01
+    input_per_mtok: 2
+    cached_input_per_mtok: 0.1
+    cache_write_per_mtok: 2.5
+    output_per_mtok: 10
+    long_context:
+      above_input_tokens: 272000
+      input_per_mtok: 4
+      cached_input_per_mtok: 0.2
+      cache_write_per_mtok: 5
+      output_per_mtok: 15
+"""
+
+
+@pytest.fixture
+def long_prices(tmp_path):
+    p = tmp_path / "long.yaml"
+    p.write_text(LONG)
+    return PriceTable.from_yaml(p)
+
+
+def test_reasoning_tokens_billed_once_at_output_rate(prices):
+    # reasoning is a subset of output: same cost with or without the breakdown
+    assert prices.cost("m-new", TokenUsage(0, 0, 0, 1_000_000, 900_000), NOW) == pytest.approx(20.0)
+    assert prices.cost("m-new", TokenUsage(0, 0, 0, 1_000_000, 0), NOW) == pytest.approx(20.0)
+
+
+def test_cached_and_written_never_exceed_input(prices):
+    # inconsistent counts are clamped, never billed below zero or twice
+    assert prices.cost("m-new", TokenUsage(100_000, 500_000), NOW) == pytest.approx(0.02)
+    assert prices.cost("m-new", TokenUsage(100_000, 60_000, 80_000), NOW) == pytest.approx(
+        60_000 * 0.2 / 1e6 + 40_000 * 4 / 1e6)
+
+
+def test_long_context_tier_is_per_request(long_prices):
+    big = TokenUsage(300_000, 100_000, 50_000, 10_000, 4_000)
+    short_cost = (150_000 * 2 + 100_000 * 0.1 + 50_000 * 2.5 + 10_000 * 10) / 1e6
+    long_cost = (150_000 * 4 + 100_000 * 0.2 + 50_000 * 5 + 10_000 * 15) / 1e6
+    assert long_prices.cost("lc", big, NOW, single_request=True) == pytest.approx(long_cost)
+    # summed usage of several requests can't tell which crossed the threshold
+    assert long_prices.cost("lc", big, NOW) == pytest.approx(short_cost)
+    # the threshold itself is still short context
+    at = TokenUsage(272_000)
+    assert long_prices.cost("lc", at, NOW, single_request=True) == pytest.approx(0.544)
+    assert long_prices.cost("lc", TokenUsage(272_001), NOW, single_request=True) == pytest.approx(
+        272_001 * 4 / 1e6)
+
+
+def test_long_context_needs_a_threshold(tmp_path):
+    p = tmp_path / "bad.yaml"
+    p.write_text("prices:\n  - {model: x, effective_from: 2025-01-01, long_context: {input_per_mtok: 1}}\n")
+    with pytest.raises(ValueError):
+        PriceTable.from_yaml(p)
+
+
+def test_shipped_prices_cover_every_selectable_model():
+    from handler.runtime.settings import HARNESS_DEFAULT_MODELS, ModelName
+
     t = PriceTable.from_yaml()
-    assert t.entries
-    assert all(e.input_per_mtok is None for e in t.entries)
-    assert t.cost("gpt-5.1", TokenUsage(100, 0, 0, 10), NOW) is None
+    models = {m.value for m in ModelName} | {m for m in HARNESS_DEFAULT_MODELS.values() if m}
+    for model in models:
+        entry = t.lookup(model, SHIPPED_AT)
+        assert entry is not None, model
+        for rates in (entry.rates, entry.long_context):
+            assert rates is not None, model
+            assert None not in (rates.input_per_mtok, rates.cached_input_per_mtok,
+                                rates.cache_write_per_mtok, rates.output_per_mtok), model
+            assert rates.cached_input_per_mtok < rates.input_per_mtok < rates.cache_write_per_mtok
+        assert entry.long_context_above_tokens == 272_000
+    assert t.cost("gpt-unknown", TokenUsage(100), SHIPPED_AT) is None
+
+
+def test_shipped_gpt_6_1_sol_rates():
+    # developers.openai.com/api/docs/pricing, 2026-10-18: $2 / $0.10 cached /
+    # $2.50 cache write / $10 output; above 272K: $4 / $0.20 / $5 / $15.
+    t = PriceTable.from_yaml()
+    u = TokenUsage(1_000_000, 500_000, 100_000, 100_000, 60_000)
+    assert t.cost("gpt-6.1-sol", u, SHIPPED_AT) == pytest.approx(0.8 + 0.05 + 0.25 + 1.0)
+    assert t.cost("gpt-6.1-sol", u, SHIPPED_AT, single_request=True) == pytest.approx(
+        1.6 + 0.1 + 0.5 + 1.5)
+    assert t.cost("gpt-6.1-sol", u, date(2026, 1, 1)) is None  # before verification
 
 
 class FakeStore:
@@ -123,6 +204,24 @@ async def test_recorder_new_session(tmp_path, prices):
     assert llm.cost_usd == pytest.approx(expected)
     usage, cost = rec.totals()
     assert usage.input_tokens == 30066 and cost == pytest.approx(expected)
+
+
+async def test_recorder_prices_each_request_and_its_long_context(tmp_path, long_prices):
+    store = FakeStore()
+    rec = StepRecorder(store, "r", model="lc", prices=long_prices, raw_sink=RawSink(tmp_path))
+    K = RunEventKind
+    big, small = TokenUsage(300_000, 0, 0, 1_000), TokenUsage(100_000, 0, 0, 1_000)
+    await feed(rec, [
+        RunEvent(K.USAGE, {"model": "lc", "single_request": True}, usage=big, at=NOW),
+        RunEvent(K.USAGE, {"model": "lc", "single_request": True}, usage=small, at=NOW),
+        RunEvent(K.USAGE, {"model": "lc"}, usage=big, at=NOW),  # summed: standard rates
+    ])
+    costs = [store.steps[("r", i)].cost_usd for i in (1, 2, 3)]
+    assert costs == pytest.approx([(300_000 * 4 + 1_000 * 15) / 1e6,
+                                   (100_000 * 2 + 1_000 * 10) / 1e6,
+                                   (300_000 * 2 + 1_000 * 10) / 1e6])
+    usage, cost = rec.totals()
+    assert usage.input_tokens == 700_000 and cost == pytest.approx(sum(costs))
 
 
 async def test_recorder_raw_refs(tmp_path, prices):
