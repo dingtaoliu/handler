@@ -80,20 +80,24 @@ def _tool_data(item: dict[str, Any], *, finished: bool) -> dict[str, Any]:
     tool = "shell" if kind == "command_execution" else kind
     if kind == "mcp_tool_call" and item.get("server") and item.get("tool"):
         tool = f"{item['server']}/{item['tool']}"
-    data = {"id": item.get("id"), "tool": tool, "kind": kind}
+    data = {"id": item.get("id"), "tool": tool, "kind": kind, "input": tool_input(item)}
     if finished:
         data.update(
             output=item.get("aggregated_output", item.get("result")),
             status=item.get("status"),
             exit_code=item.get("exit_code"),
         )
-    else:
-        data["input"] = (
-            item.get("command", "")
-            if kind == "command_execution"
-            else {k: v for k, v in item.items() if k not in {"id", "type", "status"}}
-        )
     return data
+
+
+_OUTPUT_KEYS = {"id", "type", "status", "aggregated_output", "result", "exit_code", "error"}
+
+
+def tool_input(item: dict[str, Any]) -> Any:
+    """The arguments of a Codex tool item (started or completed)."""
+    if item.get("type") == "command_execution":
+        return item.get("command", "")
+    return {k: v for k, v in item.items() if k not in _OUTPUT_KEYS}
 
 
 def _event(raw: dict[str, Any], model: str | None) -> RunEvent | None:

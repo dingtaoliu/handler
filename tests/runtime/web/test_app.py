@@ -192,3 +192,43 @@ async def test_timeline_html(client):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     assert "prefers-color-scheme" in r.text and "EventSource" in r.text
+
+
+async def test_messages_fill_in_tool_arguments_of_older_threads(client, store):
+    await client.post("/api/chat", json={"text": "x", "conversation_id": "c1"})
+    key = next(iter(store.threads))
+
+    def tool_message(call_id, name, raw, input=None):
+        return Message(key, Role.TOOL, [
+            {"type": "tool_call", "id": call_id, "name": name, "kind": "k", "input": input},
+            {"type": "tool_result", "id": call_id, "output": "ok", "is_error": False}],
+            run_id="run_1", raw=raw)
+
+    store.messages += [
+        # Native harness, before arguments were carried: only the step has them.
+        tool_message("c1", "crontal_get_rfq", {"type": "function_call_output", "call_id": "c1"}),
+        tool_message("c2", "list_files", {"type": "function_call_output", "call_id": "c2"}),
+        # Codex keeps the completed item, arguments included, in raw.
+        tool_message("i1", "gateway/lookup", {"type": "item.completed", "item": {
+            "id": "i1", "type": "mcp_tool_call", "server": "gateway", "tool": "lookup",
+            "arguments": {"q": "x"}, "result": {"ok": True}, "status": "completed"}}),
+        tool_message("i2", "shell", {"type": "item.completed", "item": {
+            "id": "i2", "type": "command_execution", "command": "ls -la",
+            "aggregated_output": "ok", "exit_code": 0, "status": "completed"}}),
+        # Already filled in: left alone.
+        tool_message("c3", "read_file", {}, input={"path": "a.txt"}),
+    ]
+    store.steps += [
+        RunStep("run_1", 1, StepKind.TOOL_CALL, "crontal_get_rfq", "stream",
+                data={"id": "c1", "kind": "function_call", "input": '{"rfq_id": 7}'}),
+        RunStep("run_1", 2, StepKind.TOOL_CALL, "list_files", "stream",
+                data={"id": "c2", "kind": "function_call", "input": "{}"}),
+        RunStep("run_1", 3, StepKind.TOOL_CALL, "read_file", "stream",
+                data={"id": "c3", "kind": "function_call", "input": '{"path": "b.txt"}'}),
+    ]
+
+    msgs = (await client.get(f"/api/threads/{key}/messages")).json()
+    inputs = {m["blocks"][0]["id"]: m["blocks"][0]["input"] for m in msgs}
+    assert inputs == {"c1": {"rfq_id": 7}, "c2": {}, "i1": {
+        "server": "gateway", "tool": "lookup", "arguments": {"q": "x"}},
+        "i2": "ls -la", "c3": {"path": "a.txt"}}
