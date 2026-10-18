@@ -23,7 +23,9 @@ class RunEventKind(StrEnum):
     REASONING = "reasoning"  # data: {"text"} (summary, may be empty)
     TOOL_STARTED = "tool_started"  # data: {"id", "tool", "kind", "input"}
     TOOL_FINISHED = "tool_finished"  # data: {"id", "tool", "kind", "input", "output", "status", "exit_code"?}
-    USAGE = "usage"  # usage: TokenUsage for one turn/model call; data: {"model"}
+    # usage: TokenUsage for one turn or model call; data: {"model", "single_request"?}.
+    # single_request=True means exactly one model request (enables per-request pricing).
+    USAGE = "usage"
     ERROR = "error"  # data: {"message", "retryable": bool}
     FINAL = "final"  # data: {"text", "session_id"}; always the last event on success
 

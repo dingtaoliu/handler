@@ -19,7 +19,7 @@ from handler.runtime.harness.base import (
 from handler.runtime.run import _missing_session, transcript_message
 from handler.runtime.settings import HarnessName, SettingsService, resolve_harness
 from handler.runtime.store.sqlite import SQLiteStore
-from handler.runtime.types import Role
+from handler.runtime.types import Role, TokenUsage
 
 
 class FakeConversations:
@@ -130,6 +130,36 @@ async def test_new_thread_creates_a_conversation_and_maps_events(tmp_path, runne
     assert call["agent"].model_settings.reasoning.effort == "low"
     assert {t.name for t in call["agent"].tools} == {"web_search", "list_files", "read_file",
                                                      "write_file"}
+
+
+async def test_usage_is_reported_per_request_with_cache_writes(tmp_path, runner):
+    from agents.usage import Usage
+    from openai.types.responses.response_usage import ResponseUsage
+
+    def request(inp, cached, written, out, reasoning):
+        api = ResponseUsage.model_validate({
+            "input_tokens": inp, "output_tokens": out, "total_tokens": inp + out,
+            "input_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written},
+            "output_tokens_details": {"reasoning_tokens": reasoning}})
+        return Usage(requests=1, input_tokens=inp, output_tokens=out, total_tokens=inp + out,
+                     input_tokens_details=api.input_tokens_details,
+                     output_tokens_details=api.output_tokens_details)
+
+    total = Usage()
+    total.add(request(1000, 0, 900, 50, 20))
+    total.add(request(1200, 900, 250, 40, 10))
+    stream = FakeStream(_events())
+    stream.context_wrapper = SimpleNamespace(usage=total)
+    runner.state["next"] = stream
+    harness = oa.OpenAIAgentsHarness("k", default_model="gpt-6.1-sol", client=FakeClient())
+    usage = [e for e in await _collect(harness, _req(tmp_path)) if e.kind == RunEventKind.USAGE]
+
+    assert [e.data for e in usage] == [{"model": "gpt-6.1-sol", "single_request": True}] * 2
+    assert [e.usage for e in usage] == [TokenUsage(1000, 0, 900, 50, 20),
+                                        TokenUsage(1200, 900, 250, 40, 10)]
+    assert [e.raw["request"] for e in usage] == [1, 2]
+    # the SDK's own sum loses cache writes; the per-request events keep them
+    assert sum(e.usage.cache_write_tokens for e in usage) == 1150
 
 
 async def test_resumed_thread_reuses_its_conversation(tmp_path, runner):

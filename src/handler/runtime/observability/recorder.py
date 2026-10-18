@@ -171,7 +171,8 @@ class StepRecorder:
     async def _usage_event(self, ev: RunEvent) -> None:
         usage = ev.usage or TokenUsage()
         model = ev.data.get("model") or self.model
-        cost = self.prices.cost(model, usage, ev.at)
+        cost = self.prices.cost(model, usage, ev.at,
+                                single_request=bool(ev.data.get("single_request")))
         self._usage = self._usage + usage
         self._calls += 1
         if cost is None:
