@@ -4,8 +4,8 @@ Design: `integrations.md`. Branch `feat/integrations-p1` (worktree `../handler-w
 
 ## Phase 1 (interface + registry, no code moves)
 
-- [ ] `integrations/base.py` interface + contribution dataclasses
-- [ ] `integrations/registry.py` (loading, deps, dup detection, one identity provider)
+- [x] `integrations/base.py` interface + contribution dataclasses
+- [x] `integrations/registry.py` (loading, deps, dup detection, one identity provider)
 - [ ] wire registry into `instance_runtime` in `runtime/server.py`
 - [ ] `GET /api/ui/manifest`
 - [ ] tests in `tests/runtime/integrations/`
