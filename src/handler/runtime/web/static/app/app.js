@@ -465,6 +465,7 @@ function connectStream() {
     es.onmessage = (ev) => {
         let m;
         try { m = JSON.parse(ev.data); } catch { return; }
+        if (m.type === "task_updated") { onTaskUpdate(m); return; }
         if (m.type === "notification") {
             if (!me || String((m.data || {}).user_id) !== String(me.user_id)) return;
             toast((m.data || {}).message || "New notification", false, 8000);
@@ -779,8 +780,13 @@ document.addEventListener("change", (e) => {
 actions["goto-thread"] = async (el) => { switchTab("chat"); await loadThreads(); await selectThread(el.dataset.key); };
 loaders.automations = loadAutomations;
 
-// ─── Activity ────────────────────────────────────────────────────────────────
-const act = {run: null};
+// ─── Tasks (background runs) ─────────────────────────────────────────────────
+// Every run of a non-chat thread, plus queued work, from /api/tasks. Admins also
+// get each task's step trace (model calls, tool calls, errors, approvals).
+const act = {run: null, items: [], cursor: null};
+const TASK_BADGE = {queued: "yellow", running: "blue", waiting_approval: "yellow",
+    succeeded: "green", failed: "red", dead: "red"};
+const taskBadge = (s) => badge(String(s || "").replace("_", " "), TASK_BADGE[s] || "gray");
 async function loadIgnoredEmail() {
     const rows = await apiOpt("/api/events?source=email&status=ignored&limit=30", []);
     const box = $("activity-ignored");
@@ -790,48 +796,96 @@ async function loadIgnoredEmail() {
             const detail = p.auth && p.auth.detail ? `<div class="muted">${esc(String(p.auth.detail).slice(0, 160))}</div>` : "";
             return `<tr><td>${esc(fmtTime(e.received_at))}</td><td class="mono">${esc(f.address || "")}</td><td>${esc(p.subject || "")}</td><td>${esc(p.ignored_reason || "")}${detail}</td></tr>`; }).join("") + "</tbody></table></div>";
 }
+function taskQuery(cursor) {
+    const p = new URLSearchParams({limit: "50"});
+    if ($("task-type").value) p.set("type", $("task-type").value);
+    if ($("task-status").value) p.set("status", $("task-status").value);
+    if (cursor) p.set("cursor", cursor);
+    return p;
+}
+function taskRow(t) {
+    const tokens = t.usage ? `${fmtNum(t.usage.input_tokens)} / ${fmtNum(t.usage.output_tokens)}` : "-";
+    const when = t.started_at || t.queued_at;
+    const dur = t.duration_ms != null ? fmtDur(t.duration_ms) : t.retry_at ? "retry " + fmtTime(t.retry_at) : "-";
+    return `<tr class="step-row ${t.id === act.run ? "sel" : ""}" tabindex="0" data-action="act-run" data-id="${esc(t.id)}">
+        <td>${taskBadge(t.status)}</td><td>${badge(t.thread_type, "gray")}</td>
+        <td><b>${esc(t.trigger_summary)}</b><div class="muted">${esc(t.thread_title)}</div>
+            ${t.summary ? `<div class="muted">${esc(t.summary)}</div>` : ""}
+            ${t.error ? `<div class="err-text">${esc(String(t.error).slice(0, 200))}</div>` : ""}</td>
+        <td title="${esc(when || "")}">${esc(fmtTime(when))}<div class="muted">${esc(fmtAge(when))} ago</div></td>
+        <td>${esc(dur)}</td><td>${tokens}</td><td>${fmtCost(t.cost_usd)}</td></tr>`;
+}
+function renderTasks() {
+    const box = $("activity-content");
+    box.innerHTML = act.items.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Status</th><th>Type</th><th>Task</th><th>Started</th><th>Duration</th><th>Tokens in/out</th><th>Cost</th></tr></thead><tbody>` +
+        act.items.map(taskRow).join("") + "</tbody></table></div>" : empty("No tasks match these filters");
+    $("activity-more").innerHTML = act.cursor ? `<button class="btn-small" type="button" data-action="act-more">Load more</button>` : "";
+}
 async function loadActivity() {
     loadIgnoredEmail().catch(() => {});
-    const threads = (await api(API.threads)).slice(0, 40);
-    const lists = await Promise.all(threads.map((t) => api(API.threadRuns(t.key)).catch(() => [])));
-    const runs = lists.flat().sort((a, b) => String(b.started_at).localeCompare(String(a.started_at))).slice(0, 60);
-    const box = $("activity-content");
-    if (!runs.length) { box.innerHTML = empty("No runs yet"); $("activity-steps").innerHTML = ""; return; }
-    box.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr><th>Status</th><th>Thread</th><th>Started</th><th>Duration</th><th>Tokens in/out</th><th>Cost</th></tr></thead><tbody>` +
-        runs.map((r) => `<tr class="step-row ${r.id === act.run ? "sel" : ""}" tabindex="0" data-action="act-run" data-id="${esc(r.id)}">
-            <td class="${statusClass(r.status)}">${esc(r.status)}${r.error ? `<div class="err-text">${esc(String(r.error).slice(0, 120))}</div>` : ""}</td>
-            <td class="mono">${esc(r.thread_key)}</td><td>${esc(fmtTime(r.started_at))}</td>
-            <td>${fmtDur(durMs(r.started_at, r.finished_at))}</td>
-            <td>${fmtNum(r.usage && r.usage.input_tokens)} / ${fmtNum(r.usage && r.usage.output_tokens)}</td>
-            <td>${fmtCost(r.cost_usd)}</td></tr>`).join("") + "</tbody></table></div>";
+    if (!chat.stream) connectStream();  // live task_updated messages
+    const page = await api("/api/tasks?" + taskQuery());
+    act.items = page.items || []; act.cursor = page.next_cursor;
+    renderTasks();
     if (act.run) loadSteps().catch(() => {});
+}
+actions["act-more"] = async () => {
+    const page = await api("/api/tasks?" + taskQuery(act.cursor));
+    act.items = act.items.concat(page.items || []); act.cursor = page.next_cursor;
+    renderTasks();
+};
+function stepsTable(steps, t0ms, endms) {
+    const span = Math.max(endms - t0ms, 1);
+    return `<div class="table-wrap"><table class="data-table"><thead><tr><th>#</th><th>Kind</th><th>Name</th><th>Status</th><th style="width:30%">Timeline</th><th>Model</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>` +
+        steps.map((s, i) => {
+            const st = new Date(s.started_at).getTime(), en = new Date(s.ended_at || s.started_at).getTime();
+            const left = 100 * (st - t0ms) / span, w = 100 * (en - st) / span;
+            const tok = s.usage ? `${fmtNum(s.usage.input_tokens)}/${fmtNum(s.usage.output_tokens)}` : "";
+            const lat = s.latency_ms != null ? ` · ~${fmtDur(s.latency_ms)}` : "";
+            return `<tr class="step-row" tabindex="0" data-action="act-step" data-seq="${i}"><td>${s.seq ?? ""}</td><td>${esc(s.kind)}</td><td>${esc(s.name)}</td>
+                <td class="${statusClass(s.status)}">${esc(s.status)}</td>
+                <td><div class="track"><i style="left:${left.toFixed(2)}%;width:${w.toFixed(2)}%"></i></div><span class="muted">${fmtDur(s.duration_ms)}${lat}</span></td>
+                <td class="mono">${esc(s.model || "")}</td><td>${tok}</td><td>${fmtCost(s.cost_usd)}</td></tr>
+                <tr hidden class="step-data" id="step-data-${i}"><td colspan="8"><pre>${esc(json({data: s.data, raw_ref: s.raw_ref}))}</pre></td></tr>`;
+        }).join("") + "</tbody></table></div>";
 }
 async function loadSteps() {
     const box = $("activity-steps");
-    if (!act.run) { box.innerHTML = ""; return; }
-    const {run, steps} = await api(API.run(act.run));
-    const t0 = new Date(run.started_at).getTime();
-    const ends = steps.map((s) => new Date(s.ended_at || s.started_at).getTime());
-    const end = Math.max(...ends, run.finished_at ? new Date(run.finished_at).getTime() : 0, t0 + 1);
-    const span = end - t0;
-    box.innerHTML = `<div class="section-title">Run ${esc(run.id)} · ${esc(run.status)}</div><div class="table-wrap"><table class="data-table"><thead><tr><th>#</th><th>Kind</th><th>Name</th><th>Status</th><th style="width:30%">Timeline</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>` +
-        steps.map((s) => {
-            const st = new Date(s.started_at).getTime(), en = new Date(s.ended_at || s.started_at).getTime();
-            const left = 100 * (st - t0) / span, w = 100 * (en - st) / span;
-            const tok = s.usage ? `${fmtNum(s.usage.input_tokens)}/${fmtNum(s.usage.output_tokens)}` : "";
-            return `<tr class="step-row" tabindex="0" data-action="act-step" data-seq="${s.seq}"><td>${s.seq}</td><td>${esc(s.kind)}</td><td>${esc(s.name)}</td>
-                <td class="${statusClass(s.status)}">${esc(s.status)}</td>
-                <td><div class="track"><i style="left:${left.toFixed(2)}%;width:${w.toFixed(2)}%"></i></div><span class="muted">${fmtDur(durMs(s.started_at, s.ended_at))}</span></td>
-                <td>${tok}</td><td>${fmtCost(s.cost_usd)}</td></tr>
-                <tr hidden class="step-data" id="step-data-${s.seq}"><td colspan="7"><pre>${esc(json({data: s.data, raw_ref: s.raw_ref, model: s.model}))}</pre></td></tr>`;
-        }).join("") + "</tbody></table></div>";
+    const item = act.items.find((t) => t.id === act.run);
+    if (!act.run || !item) { box.innerHTML = ""; return; }
+    const open = `<button class="btn-small" type="button" data-action="goto-thread" data-key="${esc(item.thread_key)}">Open transcript</button>`;
+    const approvals = item.status === "waiting_approval" ? ` <button class="btn-small" type="button" data-action="goto-approvals">Review approvals</button>` : "";
+    if (!item.run_id) {
+        box.innerHTML = `<div class="section-title">${taskBadge("queued")} ${esc(item.trigger_summary)}</div><div class="inline-actions">${open}</div>` +
+            `<p class="muted">Waiting for a worker${item.retry_at ? "; retry after " + esc(fmtTime(item.retry_at)) : ""}.</p>`;
+        return;
+    }
+    const t = await api("/api/tasks/" + enc(item.run_id));
+    if (act.run !== item.id) return;
+    const head = `<div class="section-title">${taskBadge(t.status)} ${esc(t.trigger_summary)} <span class="muted mono">${esc(t.run_id)}</span></div>
+        <div class="inline-actions">${open}${approvals}</div>
+        <p class="muted">${esc(t.thread_title)} · ${esc(t.harness || "")}${t.model ? " · " + esc(t.model) : ""} · ${esc(fmtDur(t.duration_ms))} · ${fmtCost(t.cost_usd)}</p>
+        ${t.error ? `<div class="err-text">${esc(t.error)}</div>` : ""}`;
+    if (!t.steps) { box.innerHTML = head + `<p class="muted">The step trace is visible to admins only.</p>`; return; }
+    const t0 = new Date(t.started_at).getTime();
+    const end = Math.max(...t.steps.map((s) => new Date(s.ended_at || s.started_at).getTime()),
+        t.finished_at ? new Date(t.finished_at).getTime() : 0, t0 + 1);
+    box.innerHTML = head + (t.steps.length ? stepsTable(t.steps, t0, end) : empty("No steps recorded"));
 }
 actions["act-run"] = (el) => { act.run = el.dataset.id; document.querySelectorAll("#activity-content tr.sel").forEach((r) => r.classList.remove("sel")); el.classList.add("sel"); return loadSteps(); };
 actions["act-step"] = (el) => { const d = $("step-data-" + el.dataset.seq); if (d) d.hidden = !d.hidden; };
+actions["goto-approvals"] = () => switchTab("approvals");
 document.addEventListener("keydown", (e) => {
     if ((e.key === "Enter" || e.key === " ") && e.target.matches("tr.step-row[data-action]")) { e.preventDefault(); e.target.click(); }
 });
 $("act-refresh").addEventListener("click", () => loadActivity().catch(fail));
+for (const id of ["task-type", "task-status"]) $(id).addEventListener("change", () => loadActivity().catch(fail));
+// Called for task_updated stream messages: refresh the list (and the open trace).
+function onTaskUpdate(m) {
+    if (activeTab !== "activity") return;
+    $("task-live").textContent = "Updated " + fmtTime(m.at || new Date().toISOString());
+    debounce("tasks", loadActivity, 400);
+}
 loaders.activity = loadActivity;
 
 // ─── Usage ───────────────────────────────────────────────────────────────────

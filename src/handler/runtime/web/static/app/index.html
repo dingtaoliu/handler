@@ -15,7 +15,7 @@
       <li><button class="nav-item active" data-tab="chat">Chat<span class="nav-badge" id="badge-chat" hidden>0</span></button></li>
       <li><button class="nav-item" data-tab="memory">Memory</button></li>
       <li><button class="nav-item" data-tab="automations">Automations</button></li>
-      <li><button class="nav-item" data-tab="activity">Activity</button></li>
+      <li><button class="nav-item" data-tab="activity">Tasks</button></li>
       <li><button class="nav-item" data-tab="usage">Usage</button></li>
       <li><button class="nav-item" data-tab="approvals">Approvals<span class="nav-badge" id="badge-approvals" hidden>0</span></button></li>
       <li><button class="nav-item" data-tab="notifications">Notifications<span class="nav-badge" id="badge-notifications" hidden>0</span></button></li>
@@ -102,10 +102,24 @@
     </section>
 
     <!-- Activity -->
-    <section id="tab-activity" class="tab-pane scroll-pane" aria-label="Activity">
-      <div class="pane-title">Activity <button class="btn-small" id="act-refresh" type="button">Refresh</button>
+    <section id="tab-activity" class="tab-pane scroll-pane" aria-label="Tasks">
+      <div class="pane-title">Tasks <button class="btn-small" id="act-refresh" type="button">Refresh</button>
         <a class="link" href="/timeline" style="font-size:12px;font-weight:400">Open timeline</a></div>
+      <div class="inline-actions task-filters">
+        <label>Type <select id="task-type" aria-label="Task type">
+          <option value="">All</option><option value="automation">Automation</option>
+          <option value="email">Email</option><option value="crontal">Crontal</option>
+          <option value="gmail">Gmail</option></select></label>
+        <label>Status <select id="task-status" aria-label="Task status">
+          <option value="">All</option><option value="queued,running,waiting_approval">Active</option>
+          <option value="queued">Queued</option><option value="running">Running</option>
+          <option value="waiting_approval">Waiting approval</option>
+          <option value="succeeded">Succeeded</option><option value="failed,dead">Failed</option>
+        </select></label>
+        <span class="muted" id="task-live" role="status"></span>
+      </div>
       <div id="activity-content"></div>
+      <div id="activity-more"></div>
       <div id="activity-steps"></div>
       <div id="activity-ignored"></div>
     </section>

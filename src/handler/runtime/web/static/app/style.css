@@ -865,3 +865,7 @@ fieldset.sf-group legend { font-size: 11px; padding: 0 6px; color: var(--muted);
     font-size: 12px;
     line-height: 1.5;
 }
+
+/* Tasks tab filters */
+.task-filters { margin: 0 0 12px; gap: 12px; flex-wrap: wrap; align-items: center; }
+.task-filters label { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }

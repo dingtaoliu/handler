@@ -97,10 +97,12 @@ async def sse_stream(
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
     visible: Callable[[str], bool] | None = None,
     authorized: Callable[[], Awaitable[bool]] | None = None,
+    accept: Callable[[BusMessage], bool] | None = None,
 ) -> AsyncIterator[str]:
     """Yield SSE frames for bus messages, with comment heartbeats when idle.
 
-    `visible` filters messages by thread key (used to hide other users' chats).
+    `visible` filters messages by thread key (used to hide other users' chats);
+    `accept` filters by message (e.g. only task updates).
     """
     async with bus.subscribe(thread_key) as queue:
         yield ": connected\n\n"
@@ -118,7 +120,7 @@ async def sse_stream(
                 continue
             if authorized is not None and not await authorized():
                 return
-            if visible is None or visible(msg.thread_key):
+            if (visible is None or visible(msg.thread_key)) and (accept is None or accept(msg)):
                 yield f"data: {json.dumps(_json(msg))}\n\n"
 
 

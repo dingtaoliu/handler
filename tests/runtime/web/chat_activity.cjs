@@ -78,5 +78,45 @@ function browser() {
     // Data remains escaped in run/event rendering.
     assert.doesNotMatch(b.run('stepHtml({kind:"assistant_text",data:{text:"<script>bad()</script>"}})'), /<script>/);
     assert.match(b.run('messageHtml({role:"tool",blocks:[{type:"tool_call",name:"notify",input:{message:"Visible reminder",to:["1"]}},{type:"tool_result",output:{}}]})'), /Notification<\/b><div><p>Visible reminder/);
+
+    // Tasks tab: list from /api/tasks, admin trace, member note, live refresh.
+    const tk = browser();
+    tk.run(`activeTab = "activity"; let taskCalls = [];
+        api = async (path) => {
+            taskCalls.push(path);
+            if (path.startsWith("/api/events")) return [];
+            if (path.startsWith("/api/tasks?")) return {items: [
+                {id:"queued:email:new", run_id:null, thread_key:"email:new", thread_type:"email", thread_title:"Hello",
+                 trigger_summary:"Email from bob@example.com: Hello", status:"queued", queued_at:"2026-10-18T10:00:00Z"},
+                {id:"run_1", run_id:"run_1", thread_key:"crontal:rfq:42", thread_type:"crontal", thread_title:"RFQ 42",
+                 trigger_summary:"rfq 42 · <b>bid</b>", status:"waiting_approval", started_at:"2026-10-18T09:00:00Z",
+                 duration_ms:1500, cost_usd:0.01, usage:{input_tokens:10,output_tokens:5}, summary:"Need approval"}],
+                next_cursor: "abc"};
+            if (path === "/api/tasks/run_1") return {id:"run_1", run_id:"run_1", thread_key:"crontal:rfq:42", status:"waiting_approval",
+                trigger_summary:"rfq 42", thread_title:"RFQ 42", started_at:"2026-10-18T09:00:00Z", duration_ms:1500,
+                steps: me.role === "admin" ? [{seq:1, kind:"llm_call", name:"gpt", status:"ok", model:"gpt-test",
+                    started_at:"2026-10-18T09:00:01Z", usage:{input_tokens:10,output_tokens:5}, latency_ms:900, data:{}},
+                    {seq:null, kind:"approval", name:"gmail_send", status:"pending", started_at:"2026-10-18T09:00:02Z", data:{args:{to:"a"}}}] : undefined};
+            throw new Error(path);
+        };`);
+    await tk.run('loadActivity()');
+    let tasks = tk.elements.get('activity-content').innerHTML;
+    assert.match(tasks, /Email from bob@example.com: Hello/);
+    assert.match(tasks, /waiting approval/);
+    assert.doesNotMatch(tasks, /<b>bid<\/b>/, 'task text is escaped');
+    assert.match(tk.elements.get('activity-more').innerHTML, /Load more/);
+    assert.equal(tk.streams.length, 1, 'Tasks subscribe to the live stream');
+    await tk.run('actions["act-run"]({dataset:{id:"run_1"}, classList:{add() {}}})');
+    let trace = tk.elements.get('activity-steps').innerHTML;
+    assert.match(trace, /llm_call/); assert.match(trace, /gmail_send/); assert.match(trace, /Review approvals/);
+    assert.match(trace, /Open transcript/);
+    tk.run('me = {user_id: "2", role: "member"}');
+    await tk.run('loadSteps()');
+    assert.match(tk.elements.get('activity-steps').innerHTML, /visible to admins only/);
+    tk.run('taskCalls = []');
+    tk.streams[0].onmessage({data: JSON.stringify({type:'task_updated', thread_key:'crontal:rfq:42', data:{status:'succeeded'}})});
+    assert.match(tk.elements.get('task-live').textContent, /Updated/);
+    assert.equal(tk.run('chat.unread.has("crontal:rfq:42")'), false, 'task updates do not mark chats unread');
+
     console.log('Chat activity behavior checks passed');
 })().catch((error) => {console.error(error); process.exitCode = 1;});

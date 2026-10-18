@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 
 from psycopg.types.json import Jsonb
 
+from .tasks import announce_routed
 from ..types import (
     Approval,
     ApprovalStatus,
@@ -134,9 +135,12 @@ class ScheduleMixin(_Rows):
             )
             if not cursor.rowcount:
                 return False
-            if await _put_event(conn, event, thread, self._clock()):
+            routed = await _put_event(conn, event, thread, self._clock())
+            if routed:
                 await _notify(conn)
         self._wake.set()
+        if routed:
+            announce_routed(self, event, thread)
         return True
 
 

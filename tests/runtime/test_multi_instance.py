@@ -240,6 +240,27 @@ async def test_single_instance_preserves_root_routes(tmp_path, monkeypatch, inst
                 assert (await client.get('/i/main/api/me', headers=headers('main-admin'))).status_code == 200
 
 
+async def test_tasks_api_is_served_per_instance_prefix(running):
+    from handler.runtime.types import Event, Lane, Run, RunStatus, ThreadSpec, ThreadType
+    client, host = running
+    store = host.state.resources['main']['store']
+    await store.put(Event(type='automation.fired', source='test', payload={'name': 'Main digest'},
+                          idempotency_key='tasks-main'),
+                    ThreadSpec('automation:main', ThreadType.AUTOMATION, Lane.BACKGROUND, harness='codex'))
+    lease, = await store.claim('test', Lane.BACKGROUND, 1, 60)
+    events = [e.id for e in await store.pending_events(lease.thread_key)]
+    run = Run('run_main_task', lease.thread_key, lease.version, events, RunStatus.RUNNING, 'codex', None)
+    assert await store.create_run(lease, run)
+    for path in ('/i/main/api/tasks', '/api/tasks'):
+        page = (await client.get(path, headers=headers('main-admin'))).json()
+        assert [i['trigger_summary'] for i in page['items']] == ['Main digest']
+        detail = await client.get(path + '/run_main_task', headers=headers('main-admin'))
+        assert detail.status_code == 200 and detail.json()['steps'] == []
+    assert (await client.get('/i/bss/api/tasks', headers=headers('bss-admin'))).json()['items'] == []
+    assert (await client.get('/i/bss/api/tasks/run_main_task', headers=headers('bss-admin'))).status_code == 404
+    assert (await client.get('/i/bss/api/tasks', headers=headers('main-admin'))).status_code == 401
+
+
 @contextlib.asynccontextmanager
 async def serving(env, monkeypatch):
     """The real host for `env` (codex unavailable, as on a host without the CLI)."""

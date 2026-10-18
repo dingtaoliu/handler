@@ -37,6 +37,7 @@ from .memory import MemoryTools
 from .observability.pricing import PriceTable
 from .observability.recorder import RawSink, StepRecorder
 from .settings import SettingsService
+from .tasks import publish_task
 from .store.base import Store
 from .uploads import UploadedFile, UploadStore
 from .types import (
@@ -321,6 +322,7 @@ class RunExecutor:
                        acting_as=await self._acting_as(thread))
         )
         self._publish(thread.key, run.id, "run_started", {"trigger_event_ids": run.trigger_event_ids})
+        await self._publish_task(thread, run.id)
         logger.info("run started", extra={"harness": run.harness, "events": len(events)})
         try:
             await self._run_with_heartbeat(lease, thread, run, events)
@@ -433,6 +435,7 @@ class RunExecutor:
             self._publish(thread.key, run.id, "run_finished",
                           {"status": "completed", "text": final_text, "cost_usd": cost,
                            "usage": usage.__dict__})
+            await self._publish_task(thread, run.id)
         except asyncio.CancelledError:
             raise
         except LeaseLost:
@@ -593,11 +596,17 @@ class RunExecutor:
         logger.warning("run failed", extra={"error": run.error, "retry_in": retry_in})
         self._publish(thread.key, run.id, "run_finished",
                       {"status": "failed", "error": run.error, "retry_in": retry_in})
+        await self._publish_task(thread, run.id)
         if failed and retry_in is None and self.failure_notifier is not None:
             try:
                 await self.failure_notifier.run_failed(thread, run, await self._acting_as(thread))
             except Exception:
                 logger.exception("failure notification failed")
+
+    async def _publish_task(self, thread: Thread, run_id: str) -> None:
+        """Live task status for background (non-chat) threads."""
+        if thread.type != ThreadType.CHAT:
+            await publish_task(self.bus, self.store, thread.key, run_id)
 
     def _publish(self, thread_key: str, run_id: str | None, type_: str, data: dict) -> None:
         self.bus.publish(BusMessage(thread_key=thread_key, run_id=run_id, type=type_, data=data))
