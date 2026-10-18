@@ -480,11 +480,12 @@ from .postgres_domains import (  # noqa: E402
 )
 
 
+from .deliveries import PostgresDeliveries  # noqa: E402
 from .thread_metadata import PostgresThreadMetadata  # noqa: E402
 
 
 class PostgresStore(
-    PostgresThreadMetadata, ScheduleMixin, ApprovalMixin, AuditMixin,
+    PostgresThreadMetadata, PostgresDeliveries, ScheduleMixin, ApprovalMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, PostgresCore,
 ):

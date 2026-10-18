@@ -279,8 +279,11 @@ class RunExecutor:
         settings: SettingsService | None = None,
         memory_tools: MemoryTools | None = None,
         workspace_sync: WorkspaceSync | None = None,
+        failure_notifier: Any = None,
     ) -> None:
         self.store = store
+        # FailureNotifier (notifications.py): told about terminal background failures.
+        self.failure_notifier = failure_notifier
         self.tokens = tokens
         self.mcp_url = mcp_url
         self.settings = settings
@@ -586,10 +589,15 @@ class RunExecutor:
         run.status, run.usage, run.cost_usd = RunStatus.FAILED, usage, cost
         run.error, run.finished_at = f"{type(exc).__name__}: {exc}"[:2000], utcnow()
         await self.store.finish_run(lease, run)
-        await self.store.fail(lease, run.error, retry_in)
+        failed = await self.store.fail(lease, run.error, retry_in)
         logger.warning("run failed", extra={"error": run.error, "retry_in": retry_in})
         self._publish(thread.key, run.id, "run_finished",
                       {"status": "failed", "error": run.error, "retry_in": retry_in})
+        if failed and retry_in is None and self.failure_notifier is not None:
+            try:
+                await self.failure_notifier.run_failed(thread, run, await self._acting_as(thread))
+            except Exception:
+                logger.exception("failure notification failed")
 
     def _publish(self, thread_key: str, run_id: str | None, type_: str, data: dict) -> None:
         self.bus.publish(BusMessage(thread_key=thread_key, run_id=run_id, type=type_, data=data))

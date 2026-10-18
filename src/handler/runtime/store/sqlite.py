@@ -449,11 +449,12 @@ from .sqlite_schedules import ScheduleMixin  # noqa: E402
 from .sqlite_users import UsersMixin  # noqa: E402
 
 
+from .deliveries import SQLiteDeliveries  # noqa: E402
 from .thread_metadata import SQLiteThreadMetadata  # noqa: E402
 
 
 class SQLiteStore(
-    SQLiteThreadMetadata, ScheduleMixin, ApprovalMixin, AuditMixin,
+    SQLiteThreadMetadata, SQLiteDeliveries, ScheduleMixin, ApprovalMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, SQLiteCore,
 ):
