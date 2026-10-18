@@ -1,6 +1,8 @@
 "use strict";
 const handlerBase = (window.HANDLER_CONFIG || {}).base || "";
 const handlerInstance = (window.HANDLER_CONFIG || {}).instance || "";
+// UI build this page booted with; the server stamps its own on every response.
+const handlerBuild = (window.HANDLER_CONFIG || {}).build || "";
 const handlerPath = (path) => handlerBase + path;
 const handlerKey = (key) => handlerInstance ? "handler.instance." + handlerInstance + ":" + key : key;
 
@@ -102,8 +104,19 @@ function detailText(d) {
     return JSON.stringify(d);
 }
 
+// A tab left open across a deploy keeps running the old script against the new
+// server (settings forms then mislabel or drop fields). Once a response comes
+// from another build, the next tab switch reloads the page.
+let staleUi = false;
+function noteBuild(r) {
+    const served = r && r.headers && typeof r.headers.get === "function" ? r.headers.get("X-Handler-Build") : null;
+    if (staleUi || !served || !handlerBuild || served === handlerBuild) return;
+    staleUi = true;
+    toast("Handler was updated; it reloads when you switch tabs", false, 6000);
+}
 async function apiRaw(path, opts = {}) {
     const r = await fetch(handlerPath(path), {...opts, headers: authHeaders(opts.headers), cache: "no-store"});
+    noteBuild(r);
     if (r.status === 401) { logout(); throw new ApiError(401, "unauthorized", path); }
     if (!r.ok) {
         let body = null;
@@ -263,6 +276,7 @@ let logTimer = null;
 function switchTab(name) {
     const nav = document.querySelector(`.nav-item[data-tab="${name}"]`);
     if (!nav || nav.hidden) name = "chat";
+    if (staleUi) { history.replaceState(null, "", "#" + name); location.reload(); return; }
     activeTab = name;
     document.querySelectorAll(".tab-pane").forEach((p) => p.classList.remove("active"));
     document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("active", n.dataset.tab === name));

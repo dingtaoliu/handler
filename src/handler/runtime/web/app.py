@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -28,6 +29,43 @@ HEARTBEAT_SECONDS = 15.0
 MEMBER_SCAN_LIMIT = 1000  # threads scanned when filtering a member's list
 TIMELINE_HTML = Path(__file__).resolve().parent / "static" / "timeline.html"
 APP_DIR = Path(__file__).resolve().parent / "static" / "app"
+BUILD_HEADER = "X-Handler-Build"
+
+
+def ui_build() -> str:
+    """Fingerprint of the shipped browser UI (the files under static/)."""
+    digest = hashlib.sha256()
+    for path in sorted(APP_DIR.parent.rglob("*")):
+        if path.is_file():
+            digest.update(path.relative_to(APP_DIR.parent).as_posix().encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
+class BuildHeaderMiddleware:
+    """Stamp every HTTP response with the UI build serving it.
+
+    The web UI is a long-lived page: data is fetched on each tab open but its
+    script only loads with the page. A tab left open across a deploy otherwise
+    renders new server data with old code (e.g. settings selects labelled
+    "(none)" instead of "Default (...)"). The page compares this header with
+    the build it booted with and reloads itself when they differ.
+    """
+
+    def __init__(self, app, build: str) -> None:
+        self.app, self.header = app, (BUILD_HEADER.lower().encode(), build.encode())
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def stamped(message) -> None:
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": [*message.get("headers", []), self.header]}
+            await send(message)
+
+        await self.app(scope, receive, stamped)
 
 
 class ChatRequest(BaseModel):
@@ -91,6 +129,8 @@ def create_app(
 ) -> FastAPI:
     # No interactive docs / OpenAPI: the API is authenticated, its schema needn't be public.
     app = FastAPI(title="handler runtime", docs_url=None, redoc_url=None, openapi_url=None)
+    build = ui_build()
+    app.add_middleware(BuildHeaderMiddleware, build=build)
     router = APIRouter()
     principal_dep = Depends(auth.require_principal)
     sse_dep = Depends(auth.require_sse_principal)
@@ -270,7 +310,7 @@ def create_app(
         base = request.scope.get("root_path", "").rstrip("/")
         # Serialize trusted server config, keeping script contexts safe even under
         # an externally supplied ASGI root path.
-        config = json.dumps({"base": base, "instance": instance_name}).replace("<", "\\u003c")
+        config = json.dumps({"base": base, "instance": instance_name, "build": build}).replace("<", "\\u003c")
         bootstrap = f"<script>window.HANDLER_CONFIG={config};</script>"
         content = path.read_text().replace("<script", bootstrap + "<script", 1)
         content = content.replace('href="/', f'href="{base}/').replace('src="/', f'src="{base}/')

@@ -238,3 +238,94 @@ async def test_single_instance_preserves_root_routes(tmp_path, monkeypatch, inst
             assert 'src="/app/static/app.js"' in page.text
             if instances:
                 assert (await client.get('/i/main/api/me', headers=headers('main-admin'))).status_code == 200
+
+
+@contextlib.asynccontextmanager
+async def serving(env, monkeypatch):
+    """The real host for `env` (codex unavailable, as on a host without the CLI)."""
+    async def idle(self, stop, *args):
+        await stop.wait()
+    monkeypatch.setattr(server.Dispatcher, 'run_forever', idle)
+    monkeypatch.setattr(server.Scheduler, 'run_forever', idle)
+    def no_codex():
+        raise FileNotFoundError('test has no codex')
+    monkeypatch.setattr(server, 'codex_binary', no_codex)
+    host = server.create_host(server._parse_args(['serve'], env), env)
+    async with host.router.lifespan_context(host):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=host),
+                                     base_url='http://handler') as client:
+            yield client
+
+
+def render_settings(tmp_path, payload, build):
+    """What the shipped app.js shows for a /api/settings payload (see settings_labels.cjs)."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is needed to render the settings form')
+    root = Path(__file__).resolve().parents[2]
+    data = tmp_path / f'settings-{build}.json'
+    data.write_text(json.dumps(payload))
+    out = subprocess.run(
+        [node, str(root / 'tests/runtime/web/settings_labels.cjs'),
+         str(root / 'src/handler/runtime/web/static/app/app.js'), str(data), build],
+        check=True, capture_output=True, text=True)
+    return json.loads(out.stdout)
+
+
+@pytest.mark.parametrize('instances', ['main,bss', ''])
+async def test_thread_defaults_resolve_and_label_in_every_instance(tmp_path, monkeypatch, instances):
+    """Regression: Settings > threads must show "Default (<value>)", never "(none)".
+
+    Covers every mount (single-instance root, /, /i/main, /i/bss), a thread type
+    on a harness that isn't running here (codex: "harness default"), per-instance
+    model/effort overrides, and the build stamp that makes a page left open
+    across a deploy reload instead of rendering new data with old code.
+    """
+    env = config(tmp_path)
+    env['HANDLER_INSTANCES'] = instances
+    env['HANDLER_RT_EFFORT'] = 'medium'
+    env['HANDLER_I_BSS__HANDLER_RT_MODEL'] = 'gpt-6-luna'
+    env['HANDLER_I_BSS__HANDLER_RT_EFFORT'] = 'high'
+    mounts = ([('', 'main-admin', None, 'medium'), ('/i/main', 'main-admin', None, 'medium'),
+               ('/i/bss', 'bss-admin', 'gpt-6-luna', 'high')] if instances
+              else [('', 'main-admin', None, 'medium')])
+    async with serving(env, monkeypatch) as client:
+        for base, key, model, effort in mounts:
+            admin = headers(key)
+            saved = (await client.get(base + '/api/settings/threads', headers=admin)).json()
+            current = {**saved['value'], 'crontal': {**saved['value']['crontal'], 'harness': 'codex'}}
+            match = {} if saved['version'] is None else {'If-Match': str(saved['version'])}
+            assert (await client.put(base + '/api/settings/threads', headers={**admin, **match},
+                                     json=current)).status_code == 200
+            response = await client.get(base + '/api/settings', headers=admin)
+            build = response.headers['X-Handler-Build']
+            assert build and f'"build": "{build}"' in (await client.get(base + '/app')).text
+            threads = response.json()['threads']
+            assert set(threads['harness_defaults']) == {'codex', 'openai_agents'}
+            assert threads['harness_defaults']['codex'] == {'model': model, 'reasoning_effort': effort}
+            assert threads['harness_defaults']['openai_agents'] == {
+                'model': model or 'gpt-6.1-sol', 'reasoning_effort': effort}
+            types = set(threads['schema']['properties'])
+            assert set(threads['defaults']) == types == set(threads['value'])
+            for name, resolved in threads['defaults'].items():
+                harness = 'codex' if name == 'crontal' else 'openai_agents'
+                assert resolved['harness'] == harness
+                assert resolved['reasoning_effort'] == effort
+                if harness == 'openai_agents':
+                    assert resolved['model'] == (model or 'gpt-6.1-sol')
+
+            shown = render_settings(tmp_path, response.json(), build)
+            want = {'openai_agents': f'Default ({model or "gpt-6.1-sol"})',
+                    'codex': f'Default ({model or "harness default"})'}
+            for name in types:
+                harness = threads['defaults'][name]['harness']
+                other = 'openai_agents' if harness == 'codex' else 'codex'
+                assert shown['labels'][name] == {'harness': harness, 'model': want[harness],
+                                                 'reasoning_effort': f'Default ({effort})'}
+                assert shown['relabelled'][name] == {'harness': other, 'model': want[other],
+                                                     'reasoning_effort': f'Default ({effort})'}
+            assert '(none)' not in json.dumps(shown)
+            assert shown['stale'] == {'sameBuildReloaded': False, 'reloaded': True}
