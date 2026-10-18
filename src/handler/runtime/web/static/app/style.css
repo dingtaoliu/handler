@@ -835,3 +835,6 @@ fieldset.sf-group legend { font-size: 11px; padding: 0 6px; color: var(--muted);
     .split-left { width: 130px; }
 }
 [hidden] { display: none !important; }
+
+.msg.pending { opacity: 0.65; }
+.msg.run-error { color: var(--danger); }

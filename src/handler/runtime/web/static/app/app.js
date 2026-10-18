@@ -343,14 +343,27 @@ function renderThinking() {
 async function loadMessages(force) {
     if (!chat.key) { $("messages").innerHTML = ""; chat.sig = ""; return; }
     const key = chat.key;
-    const msgs = await api(API.threadMessages(key));
+    const [msgs, detail] = await Promise.all([
+        api(API.threadMessages(key)),
+        api(API.thread(key)).catch(() => null),
+    ]);
     if (key !== chat.key) return;
-    const sig = msgs.map((m) => m.id).join(",");
+    // Turns are saved to the transcript only when their run succeeds; until
+    // then they are pending events (queued, running, retrying or dead).
+    const pending = ((detail && detail.pending_events) || []).filter((e) => e.type === "chat.message");
+    const t = (detail && detail.thread) || {};
+    const sig = msgs.map((m) => m.id).concat(pending.map((e) => e.id)).join(",") + "|" + (t.last_error || "") + (t.dead ? "!" : "");
     if (!force && sig === chat.sig) return;
     chat.sig = sig;
     const box = $("messages");
     const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-    box.innerHTML = msgs.map(messageHtml).join("");
+    let html = msgs.map(messageHtml).join("");
+    html += pending.map((e) => `<div class="msg user pending" title="Not yet answered">${blockHtml({type: "text", text: (e.payload || {}).text || ""}, "user")}</div>`).join("");
+    if (pending.length && t.last_error) {
+        const state = t.dead ? "Run failed and will not be retried" : "Run failed; retrying";
+        html += `<div class="msg event run-error" role="status">${esc(state)}: ${esc(t.last_error)}</div>`;
+    }
+    box.innerHTML = html;
     hydrateBlobs(box);
     renderThinking();
     if (atBottom || force) box.scrollTop = box.scrollHeight;
