@@ -153,3 +153,36 @@ Working mode: the main session acts as architect and hands implementation to bac
 **Infrastructure notes:**
 - Instances share Crontal's Postgres (Essential-1: one database user, 20 connections) and one Bucketeer key, so isolation is enforced only by the app. For a hard boundary, move to Standard-0 with a user per schema and a bucket per instance.
 - Rotate `hephaestus-backend-test`'s Bucketeer, OpenAI and database credentials: they were printed in a session log.
+
+## 8. Continuation: multi-instance release prepared (2026-10-18)
+
+The in-flight branches in §7 are now implemented and merged:
+
+- Handler `feat/multi-instance` implementation `dc3fb65`, merged to `rebuild`.
+  Runbook: `docs/rebuild/multi-instance.md`. Runtime suite: **664 passed,
+  2 skipped**. Per-instance configuration uses `HANDLER_I_<NAME>__<ENV_VAR>`.
+- Crontal merchant registry `ddad985` and Google connection card `e2faefb`
+  are merged and pushed to `main`. Backend suite passed 227 tests plus 22
+  subtests; after merging Google, the combined focused suite passed 54 tests.
+  Frontend build and targeted ESLint passed.
+- Shared database backup **b017** completed successfully.
+- Containers are prepared for `crontal-agent` and `hephaestus-backend-test`.
+  **No release/configuration/registry mutation has been performed.**
+- The Crontal deployment skill explicitly requires confirmation before release.
+  Continue with the rollout order in §7 after the owner confirms. Detailed
+  Crontal checklist: `docs/handler-instances-rollout-2026-10-18.md`.
+- Protected scratch configuration snapshots/payload are under
+  `/tmp/crontal-rollout` (directory 700, files 600). Never print their contents.
+  They can be reconstructed from Heroku if absent. The prepared BSS payload
+  reuses its existing keys, `handler_bss` schema and `handler/bss/` prefix,
+  changes public URL to the shared host's `/i/bss`, and limits each Handler
+  Postgres pool to 3 connections (plus each store's LISTEN connection).
+- Keep main's public URL at the root: its Google OAuth callback is already
+  registered there. BSS intentionally inherits neither main Google configuration
+  nor main email intake secret. A direct Handler browser login is needed once
+  when switching to named-instance browser storage keys.
+- Legacy outbox rows without an instance ID are skipped after registry
+  activation; they must never be inferred/rerouted into another merchant.
+- Register both merchant rows in one database transaction to avoid a partial
+  switch from legacy fallback. After checks, remove only Crontal's deprecated
+  global URL/admin/webhook/agent-token variables, keeping HANDLER_ENABLED.
