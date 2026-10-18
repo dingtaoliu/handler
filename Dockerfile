@@ -37,6 +37,12 @@ RUN apt-get update \
     && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
+# Heroku starts CMD via `/bin/sh -c`. Debian's dash stays resident as the
+# dyno's main process and dies on SIGTERM, so Heroku tears the dyno down
+# before handler's graceful shutdown (final workspace sync) can run. bash
+# execs a single -c command, making handler-rt the main process instead.
+RUN ln -sf /bin/bash /bin/sh
+
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
 WORKDIR /app
