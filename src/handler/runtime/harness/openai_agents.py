@@ -35,6 +35,7 @@ from agents.mcp import MCPServerStreamableHttp
 from openai.types.shared import Reasoning
 
 from ..settings import HARNESS_DEFAULT_MODELS
+from ..images import sniff_file
 from ..types import TokenUsage
 from .base import HarnessError, RunEvent, RunEventKind, RunRequest
 
@@ -99,7 +100,8 @@ def _input(req: RunRequest) -> str | list[dict[str, Any]]:
         return req.prompt
     content: list[dict[str, Any]] = [{"type": "input_text", "text": req.prompt}]
     for path in req.images:
-        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        # From the bytes: a name like "image.png" may hold a JPEG or WebP.
+        mime = sniff_file(path) or mimetypes.guess_type(path.name)[0] or "image/png"
         data = base64.b64encode(path.read_bytes()).decode()
         content.append({"type": "input_image", "image_url": f"data:{mime};base64,{data}"})
     return [{"role": "user", "content": content}]

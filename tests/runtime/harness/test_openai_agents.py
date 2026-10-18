@@ -174,15 +174,31 @@ async def test_resumed_thread_reuses_its_conversation(tmp_path, runner):
     assert events[-2].data == {"model": "gpt-6-luna"}
 
 
+PNG_BYTES = b"\x89PNG\r\n\x1a\n fake"
+JPEG_BYTES = b"\xff\xd8\xff\xe0 fake"
+
+
 async def test_images_are_sent_as_input_images(tmp_path, runner):
     image = tmp_path / "shot.png"
-    image.write_bytes(b"\x89PNG fake")
+    image.write_bytes(PNG_BYTES)
+    # the type comes from the bytes: a pasted "image.png" may really be a JPEG
+    mislabeled = tmp_path / "image.png"
+    mislabeled.write_bytes(JPEG_BYTES)
     harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
-    await _collect(harness, _req(tmp_path, images=[image]))
+    await _collect(harness, _req(tmp_path, images=[image, mislabeled]))
     (message,) = runner.calls[0]["input"]
-    text, img = message["content"]
+    assert message["role"] == "user"
+    text, img, jpg = message["content"]
     assert text == {"type": "input_text", "text": "how many RFQs?"}
-    assert img["image_url"] == "data:image/png;base64," + base64.b64encode(b"\x89PNG fake").decode()
+    assert img == {"type": "input_image",
+                   "image_url": "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode()}
+    assert jpg["image_url"] == "data:image/jpeg;base64," + base64.b64encode(JPEG_BYTES).decode()
+
+
+async def test_text_only_turn_is_a_plain_string(tmp_path, runner):
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
+    await _collect(harness, _req(tmp_path))
+    assert runner.calls[0]["input"] == "how many RFQs?"
 
 
 async def test_mcp_servers_connect_and_clean_up(tmp_path, runner, monkeypatch):

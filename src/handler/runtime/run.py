@@ -31,6 +31,7 @@ from .harness.base import (
     RunRequest,
 )
 from .harness.codex import tool_input as codex_tool_input
+from .images import MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, downscale, sniff_file
 from .instructions import build_instructions
 from .mail.intake import render_email_event, resolve_act_as
 from .memory import MemoryTools
@@ -447,24 +448,46 @@ class RunExecutor:
                 self.tokens.revoke(mcp_token)
 
     def _attachments(self, events: list[Event], workspace: Path) -> tuple[list[Path], list[str]]:
-        """Images go to the harness as-is; other files are copied under attachments/."""
+        """Copy every attachment under attachments/; images also go to the model.
+
+        Vision images (PNG/JPEG/WebP/GIF by their bytes) are handed to the
+        harness as image input, at most MAX_IMAGES_PER_MESSAGE per message;
+        one over MAX_IMAGE_BYTES is sent as a downscaled copy. Returns the
+        image paths (inside the workspace) and the prompt's file list.
+        """
         images: list[Path] = []
         attached: list[str] = []
         for ev in events:
+            shown = 0
             for meta in event_attachments(self.uploads, ev):
                 source = self.uploads.path(meta)
                 if source is None:
-                    continue
-                if meta.content_type.startswith("image/"):
-                    images.append(source)
                     continue
                 target_dir = workspace / "attachments"
                 target_dir.mkdir(parents=True, exist_ok=True)
                 name = meta.filename
                 if (target_dir / name).exists():
                     name = f"{meta.id[:8]}-{name}"
-                shutil.copyfile(source, target_dir / name)
-                attached.append(f"attachments/{name}")
+                target = target_dir / name
+                shutil.copyfile(source, target)
+                rel = f"attachments/{name}"
+                if sniff_file(target) is None:
+                    attached.append(rel)
+                    continue
+                if shown >= MAX_IMAGES_PER_MESSAGE:
+                    attached.append(f"{rel} (image not shown: over {MAX_IMAGES_PER_MESSAGE} "
+                                    "per message)")
+                    continue
+                vision: Path | None = target
+                if target.stat().st_size > MAX_IMAGE_BYTES:
+                    vision = downscale(target, target_dir / f"{Path(name).stem}.downscaled",
+                                       max_bytes=MAX_IMAGE_BYTES)
+                if vision is None:
+                    attached.append(f"{rel} (image too large to show)")
+                    continue
+                images.append(vision)
+                shown += 1
+                attached.append(f"{rel} (image, shown to you with this message)")
         return images, attached
 
     async def _stream(

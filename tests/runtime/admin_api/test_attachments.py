@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+import io
+import os
 
-import pytest
+from PIL import Image
 
+from handler.runtime import run as run_module
 from handler.runtime.bus import RunEventBus
 from handler.runtime.dispatcher import Dispatcher
 from handler.runtime.harness.base import RunEvent, RunEventKind, RunRequest
 from handler.runtime.harness.codex import CodexHarness
 from handler.runtime.observability.pricing import PriceTable
+from handler.runtime.images import MAX_IMAGES_PER_MESSAGE
 from handler.runtime.run import RunConfig, RunExecutor
+from handler.runtime.types import Event, Lane, ThreadSpec, ThreadType
 
 
 class Capture:
@@ -48,12 +52,19 @@ async def test_chat_validates_attachments(client, world):
     assert event.payload == {"text": "hi", "attachments": [f["id"]]}
 
 
-async def test_attachments_reach_run(client, world):
-    txt = await upload(client, world, "alice", "notes.txt", b"data", "text/plain")
-    img = await upload(client, world, "alice", "pic.png", b"\x89PNG", "image/png")
-    await client.post("/api/chat", headers=world.h("alice"), json={
-        "text": "look", "conversation_id": "c", "attachments": [txt["id"], img["id"]]})
+def png(size=(4, 4), color=(255, 0, 0)) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, "PNG")
+    return buf.getvalue()
 
+
+def jpeg(size=(4, 4)) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", size, (0, 0, 255)).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+async def run_once(world) -> RunRequest:
     harness = Capture()
     prices = world.tmp_path / "prices.yaml"
     prices.write_text("prices: []\n")
@@ -64,12 +75,25 @@ async def test_attachments_reach_run(client, world):
     await dispatcher.claim_once()
     while dispatcher.active_count:
         await asyncio.sleep(0.01)
-
     (req,) = harness.requests
-    assert [p.name for p in req.images] == ["pic.png"]
-    assert req.prompt.endswith("Attached files: attachments/notes.txt")
+    return req
+
+
+async def test_attachments_reach_run(client, world):
+    txt = await upload(client, world, "alice", "notes.txt", b"data", "text/plain")
+    data = png()
+    img = await upload(client, world, "alice", "pic.png", data, "image/png")
+    await client.post("/api/chat", headers=world.h("alice"), json={
+        "text": "look", "conversation_id": "c", "attachments": [txt["id"], img["id"]]})
+
+    req = await run_once(world)
+    # the image is shown to the model from its workspace copy, and kept as a file
+    assert req.images == [req.workspace / "attachments" / "pic.png"]
+    assert (req.workspace / "attachments" / "pic.png").read_bytes() == data
     assert (req.workspace / "attachments" / "notes.txt").read_bytes() == b"data"
-    assert not (req.workspace / "attachments" / "pic.png").exists()
+    assert req.prompt.endswith(
+        "Attached files: attachments/notes.txt, "
+        "attachments/pic.png (image, shown to you with this message)")
 
     msgs = await world.store.list_messages("chat:alice:c")
     blocks = msgs[0].blocks
@@ -78,6 +102,62 @@ async def test_attachments_reach_run(client, world):
         {"type": "file", "file_id": txt["id"], "filename": "notes.txt", "content_type": "text/plain"},
         {"type": "file", "file_id": img["id"], "filename": "pic.png", "content_type": "image/png"},
     ]
+
+
+async def test_upload_records_the_sniffed_image_type(client, world):
+    # a pasted screenshot may arrive with a generic type or a misleading name
+    f = await upload(client, world, "alice", "image.png", jpeg(), "application/octet-stream")
+    assert f["content_type"] == "image/jpeg"
+    fake = await upload(client, world, "alice", "x.png", b"not an image", "image/png")
+    assert fake["content_type"] == "image/png"  # claim kept, but never sent as vision
+
+
+async def test_non_images_and_fake_images_are_files_only(client, world):
+    svg = await upload(client, world, "alice", "d.svg", b"<svg/>", "image/svg+xml")
+    fake = await upload(client, world, "alice", "x.png", b"not an image", "image/png")
+    await client.post("/api/chat", headers=world.h("alice"), json={
+        "text": "see", "conversation_id": "c", "attachments": [svg["id"], fake["id"]]})
+    req = await run_once(world)
+    assert req.images == []
+    assert req.prompt.endswith("Attached files: attachments/d.svg, attachments/x.png")
+
+
+async def test_chat_rejects_more_than_six_images(client, world):
+    ids = [(await upload(client, world, "alice", f"{i}.png", png(), "image/png"))["id"]
+           for i in range(MAX_IMAGES_PER_MESSAGE + 1)]
+    r = await client.post("/api/chat", headers=world.h("alice"),
+                          json={"text": "hi", "attachments": ids})
+    assert r.status_code == 422
+    ok = await client.post("/api/chat", headers=world.h("alice"),
+                           json={"text": "hi", "attachments": ids[:MAX_IMAGES_PER_MESSAGE]})
+    assert ok.status_code == 200
+
+
+async def test_large_images_are_downscaled_for_the_model(client, world, monkeypatch):
+    monkeypatch.setattr(run_module, "MAX_IMAGE_BYTES", 600_000)
+    noise = Image.frombytes("RGB", (1200, 900), os.urandom(1200 * 900 * 3))
+    buf = io.BytesIO()
+    noise.save(buf, "PNG")
+    big = buf.getvalue()
+    f = await upload(client, world, "alice", "big.png", big, "image/png")
+    await client.post("/api/chat", headers=world.h("alice"), json={
+        "text": "see", "conversation_id": "c", "attachments": [f["id"]]})
+    req = await run_once(world)
+    attachments = req.workspace / "attachments"
+    assert (attachments / "big.png").read_bytes() == big  # original kept as a file
+    (shown,) = req.images
+    assert shown == attachments / "big.downscaled.jpg"
+    assert shown.stat().st_size <= 600_000
+    with Image.open(shown) as img:
+        assert max(img.size) < 1200
+
+
+async def test_upload_download_names_the_owner(client, world):
+    f = await upload(client, world, "alice", "pic.png", png(), "image/png")
+    r = await client.get(f"/api/uploads/{f['id']}", headers=world.h("alice"))
+    assert r.status_code == 200
+    assert r.headers["x-handler-upload-owner"] == "alice"
+    assert r.headers["content-type"] == "image/png"
 
 
 def test_codex_argv_includes_images(tmp_path):
@@ -92,3 +172,22 @@ def test_codex_argv_includes_images(tmp_path):
     assert argv[-3:] == ["resume", "sess", "describe"]
     assert "-i" not in CodexHarness("codex-test")._argv(
         RunRequest(run_id="r", thread_key="t", workspace=tmp_path, home=tmp_path, prompt="p"))
+
+
+async def test_run_shows_at_most_six_images_per_message(client, world):
+    # The chat route refuses more; events from other paths are capped at run time.
+    ids = [(await upload(client, world, "alice", f"{i}.png", png(), "image/png"))["id"]
+           for i in range(MAX_IMAGES_PER_MESSAGE + 1)]
+    key = "chat:alice:c"
+    await world.store.put(
+        Event(type="chat.message", source="web", payload={"text": "x", "attachments": ids},
+              idempotency_key="alice:cap", user_id="alice", thread_key=key),
+        ThreadSpec(key=key, type=ThreadType.CHAT, lane=Lane.INTERACTIVE,
+                   owner_user_id="alice", harness="codex"))
+    req = await run_once(world)
+    assert len(req.images) == MAX_IMAGES_PER_MESSAGE
+    assert all(p.parent == req.workspace / "attachments" for p in req.images)
+    assert f"attachments/{MAX_IMAGES_PER_MESSAGE}.png (image not shown" in req.prompt
+    # codex gets the same workspace copies as -i values
+    argv = CodexHarness("codex-test")._argv(req)
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "-i"] == [str(p) for p in req.images]
