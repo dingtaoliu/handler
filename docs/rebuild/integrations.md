@@ -35,7 +35,7 @@ Each instance builds its integrations, so nothing is shared between instances (s
 
 ## Packaging
 
-Integrations live in-tree under `src/handler/integrations/<name>/`. A `handler.integrations` entry-point group for pip-installable integrations is added later, when a second external app needs one. Keep the integration interface free of imports from core internals so that move stays cheap.
+Integrations live in-tree under `src/handler/runtime/integrations/<name>/`. A `handler.integrations` entry-point group for pip-installable integrations is added later, when a second external app needs one. Keep the integration interface free of imports from core internals so that move stays cheap.
 
 ## Initial integrations
 

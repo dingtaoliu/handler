@@ -124,7 +124,7 @@ Working mode: the main session acts as architect and hands implementation to bac
 - **Credentials:** the Postgres credentials were rotated on 2026-10-18.
 
 **Next:**
-1. **Integrations refactor** (`docs/rebuild/integrations.md`, approved). **Phase 1 started on 2026-10-18 19:50** on branch `feat/integrations-p1` (worktree `../handler-wt-integrations`). Its progress is in `docs/rebuild/integrations-progress.md` on that branch. It may have been cut off by the session limit: check the branch, finish phase 1, then run phases 2–5 one after another as the design describes.
+1. **Integrations refactor** (`docs/rebuild/integrations.md`, approved). **Phase 1 is merged** (interface, registry, per-instance `HANDLER_INTEGRATIONS`, `GET /api/ui/manifest`; no behaviour change). The owner approved its decisions: the package is `src/handler/runtime/integrations/`; legacy wiring stays until each integration takes over; `HANDLER_INTEGRATIONS` is not inherited by other instances; `chat`/`automation` are reserved thread types. **Next: phase 2**, moving code into the `crontal`, then `email_intake`, then `google` integrations. The ordered plan is in `docs/rebuild/integrations-progress.md`.
 2. **Native read-only Drive tools** (recommended over MCP). The owner must add `drive.readonly`, enable the Drive API and reconnect. Waiting on the owner's go-ahead.
 
 **Waiting on the owner:**
