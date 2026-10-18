@@ -54,6 +54,15 @@ instances can therefore consume up to 12 database connections; reserve capacity
 for Crontal's web processes and maintenance within the database plan's limit.
 Run concurrency is **per instance**, so add both limits when sizing the dyno.
 
+## Notifications to Crontal
+
+Each instance pushes its notifications to its own Crontal deployment through a
+durable outbox when its `CRONTAL_URL`, `CRONTAL_AGENT_TOKEN` and
+`HANDLER_WEBHOOK_SECRET` are set (for BSS, the `HANDLER_I_BSS__…` variants).
+Deliveries carry `X-Handler-Instance: <name>` (`main` for the root instance)
+and are signed with that instance's webhook secret, which must match the
+secret registered for it in Crontal. See `notifications.md`.
+
 ## URLs and OAuth
 
 Use `https://handler.example/i/bss` as BSS's Handler base URL in the associated

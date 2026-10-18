@@ -33,12 +33,15 @@ from .gateway.tokens import RunTokens
 from .harness.codex import SANDBOX_MODES, CodexHarness, codex_binary
 from .gateway.crontal_api import CrontalApiTools, crontal_base_url
 from .harness.openai_agents import OpenAIAgentsHarness
+from .integrations.crontal.sink import crontal_sink_from_config
 from .memory import MemoryTools
+from .notifications import FailureNotifier, Notifier
 from .observability.logging import configure_json_logging
 from .observability.pricing import PriceTable
 from .run import RunConfig, RunExecutor, thread_slug
 from .scheduler import Scheduler
 from .settings import HarnessName, InstanceDefaults, SettingsService
+from .sinks import Outbox
 from .store.postgres import PostgresStore
 from .store.sqlite import SQLiteStore
 from .tools.automation import AutomationTools
@@ -333,11 +336,21 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         emit_event = thread_router(store)
 
         users = [u.strip() for u in args.users.split(",") if u.strip()]
+        # Output sinks: integrations register only when configured.
+        outbox = Outbox(store)
+        crontal_sink = crontal_sink_from_config(
+            args.crontal_url, env.get("CRONTAL_AGENT_TOKEN"), env.get("HANDLER_WEBHOOK_SECRET"),
+            instance_name)
+        if crontal_sink is not None:
+            outbox.register(crontal_sink)
+            logger.info("crontal notification sink on", extra={"url": crontal_sink.url})
+        notifier = Notifier(store, bus, outbox=outbox, users_provider=lambda: users,
+                            instance=instance_name)
         memory_tools = MemoryTools(store)
         scheduler = Scheduler(store, default_harness=settings.harness_source("automation"))
         gateway = Gateway(store, GrantPolicy(grants_cfg), emit_event=emit_event)
         for provider in (memory_tools, AutomationTools(store, scheduler), ThreadTools(store, bus),
-                         NotifyTools(store, bus, users_provider=lambda: users)):
+                         NotifyTools(store, bus, notifier=notifier)):
             gateway.register(provider)
         tokens = RunTokens()
         mcp_app = create_mcp_app(gateway, tokens)
@@ -380,7 +393,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             store, harnesses, bus, config, PriceTable.from_yaml(),
             tokens=tokens, mcp_url=f"http://{local_host}:{args.port}{base_path}/mcp/",
             settings=settings, memory_tools=memory_tools,
-            workspace_sync=workspace_sync,
+            workspace_sync=workspace_sync, failure_notifier=FailureNotifier(notifier),
         )
         dispatcher = Dispatcher(
             store, executor, lease_seconds=config.lease_seconds,
@@ -471,6 +484,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                 asyncio.create_task(dispatcher.run_forever(stop), name="dispatcher"),
                 asyncio.create_task(scheduler.run_forever(stop), name="scheduler"),
                 asyncio.create_task(housekeeping(), name="housekeeping"),
+                asyncio.create_task(outbox.run_forever(stop), name="outbox"),
                 asyncio.create_task(workspace_sync.run_periodic(stop, args.sync_interval),
                                     name="workspace-sync"),
             ]
