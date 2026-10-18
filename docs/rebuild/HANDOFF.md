@@ -102,9 +102,9 @@ Repo and code layout:
 
 - **Missing Crontal files.** Crontal's file records with `local_files/...` keys (ids 1, 34, 265, 298, 331, 332) are missing from S3; they were probably uploaded to dyno disk before Bucketeer was attached. Downloads 404 in the UI too. Investigate `hephaestus-web-app`, and make sure all uploads go to S3.
 - **Native harness transcripts.** Tool calls show their output but not their arguments in the UI.
-- **Old Codex threads.** Threads created before the switch still use Codex: 3 to 7 minutes per turn before the sync fix, much faster now. New chats use `openai_agents`.
+- **Old Codex threads.** Threads created before the switch still use Codex. Decided (2026-10-18): this is fine. A thread keeps the harness it was created with; no migration.
 - **Gmail connector.** Not built: Google OAuth client, self-hosted Google Workspace MCP and handler-owned OAuth.
-- **Authorization.** The authorization system for users and the agent (above) is planned.
+- **Authorization.** The authorization system for users and the agent (above) is planned. Not a priority yet (2026-10-18).
 - **Pricing.** `prices.yaml` rates are null, so costs show as unpriced.
-- **Workspace sync deletions.** Sync never deletes remote files (`known-issues.md` §1).
+- **Workspace sync deletions.** Sync never deletes remote files (`known-issues.md` §1). To be fixed, but low priority (2026-10-18).
 - **Codex jobs.** Close stdin (`< /dev/null`). Codex's sandbox makes `.git` read-only, so the driver commits its work. The Codex plan is $20 Plus: run at most 2 jobs at a time.
