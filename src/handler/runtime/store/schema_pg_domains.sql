@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS connections (
 CREATE INDEX IF NOT EXISTS connections_lookup ON connections(connector, owner, status);
 CREATE INDEX IF NOT EXISTS connections_owner ON connections(owner, created_at);
 
+-- Encrypted secret values referenced by connections.secret_ref.
+CREATE TABLE IF NOT EXISTS secrets (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
 -- users
 CREATE TABLE IF NOT EXISTS users (
     seq BIGSERIAL,

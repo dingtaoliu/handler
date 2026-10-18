@@ -255,3 +255,21 @@ class ConnectionStore(Protocol):
         ...
 
     async def list_connections(self, owner: str | None = None) -> list[Connection]: ...
+
+    async def delete_connection(self, connection_id: str) -> bool:
+        """Remove a connection record; False when it did not exist."""
+        ...
+
+
+class SecretStore(Protocol):
+    """Opaque secret values by key (connections point at them via secret_ref).
+
+    The store keeps whatever string it is given; callers encrypt first
+    (gateway/secret_box.py) so the database never holds plaintext tokens.
+    """
+
+    async def put_secret(self, key: str, value: str) -> None: ...
+
+    async def get_secret(self, key: str) -> str | None: ...
+
+    async def delete_secret(self, key: str) -> bool: ...
