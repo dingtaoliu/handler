@@ -110,175 +110,34 @@ Repo and code layout:
 - **Codex jobs.** Close stdin (`< /dev/null`). Codex's sandbox makes `.git` read-only, so the driver commits its work. The Codex plan is $20 Plus: run at most 2 jobs at a time.
 - **Crontal notification list should load in pages (backlog, 2026-10-18).** The bell/inbox component in Crontal's frontend (`NotificationBell` / `notification-dropdown`) should show only the most recent N (e.g. 10) with a "See more" control that loads older pages (cursor/limit API), instead of keeping every notification in the component. It must still scale once handler pushes notifications into Crontal.
 
-## 7. In flight (2026-10-18, end of session)
+## 7. Current state (updated 2026-10-18 19:45 by the lead)
 
-Working mode: the main session acts as architect and hands implementation to background sub-agents in git worktrees. The lead merges into `rebuild`/`main`, runs tests and deploys.
+Working mode: the main session acts as architect and hands implementation to background sub-agents in git worktrees. The lead merges into `rebuild`/`main`, runs tests and deploys with the hephaestus `deploy` skill.
 
-**Done today and deployed:**
-- **Native-harness tool arguments.** Tool calls in native-harness transcripts now show their arguments.
-- **Pricing.** `prices.yaml` has official rates, and the double-billed cache writes are fixed.
-- **Default labels.** Settings show the real default model and effort, e.g. "Default (gpt-6.1-sol)".
-- **Crontal storage.** 20 file rows with no S3 object were deleted after backup `b015`, and Crontal now refuses to start outside dev/test without S3.
-- **Email intake** (`docs/rebuild/email-intake.md`), live on `crontal-agent`:
-  - Cloudflare Worker `crontal-email-intake` (Cloudflare account `yz2936@nyu.edu`) is deployed.
-  - The routing rule for `contact@crontal.ai` now points to the Worker. To roll back, change the rule's action to forward to `crontal.contacts@gmail.com`.
-  - `email.act_as=1` (Danny, Brava Canada).
-  - **`email.allowed_senders` is EMPTY**, so every email is stored and ignored. Needs the client's sender addresses.
-  - Not yet verified end to end. Next: a test email should still reach the Gmail inbox.
-- **Gmail connector** (`docs/rebuild/gmail-connector.md`), live:
-  - Google project `crontal-test`, an agentic OAuth client, published without verification, scope `gmail.modify`.
-  - `crontal.contacts@gmail.com` is connected on `crontal-agent`.
-  - Handler-side `return_to` for connecting from Crontal is live (`HANDLER_RETURN_TO_ORIGINS=https://crontal.ai`).
+**Live:** handler `crontal-agent` @ `6e1db05` (v35+); Crontal `hephaestus-backend-test` v110 @ `25d45a4`.
+- **Instances, all on one dyno:** `main` (Brava Canada, merchant 2) at `/`, `bss` (Brava Stainless Steel, merchant 1) at `/i/bss`. Crontal routes requests through its `handler_instance` registry. The separate `crontal-agent-bss` app has been deleted.
+- **Notifications:** pushed from handler into Crontal through the generic durable `deliveries` outbox and the Crontal sink. Crontal stores them as `handler_notification` rows and receipts (migration `s4o5p6q7r8t9`).
+- **Tasks:** the `/api/tasks` API, handler's Tasks tab, and a Tasks tab in Crontal's agent panel. The debug trace (`steps`) is admin-only in the tasks API.
+- **Chat images:** paste, drop or pick images in Crontal's panel. Both harnesses get them as vision input, with copies kept in the workspace.
+- **Gmail:** read, search, attachments and drafts, plus `gmail_send` / `gmail_send_draft`. Sends always need approval (`explicit_allow_only`), and the approval pins the exact content. The `google_workspace_mcp` sidecar and Google's preview MCP were evaluated and rejected for now; see `gmail-connector.md` §4.
+- **Email intake:** `contact@crontal.ai` goes through the Cloudflare Worker to `/ingest/email`. Senders are gated by a **blocklist** (intentional, by the owner's decision) plus DKIM. It acts as user 1.
+- **Credentials:** the Postgres credentials were rotated on 2026-10-18.
 
-**Decided:**
-- **Instances are scoped to merchants.** Brava Canada (merchant 2, Danny) runs instance `main`, which is today's `crontal-agent`. Brava Stainless Steel (merchant 1, Eric, `yz2936@nyu.edu`) runs instance `bss`.
-- **All instances share one dyno.** One process hosts every instance under `/i/<name>/`, and the root instance is also served at `/`.
+**Next:**
+1. **Integrations refactor** (`docs/rebuild/integrations.md`, approved). It is unblocked.
+2. **Native read-only Drive tools** (recommended over MCP). The owner must add `drive.readonly`, enable the Drive API and reconnect. Waiting on the owner's go-ahead.
 
-**Open branches (unmerged; check whether each finished before using it):**
-- hephaestus `feat/handler-google-connection` (`f1a86ac`): the Google account card in Crontal's Handler settings. Merge it together with the next item.
-- hephaestus `feat/handler-instances`: the `handler_instance` registry (merchant → base_url plus secrets), a CLI, merchant-based entitlement, routing for the proxy and the outbox, and agent tokens limited to their own merchant. Base URLs may include a path prefix.
-- handler `feat/multi-instance` (worktree `../handler-wt-multi`): the multi-instance host, `HANDLER_INSTANCES`, `HANDLER_I_<NAME>__<VAR>`, and the runbook in `docs/rebuild/multi-instance.md`.
+**Waiting on the owner:**
+- Rotate the OpenAI key (`OPENAI_API_KEY` on Crontal, `CODEX_API_KEY` on `crontal-agent`) and the Bucketeer keys.
+- Send a test email to `contact@crontal.ai` to confirm the Gmail copy still arrives.
 
-**Separate app `crontal-agent-bss`:**
-- It was provisioned (schema `handler_bss`, prefix `handler/bss/`, persona adapted to the merchant) and is now **scaled to 0**.
-- Its secrets are in the session scratchpad file `bss_instance_secrets.env`, which may be gone. They are also in `heroku config -a crontal-agent-bss`.
-- Delete the app (with the owner's OK) once `bss` runs inside `crontal-agent`.
+**Backlog:**
+- Paginate Crontal's notification list (see §6).
+- Encrypt the secrets in Crontal's `HandlerInstance` registry.
+- `/api/runs/{id}` still returns steps to non-admins; make them admin-only.
+- Retention for run history.
+- The failure-notice rate limit is kept in memory.
 
-**Rollout order:**
-1. Deploy the multi-instance handler with only `main` and check nothing changed.
-2. Add the `HANDLER_I_BSS__*` vars and redeploy.
-3. Back up the database, deploy Crontal (migrate), then register `main` (root URL) for merchant 2 and `bss` (`…/i/bss`) for merchant 1.
-4. Check Handler as Danny and as Eric.
-5. Remove Crontal's legacy global `HANDLER_*` vars.
-
-**Infrastructure notes:**
-- Instances share Crontal's Postgres (Essential-1: one database user, 20 connections) and one Bucketeer key, so isolation is enforced only by the app. For a hard boundary, move to Standard-0 with a user per schema and a bucket per instance.
-- Rotate `hephaestus-backend-test`'s Bucketeer, OpenAI and database credentials: they were printed in a session log.
-
-## 8. Continuation: multi-instance release prepared (2026-10-18)
-
-The in-flight branches in §7 are now implemented and merged:
-
-- Handler `feat/multi-instance` implementation `dc3fb65`, merged to `rebuild`.
-  Runbook: `docs/rebuild/multi-instance.md`. Runtime suite: **664 passed,
-  2 skipped**. Per-instance configuration uses `HANDLER_I_<NAME>__<ENV_VAR>`.
-- Crontal merchant registry `ddad985` and Google connection card `e2faefb`
-  are merged and pushed to `main`. Backend suite passed 227 tests plus 22
-  subtests; after merging Google, the combined focused suite passed 54 tests.
-  Frontend build and targeted ESLint passed.
-- Shared database backup **b017** completed successfully.
-- Containers are prepared for `crontal-agent` and `hephaestus-backend-test`.
-  **No release/configuration/registry mutation has been performed.**
-- The Crontal deployment skill explicitly requires confirmation before release.
-  Continue with the rollout order in §7 after the owner confirms. Detailed
-  Crontal checklist: `docs/handler-instances-rollout-2026-10-18.md`.
-- Protected scratch configuration snapshots/payload are under
-  `/tmp/crontal-rollout` (directory 700, files 600). Never print their contents.
-  They can be reconstructed from Heroku if absent. The prepared BSS payload
-  reuses its existing keys, `handler_bss` schema and `handler/bss/` prefix,
-  changes public URL to the shared host's `/i/bss`, and limits each Handler
-  Postgres pool to 3 connections (plus each store's LISTEN connection).
-- Keep main's public URL at the root: its Google OAuth callback is already
-  registered there. BSS intentionally inherits neither main Google configuration
-  nor main email intake secret. A direct Handler browser login is needed once
-  when switching to named-instance browser storage keys.
-- Legacy outbox rows without an instance ID are skipped after registry
-  activation; they must never be inferred/rerouted into another merchant.
-- Register both merchant rows in one database transaction to avoid a partial
-  switch from legacy fallback. After checks, remove only Crontal's deprecated
-  global URL/admin/webhook/agent-token variables, keeping HANDLER_ENABLED.
-
-## 9. Released: two Crontal merchants on one dyno (2026-10-18)
-
-Owner approved both deployments. This supersedes the pending status in §8.
-
-- `crontal-agent`: image `f19dcb728aea` released in v28; current **v30** runs
-  `HANDLER_INSTANCES=main,bss`. One Basic web dyno is up. Both pools cap at 3
-  connections each, plus their LISTEN connections.
-- Crontal: image `8d1de39aad7e` released in v104; current **v105** removes the
-  obsolete global HANDLER_URL/admin/webhook/agent credentials. HANDLER_ENABLED
-  remains on. Migration is now `r3n4o5p6q7s8`; backup is **b017**.
-- Merchant 2/user 1 (Danny) routes to main at the root. Merchant 1/user 2 (Eric)
-  routes to BSS at `/i/bss`. Registry activation inserted both rows atomically.
-- Live proxy/persona/threads/Google checks passed for both users, and repeated
-  after legacy globals were removed. Each agent token can mint a JWT only for
-  its own merchant. Both Crontal MCP discovery calls passed. Webhook signature
-  checks passed without creating events. Cross-instance admin keys return 401;
-  unknown instance routes return 404.
-- Main's Gmail connection and root Google callback are preserved. BSS has no
-  inherited Google/email configuration; its existing persona/schema/S3 prefix
-  are preserved. BSS user `2` is provisioned as admin in its own store only.
-- Crontal's served frontend matches tested bundle `index-UN7gf22n.js` exactly.
-  Final log review found no recent runtime errors. Open SSE streams were
-  cancelled during the bounded HTTP drain on restarts, followed by completed
-  workspace sync and clean shutdown; pre-registration BSS connector 401 retries
-  resolved with registry activation.
-- The separate `crontal-agent-bss` app remains scaled to zero, not deleted.
-- The Crontal deployment skill now covers Handler and coordinated releases;
-  existing user authorization persists through releases and migrations.
-- Full evidence: hephaestus `docs/handler-instances-rollout-2026-10-18.md`.
-
-## 10. Chat activity visibility fixed and released (2026-10-18)
-
-User reported automations completed but their work was not visible in Chat.
-Handler **v31**, image `36f4a50bfe80`, deploys `accf30e` + `0bdb6e7`:
-
-- Chat keeps one instance-wide, permission-filtered SSE subscription even when
-  a thread is selected. Background work marks its thread with new activity and
-  a badge/toast without moving the user's selected thread.
-- Active thread run steps show assistant text and tool progress before the
-  final transcript commits. Reconnect, focus and five-second visible-page
-  refresh recover durable activity; final transcript replaces previews.
-- Automations use their names, include scheduled prompts, and show successful
-  notify message text directly in the transcript. Own-user notification events
-  produce a toast; another recipient's event does not.
-- Chat initially opens the most recent/active listed thread once. New still
-  explicitly starts a blank conversation.
-- Transcript API serves the newest 200 messages chronologically, fixing threads
-  freezing on their first 200 entries. Store defaults remain oldest-first for
-  harness recap/replay; no schema migration.
-- Validation: **666 passed, 2 skipped**, JS syntax/behavior tests, and headless
-  Chrome rendering with isolated mock APIs (named automation, visible reminder,
-  running assistant/tool activity, global SSE request). No test model calls.
-- Live app.js matches tested source byte-for-byte. Root/main/BSS health and
-  cross-instance auth checks passed; main Gmail and BSS isolation preserved.
-- Final live schedule check found `Every-minute test message` disabled, last
-  fired at 21:33:31 UTC. It was left disabled; no extra run/notification was
-  created for verification. The authenticated global SSE endpoint opened, but
-  no automation event is expected while this schedule is disabled. No runtime
-  errors appeared after the v31 dyno started.
-
-## 11. Crontal panel + blocklist rollout (2026-10-18)
-
-Handler **v32** (`70fd6e61e5d2`), Crontal **v106** (`ff6d080ce010`), backup
-**b018**. Source commits: Handler `79fcaf3` + `2e71be6`; Crontal `8bdac7d`,
-`668d6e9`, `3f7abb5`. Both deployed and verified.
-
-- Durable thread names, per-user read watermarks, last-message ordering and
-  batch metadata are in both stores. Tables thread_names/thread_views and
-  indexes initialize automatically. GET threads includes authorized shared
-  non-chat work; private chat ownership stays enforced. PUT title and POST read
-  return complete enriched thread objects.
-- thread_set_title is scoped to its run's chat; prompt requests a short name,
-  no extra model call. Generated names never overwrite manual names. Existing
-  chats fall back to their first message, emails to subject, automations to name.
-- Crontal panel horizontal pointer/keyboard resize restored, unread dots,
-  sort/rename, background threads, live durable run steps and explicit notify
-  message text are visible. Crontal's bell merges Handler notifications with
-  recipient checks and proxies read actions without copying records/outbox loops.
-- User explicitly changed sender policy to a BLOCKLIST. email.blocked_senders
-  is empty, so authenticated senders pass unless blocked; DKIM remains on.
-  Either header/envelope sender matching a blocked address/domain rejects mail.
-  Legacy allowed_senders settings are discarded on validation (not inverted).
-  Main email settings saved with act_as=1 and previous instructions preserved.
-- Worker delivery was already working: Danny's test at 21:19 UTC reached main,
-  Gmail copy forwarding succeeded, and the event was ignored as allowlist_empty.
-  It has no raw body to replay. A fresh email is needed for end-to-end retest.
-  Worker mail creates EMAIL threads, not GMAIL threads; connected Gmail tools
-  do not continuously import a mailbox. BSS email/Gmail remain unconfigured.
-- Handler suite: 672 passed, 2 skipped. Crontal full backend238 +22 subtests;
-  final integration61; frontend build/lint/helper regressions passed. Live Chrome
-  verified names, unread indicators, keyboard/pointer resize in Crontal. Served
-  bundle index-phSN0B3y.js matches source build; no recent runtime errors.
-- Every-minute test automation remains disabled. No mail was sent and no model
-  turn was artificially triggered for verification.
+**Ops notes:**
+- `heroku run` from a background shell can hang after it finishes. Check `alembic_version` directly.
+- Prune Docker's build cache regularly; it once filled the disk at about 50 GB.
