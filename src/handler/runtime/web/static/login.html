@@ -20,15 +20,12 @@ async function enter(token, actAs) {
   try {
     const headers = {Authorization: "Bearer " + token};
     if (actAs) headers["X-Handler-User"] = actAs;
-    const response = await fetch("/timeline", {headers, cache: "no-store"});
+    const response = await fetch("/api/me", {headers, cache: "no-store"});
     if (!response.ok) throw new Error("Sign in failed. Check your token and user.");
-    const html = await response.text();
     sessionStorage.setItem("handler.token", token);
     if (actAs) sessionStorage.setItem("handler.actAs", actAs);
     else sessionStorage.removeItem("handler.actAs");
-    // Only the authenticated, same-origin static page is executed; input is
-    // never interpolated into markup. Keep /login as the reloadable address.
-    document.open(); document.write(html); document.close();
+    location.replace("/");
   } catch (error) {
     document.getElementById("error").textContent = error.message;
   }

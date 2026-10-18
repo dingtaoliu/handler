@@ -44,7 +44,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "handler.channels" = ["static/*"]
-"handler.runtime.web" = ["static/*"]
+"handler.runtime.web" = ["static/*", "static/app/*"]
 "handler.runtime.observability" = ["*.yaml"]
 "handler.runtime.store" = ["*.sql"]
 
