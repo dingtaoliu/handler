@@ -132,7 +132,7 @@ def email_ingest_router(
             dns = doh_resolver()
         gate = await check_sender(
             body, parsed, envelope_from=envelope_from,
-            allowed_senders=list(config.get("allowed_senders") or []),
+            blocked_senders=list(config.get("blocked_senders") or []),
             require_auth=bool(config.get("require_auth", True)), resolver=dns)
         acting = None
         reason = gate.reason

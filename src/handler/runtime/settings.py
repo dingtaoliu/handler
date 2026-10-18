@@ -115,10 +115,20 @@ class LimitsSettings(Section):
 class EmailSettings(Section):
     """Email intake (POST /ingest/email, fed by the Cloudflare Email Worker)."""
 
-    allowed_senders: list[str] = Field(
-        default_factory=list, title="Allowed senders",
-        description="Addresses (name@example.com) or domains (@example.com) whose forwarded "
-                    "mail the agent handles. Empty: nothing passes.")
+    blocked_senders: list[str] = Field(
+        default_factory=list, title="Blocked senders",
+        description="Addresses (name@example.com) or domains (@example.com) to ignore. "
+                    "Empty: accept all senders that pass authentication.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def remove_legacy_allowlist(cls, value):
+        # Old settings remain readable; allowlist entries are not block entries.
+        if isinstance(value, dict):
+            value = dict(value)
+            value.pop("allowed_senders", None)
+        return value
+
     require_auth: bool = Field(
         True, title="Require DKIM",
         description="Only accept mail with a valid DKIM signature aligned with the sender.")

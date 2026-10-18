@@ -60,13 +60,13 @@ def normalize_address(address: str) -> str:
     return f"{local.split('+', 1)[0]}@{domain}"
 
 
-def sender_allowed(address: str, allowed: list[str]) -> bool:
-    """Exact address (ignoring +tags) or an @domain / domain entry; empty list → False."""
+def sender_matches(address: str, entries: list[str]) -> bool:
+    """Exact address (ignoring +tags) or an @domain / domain entry; empty list matches nothing."""
     if not address or "@" not in address:
         return False
     normalized = normalize_address(address)
     domain = _domain(normalized)
-    for entry in allowed:
+    for entry in entries:
         entry = entry.strip().lower()
         if not entry:
             continue
@@ -134,16 +134,15 @@ def identities(parsed: ParsedEmail, envelope_from: str | None) -> list[str]:
 
 async def check_sender(
     raw: bytes, parsed: ParsedEmail, *, envelope_from: str | None,
-    allowed_senders: list[str], require_auth: bool, resolver: TxtResolver,
+    blocked_senders: list[str], require_auth: bool, resolver: TxtResolver,
 ) -> GateResult:
-    """Allowlist first (cheap), then a DKIM signature aligned with that sender."""
-    if not [s for s in allowed_senders if s.strip()]:
-        return GateResult(False, "allowlist_empty", None, None)
-    candidates = [c for c in identities(parsed, envelope_from)
-                  if sender_allowed(c, allowed_senders)]
+    """Block either sender identity before verifying aligned DKIM."""
+    candidates = identities(parsed, envelope_from)
+    for candidate in candidates:
+        if sender_matches(candidate, blocked_senders):
+            return GateResult(False, "sender_blocked", candidate, None)
     if not candidates:
-        return GateResult(False, "sender_not_allowed",
-                          parsed.sender.address or envelope_from, None)
+        return GateResult(False, "invalid_sender", None, None)
     if not require_auth:
         return GateResult(True, None, candidates[0], AuthVerdict(False, detail="not required"))
     results = await verify_message(raw, resolver)

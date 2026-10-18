@@ -1,6 +1,6 @@
 # Email intake (contact@crontal.ai → Crontal objects)
 
-Status: built on `feat/email-intake`, 2026-10-18. Not yet deployed.
+Status: deployed to main. Updated 2026-10-18: blocklist-based sender policy.
 
 ## Brief
 
@@ -33,8 +33,8 @@ sender → contact@crontal.ai → Cloudflare Email Worker ─┬─ message.forw
 | Idempotency | `email:<Message-ID>`. Without a Message-ID, a sha256 of the raw bytes is used. A duplicate gets 200 `duplicate: true` |
 | Size | 413 above 30 MiB (Cloudflare accepts up to 25 MiB). At most 100 attachments and 5 nested `message/rfc822` levels; anything skipped is listed in the event |
 | Parsing | Stdlib `email`, `policy=default` (`mail/parse.py`). See below |
-| Sender gate | Settings `email.allowed_senders` and `email.require_auth`. An empty list lets nothing through. Failing mail becomes an `ignored` event with `ignored_reason`, shown in Activity → *Ignored email*. It never creates a thread or files, and never reaches the agent |
-| Auth verdict | Handler verifies DKIM itself on the raw bytes (`mail/dkim.py`), because Cloudflare doesn't hand the Worker a trustworthy verdict (findings below). A pass needs a valid signature whose `d=` aligns with the allowlisted sender |
+| Sender gate | Settings `email.blocked_senders` and `email.require_auth`. An empty blocklist accepts every authenticated sender. Failing mail becomes an `ignored` event with `ignored_reason`, shown in Activity → *Ignored email*. It never creates a thread or files, and never reaches the agent |
+| Auth verdict | Handler verifies DKIM itself on the raw bytes (`mail/dkim.py`), because Cloudflare doesn't hand the Worker a trustworthy verdict (findings below). A pass needs a valid signature whose `d=` aligns with the sender |
 | Thread type | `email`: event `email.received`, key `email:<root id>`. The root is the first id of `References`, else `In-Reply-To`, else the message's own Message-ID. Background lane, visible to all users (it isn't a `chat:` key) |
 | Acting user | Setting `email.act_as` (a handler user id; on the Crontal instance that's the Crontal user id). The run's `acting_as` reads the setting live, falling back to the thread owner set at ingest. `crontal_api_*` then mint that user's JWT (`POST /api/v1/agent-access/token` with `X-Crontal-User`), the same path chat uses with its owner. The user must exist and be enabled, the same rule as `X-Handler-User`. If not, mail is ignored with `act_as_not_configured` |
 | Harness/model | `threads.email` in Settings → Threads, like the other types. An instance whose saved threads settings predate `email` starts the type with its `crontal` entry (same harness), not the bare default |
@@ -81,9 +81,14 @@ Identities checked, in order:
 2. the envelope sender (auto-forward rules keep the original From but send from the
    client's mailbox).
 
-An identity passes if it matches `allowed_senders`:
+A message is blocked if either its header or envelope identity matches
+`blocked_senders`:
 - an exact address, ignoring `+tags`;
 - `@domain`, or a bare `domain`, for that exact domain.
+
+An empty list blocks nobody. Legacy saved `allowed_senders` values are discarded
+when read; they are never converted into blocked addresses. Other saved settings
+and instructions are preserved.
 
 With `require_auth`, a DKIM signature must also verify:
 - algorithm `rsa-sha256` (key ≥1024 bits) or `ed25519-sha256`;
@@ -98,8 +103,8 @@ The verifier is tested against fixtures signed by dkimpy, an independent
 implementation: relaxed, simple and ed25519 (`tests/runtime/fixtures/email/make_fixtures.py`).
 
 Ignore reasons:
-- `allowlist_empty`;
-- `sender_not_allowed`;
+- `sender_blocked`;
+- `invalid_sender`;
 - `auth_failed` (the detail says why: no signature, body hash mismatch, not aligned,
   key lookup failed, …);
 - `act_as_not_configured`.
@@ -132,7 +137,7 @@ Ignore reasons:
   the sender's domain, so manual forwards pass. A Google Workspace domain *without*
   custom DKIM is signed as `<domain>.<n>.gappssmtp.com`, which doesn't align. In
   that case, set up DKIM for the domain, or (test only) turn `email.require_auth`
-  off and rely on the allowlist.
+  off and rely on the blocklist.
 
 ## Configuration
 
@@ -143,7 +148,7 @@ Ignore reasons:
 | Worker var | `FORWARD_TO` | `crontal.contacts@gmail.com` (verified destination) |
 | Worker var | `HANDLER_INGEST_URL` | `https://<crontal-agent web URL>/ingest/email` |
 | Worker var | `HANDLER_TIMEOUT_MS` | 60000 |
-| Handler settings `email` | `allowed_senders` | The client's forwarding addresses or `@domain` |
+| Handler settings `email` | `blocked_senders` | Addresses or `@domain` to ignore; empty accepts authenticated senders |
 | | `require_auth` | `true` (default) |
 | | `act_as` | Crontal admin user id (must exist as a handler user, as for chat) |
 | | `instructions` | Default prompt; editable |
@@ -158,7 +163,7 @@ is already `allow` on the Heroku instance.
    `heroku config:set HANDLER_EMAIL_SECRET=<secret> -a crontal-agent`.
 2. **Settings** (Handler UI → Settings → `email`, or
    `PUT /api/settings/email` with the admin key):
-   - `allowed_senders`: the client's addresses;
+   - `blocked_senders`: unwanted addresses or domains (empty initially);
    - `act_as`: the admin's user id;
    - `require_auth`: true.
 
@@ -168,12 +173,12 @@ is already `allow` on the Heroku instance.
    `HANDLER_INGEST_URL`, `wrangler secret put HANDLER_EMAIL_SECRET`,
    `wrangler deploy`, then switch the `contact@crontal.ai` routing rule to *Send to
    a Worker*.
-4. **Smoke test.** Forward a test RFQ from an allowlisted address. Expect:
+4. **Smoke test.** Forward a test RFQ from a non-blocked, DKIM-authenticated address. Expect:
    - `wrangler tail` shows `handler accepted the email` 202;
    - Handler Activity shows an `email:<id>` run;
    - the Gmail copy arrives as before.
 
-   From a non-allowlisted address, expect a 200 `ignored` row in Activity → *Ignored
+   From a blocked address, expect a 200 `ignored` row in Activity → *Ignored
    email*.
 5. **Rollback.** Switch the routing rule back to *Send to an email →
    crontal.contacts@gmail.com*.
