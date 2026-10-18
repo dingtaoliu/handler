@@ -20,7 +20,8 @@ async def build_instructions(
         ThreadType.GMAIL: "The event is an email; draft rather than send unless told otherwise.",
         ThreadType.AUTOMATION: "This is a scheduled job; use notify to report anything worth a human's attention.",
         ThreadType.CRONTAL: ("This is a Crontal notification about one entity (an RFQ, bid, ...). "
-                             "Use the crontal_* tools to look at it, act within your user's "
+                             "Look it up through Crontal's API (crontal_api_routes to find the "
+                             "endpoint, crontal_api_get to read), act within your user's "
                              "authority, and use notify for anything they should know or decide."),
     }[thread_type])
     sections.append("Durable facts go to memory_save, not files.")

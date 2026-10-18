@@ -26,11 +26,12 @@ from .gateway.mcp_server import create_mcp_app
 from .gateway.policy import GrantPolicy
 from .gateway.tokens import RunTokens
 from .harness.codex import SANDBOX_MODES, CodexHarness, codex_binary
+from .gateway.crontal_api import CrontalApiTools, crontal_base_url
 from .harness.openai_agents import OpenAIAgentsHarness
 from .memory import MemoryTools
 from .observability.logging import configure_json_logging
 from .observability.pricing import PriceTable
-from .run import RunConfig, RunExecutor
+from .run import RunConfig, RunExecutor, thread_slug
 from .scheduler import Scheduler
 from .settings import HarnessName, SettingsService
 from .store.postgres import PostgresStore
@@ -279,6 +280,12 @@ async def serve(args: argparse.Namespace) -> None:
                 logger.exception("housekeeping failed")
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=15)
+
+    crontal_token = os.environ.get("CRONTAL_AGENT_TOKEN")
+    if args.crontal_url and crontal_token:
+        gateway.register(CrontalApiTools(
+            crontal_base_url(args.crontal_url), crontal_token,
+            workspace_for=lambda key: config.workspaces_dir / thread_slug(key)))
 
     async def start_crontal_connector() -> None:
         """Discover Crontal's tools (retrying until reachable), then expose them."""
