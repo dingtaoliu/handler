@@ -632,6 +632,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         for _, router in contributions.routers:
             app.include_router(router)
         app.state.integrations = integrations
+        app.state.gateway, app.state.outbox = gateway, outbox
         app.state.identity_provider = (contributions.identity_provider[1]
                                        if contributions.identity_provider else None)
 
