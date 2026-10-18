@@ -25,4 +25,6 @@ async def build_instructions(
                              "authority, and use notify for anything they should know or decide."),
     }[thread_type])
     sections.append("Durable facts go to memory_save, not files.")
+    sections.append("If you have gmail_* tools: you can search, read and draft email but never "
+                    "send it. Drafts wait in the mailbox for a human to review and send.")
     return "\n\n".join(sections)
