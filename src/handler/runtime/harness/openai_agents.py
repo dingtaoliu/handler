@@ -34,12 +34,14 @@ from agents.exceptions import AgentsException, MaxTurnsExceeded
 from agents.mcp import MCPServerStreamableHttp
 from openai.types.shared import Reasoning
 
+from ..settings import HARNESS_DEFAULT_MODELS
 from ..types import TokenUsage
 from .base import HarnessError, RunEvent, RunEventKind, RunRequest
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TURNS = 40
+DEFAULT_MODEL = HARNESS_DEFAULT_MODELS["openai_agents"]
 MAX_READ_BYTES = 200_000
 _RETRYABLE = (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError,
               openai.InternalServerError)
@@ -174,9 +176,16 @@ class OpenAIAgentsHarness:
                  default_reasoning_effort: str | None = None,
                  client: openai.AsyncOpenAI | None = None) -> None:
         self.client = client or openai.AsyncOpenAI(api_key=api_key)
-        self.default_model = default_model or "gpt-6.1-sol"
+        self.default_model = default_model or DEFAULT_MODEL
         self.default_reasoning_effort = default_reasoning_effort
         self._runs: dict[str, Any] = {}
+
+    async def defaults(self) -> dict[str, str | None]:
+        """Model and effort a run uses when the request sets neither.
+
+        With no effort the request omits reasoning, so the API picks it (None).
+        """
+        return {"model": self.default_model, "reasoning_effort": self.default_reasoning_effort}
 
     async def _session(self, req: RunRequest) -> tuple[str, bool]:
         if req.session_id:

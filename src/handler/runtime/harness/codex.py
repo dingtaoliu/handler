@@ -7,6 +7,8 @@ import os
 import re
 import shutil
 import signal
+import tempfile
+import time
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -228,6 +230,65 @@ class CodexHarness:
         self.extra_args = list(extra_args or [])
         self.env_allowlist = tuple(env_allowlist)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self._catalog: list[dict] | None = None
+        self._catalog_retry_at = 0.0
+        self._catalog_lock = asyncio.Lock()
+
+    async def defaults(self) -> dict[str, str | None]:
+        """Model and effort a run uses when the request sets neither.
+
+        Codex runs with --ignore-user-config, so without -m it takes the first
+        listed model of its catalog (lowest priority), and without an effort
+        that model's default reasoning level.
+        """
+        model, effort = self.default_model, self.default_reasoning_effort
+        if model is None or effort is None:
+            catalog = await self.model_catalog()
+            if model is None:
+                listed = sorted((m for m in catalog if m.get("visibility") == "list"),
+                                key=lambda m: m.get("priority", 1 << 30))
+                model = listed[0].get("slug") if listed else None
+            if effort is None:
+                entry = next((m for m in catalog if m.get("slug") == model), None)
+                effort = entry.get("default_reasoning_level") if entry else None
+        return {"model": model, "reasoning_effort": effort}
+
+    async def model_catalog(self) -> list[dict]:
+        """Codex's model catalog (`codex debug models`), cached; [] if unavailable."""
+        async with self._catalog_lock:
+            if self._catalog is None and time.monotonic() >= self._catalog_retry_at:
+                self._catalog = await self._load_catalog()
+                if self._catalog is None:
+                    self._catalog_retry_at = time.monotonic() + 300
+            return self._catalog or []
+
+    async def _load_catalog(self) -> list[dict] | None:
+        with tempfile.TemporaryDirectory(prefix="handler-codex-catalog-") as home:
+            if self.auth_json is not None and self.auth_json.exists():
+                os.symlink(self.auth_json.resolve(), Path(home) / "auth.json")
+            env = {k: os.environ[k] for k in (*self.env_allowlist, *CODEX_CREDENTIAL_ENV)
+                   if k in os.environ}
+            env.update({"CODEX_HOME": home, "HOME": home})
+            # The refreshed catalog is what runs see; the bundled one is the fallback.
+            for extra in ([], ["--bundled"]):
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        self.binary, "debug", "models", *extra, env=env,
+                        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL)
+                    try:
+                        out, _ = await asyncio.wait_for(process.communicate(), 30)
+                    except TimeoutError:
+                        process.kill()
+                        await process.wait()
+                        continue
+                    if process.returncode == 0:
+                        models = json.loads(out).get("models")
+                        if isinstance(models, list):
+                            return [m for m in models if isinstance(m, dict)]
+                except (OSError, ValueError) as exc:
+                    logger.warning("codex model catalog unavailable: %s", exc)
+        return None
 
     def _argv(self, req: RunRequest) -> list[str]:
         argv = [

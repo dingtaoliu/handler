@@ -296,3 +296,10 @@ async def test_tool_arguments_reach_the_transcript(tmp_path, runner):
     assert calls_by_id["c2"]["name"] == "list_files" and calls_by_id["c2"]["input"] == {}
     assert calls_by_id["ws1"]["input"] == {"type": "search", "query": "steel"}
     assert inputs == {}
+
+
+async def test_defaults_report_what_a_bare_request_uses():
+    harness = oa.OpenAIAgentsHarness("k", default_reasoning_effort="low")
+    assert await harness.defaults() == {"model": "gpt-6.1-sol", "reasoning_effort": "low"}
+    harness = oa.OpenAIAgentsHarness("k", default_model="gpt-6-luna")
+    assert await harness.defaults() == {"model": "gpt-6-luna", "reasoning_effort": None}
