@@ -215,7 +215,8 @@ class OpenAIAgentsHarness:
                         names[str(call_id)] = tool
                         yield RunEvent(RunEventKind.TOOL_STARTED, {
                             "id": call_id, "tool": tool, "kind": raw.get("type", "function_call"),
-                            "input": _arguments(raw) or raw.get("action")}, raw=raw)
+                            "input": raw.get("action") if "arguments" not in raw else _arguments(raw)},
+                            raw=raw)
                         if raw.get("type") in _HOSTED_TOOLS:
                             # Hosted tools run inside the model call; no output item follows.
                             yield RunEvent(RunEventKind.TOOL_FINISHED, {
