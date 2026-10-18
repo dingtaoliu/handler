@@ -343,7 +343,10 @@ def admin_router(
         path = uploads.path(meta)
         if path is None:
             raise HTTPException(404, "File not found")
-        return FileResponse(path, media_type=meta.content_type, filename=meta.filename)
+        # The owner lets a proxy acting for one user (Crontal) refuse others' files:
+        # an admin principal may read every upload.
+        return FileResponse(path, media_type=meta.content_type, filename=meta.filename,
+                            headers={"X-Handler-Upload-Owner": meta.user_id})
 
     @router.delete("/api/uploads/{file_id}")
     async def delete_upload(file_id: str, principal: Principal = user) -> dict:

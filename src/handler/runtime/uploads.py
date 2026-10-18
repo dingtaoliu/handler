@@ -8,6 +8,8 @@ import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .images import sniff
+
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_FILES_PER_REQUEST = 10
 _META = "meta.json"
@@ -61,15 +63,19 @@ class UploadStore:
         directory.mkdir(parents=True)
         path = directory / name
         size = 0
+        head = b""
         try:
             with path.open("wb") as out:
                 for chunk in chunks:
+                    if len(head) < 16:
+                        head += bytes(chunk[: 16 - len(head)])
                     size += len(chunk)
                     if size > max_bytes:
                         raise UploadTooLarge(f"{name} exceeds {max_bytes} bytes")
                     out.write(chunk)
+            # A recognised image gets its real type (pasted files often claim none).
             meta = UploadedFile(file_id, user_id, name, size,
-                                content_type or "application/octet-stream")
+                                sniff(head) or content_type or "application/octet-stream")
             (directory / _META).write_text(json.dumps(asdict(meta)))
         except BaseException:
             self._remove(directory)

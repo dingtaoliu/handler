@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
 from ..bus import BusMessage, RunEventBus
 from ..store.base import Store
+from ..images import MAX_IMAGES_PER_MESSAGE, VISION_TYPES
 from ..uploads import UploadStore
 from ..run import fill_tool_inputs
 from ..settings import HarnessSource, ModelName, ReasoningEffort, resolve_harness
@@ -160,10 +161,15 @@ def create_app(
         if body.attachments:
             if uploads is None:
                 raise HTTPException(400, "attachments are not enabled")
+            images = 0
             for file_id in body.attachments:
                 meta = uploads.get(file_id)
                 if meta is None or meta.user_id != user_id:
                     raise HTTPException(404, f"attachment not found: {file_id}")
+                images += meta.content_type in VISION_TYPES
+            if images > MAX_IMAGES_PER_MESSAGE:
+                raise HTTPException(
+                    422, f"At most {MAX_IMAGES_PER_MESSAGE} images per message")
             payload["attachments"] = list(body.attachments)
         conversation_id = body.conversation_id or uuid.uuid4().hex
         key = f"chat:{user_id}:{conversation_id}"
