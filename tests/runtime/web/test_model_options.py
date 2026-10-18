@@ -79,7 +79,7 @@ async def test_prompt_endpoint(store, user_token):
         assert r.status_code == 200 and r.json()["thread_type"] == "chat"
         text = r.json()["prompt"]
         assert "SYS-TEXT" in text and "PERSONA-TEXT" in text
-        assert "You are talking with Una One" in text and "Reply to the user." in text
+        assert "You are talking with u1" in text and "Reply to the user." in text
         r = await c.get("/api/settings/prompt", params={"thread_type": "automation"})
         assert "scheduled job" in r.json()["prompt"]
         assert "You are talking with" not in r.json()["prompt"]

@@ -44,11 +44,9 @@ def settings_router(service: SettingsService, auth: Authenticator,
             kind = ThreadType(thread_type)
         except ValueError:
             raise HTTPException(422, f"Unknown thread_type: {thread_type}")
+        # Same speaker as a live chat run (the owner's user id), so the preview
+        # matches what the harness actually receives.
         speaker = principal.user_id
-        get_user = getattr(service.store, "get_user", None)
-        if speaker is not None and get_user is not None:
-            found = await get_user(speaker)
-            speaker = getattr(found, "display_name", None) or getattr(found, "name", None) or speaker
         text = await build_instructions(
             service, memory_tools or MemoryTools(service.store),
             speaker=speaker if kind == ThreadType.CHAT else None, thread_type=kind)
