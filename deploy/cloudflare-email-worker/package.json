@@ -1,0 +1,9 @@
+{
+  "name": "crontal-email-intake",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/worker.test.mjs",
+    "deploy": "wrangler deploy"
+  }
+}
