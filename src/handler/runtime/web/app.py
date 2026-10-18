@@ -155,6 +155,15 @@ def create_app(
         threads = await store.list_threads(owner_user_id=user_id, limit=MEMBER_SCAN_LIMIT)
         return _json([t for t in threads if can_see_thread(principal, t.key)][:100])
 
+    @router.get("/api/events")
+    async def list_events(source: str | None = None, status: str | None = None,
+                          limit: int = 50, principal: Principal = principal_dep) -> Any:
+        """Recent events (e.g. ignored emails for Activity), newest first."""
+        rows = await store.list_events(source=source, status=status,
+                                       limit=max(1, min(limit, 200)))
+        return _json([{**_json(event), "status": state} for event, state in rows
+                      if not event.thread_key or can_see_thread(principal, event.thread_key)])
+
     @router.get("/api/runs/{run_id}")
     async def get_run(run_id: str, principal: Principal = principal_dep) -> Any:
         run = await store.get_run(run_id)

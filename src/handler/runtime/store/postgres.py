@@ -262,6 +262,21 @@ class PostgresCore:
         await self._fenced(lease, write)
         return renewed
 
+    async def list_events(
+        self, *, source: str | None = None, status: str | None = None, limit: int = 100,
+    ) -> list[tuple[Event, str]]:
+        clauses, params = [], []
+        for column, value in (("source", source), ("status", status)):
+            if value is not None:
+                clauses.append(f"{column} = %s")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                f"SELECT {_columns(Event)}, status FROM events {where}"
+                "ORDER BY received_at DESC, seq DESC LIMIT %s", (*params, limit))
+            return [(_record(Event, row), row["status"]) for row in await cursor.fetchall()]
+
     async def pending_events(self, thread_key: str) -> list[Event]:
         return await self._list(
             Event, f"SELECT {_columns(Event)} FROM events WHERE thread_key = %s "

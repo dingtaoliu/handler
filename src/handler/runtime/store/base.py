@@ -86,6 +86,12 @@ class EventQueue(Protocol):
         """Return when new work may be available, or after `timeout` seconds."""
         ...
 
+    async def list_events(
+        self, *, source: str | None = None, status: str | None = None, limit: int = 100,
+    ) -> list[tuple[Event, str]]:
+        """Recent events with their status (routed|ignored), newest first."""
+        ...
+
 
 class Store(EventQueue, Protocol):
     # --- threads ---

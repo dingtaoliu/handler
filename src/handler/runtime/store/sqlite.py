@@ -302,6 +302,24 @@ class SQLiteCore:
             return
         self._wake.clear()
 
+    async def list_events(
+        self, *, source: str | None = None, status: str | None = None, limit: int = 100,
+    ) -> list[tuple[Event, str]]:
+        clauses, params = [], []
+        for column, value in (("source", source), ("status", status)):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+
+        def read(db: sqlite3.Connection) -> list[tuple[Event, str]]:
+            rows = db.execute(f"SELECT * FROM events {where}"
+                              "ORDER BY received_at DESC, rowid DESC LIMIT ?",
+                              (*params, limit)).fetchall()
+            return [(_record(Event, row), row["status"]) for row in rows]
+
+        return await self._call(read)
+
     async def get_thread(self, key: str) -> Thread | None:
         rows = await self._list(Thread, "SELECT * FROM threads WHERE key = ?", (key,))
         return rows[0] if rows else None

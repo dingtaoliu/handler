@@ -316,3 +316,17 @@ async def test_timestamps_normalized_to_utc_and_events_sorted(store, clock, spec
     events = await store.pending_events(spec.key)
     assert events == [first, middle, last]
     assert all(e.received_at.utcoffset() == timedelta(0) for e in events)
+
+
+async def test_list_events_filters_and_orders_newest_first(store, clock, spec, event):
+    first = event("a")
+    await store.put(first, spec)
+    clock.advance(1)
+    ignored = event("b")
+    await store.put(ignored, None)
+    rows = await store.list_events()
+    assert [(e.idempotency_key, status) for e, status in rows] == [
+        ("b", "ignored"), ("a", "routed")]
+    assert [e.id for e, _ in await store.list_events(status="ignored")] == [ignored.id]
+    assert await store.list_events(source="nowhere") == []
+    assert len(await store.list_events(limit=1)) == 1
