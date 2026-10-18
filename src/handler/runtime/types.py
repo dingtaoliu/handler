@@ -6,6 +6,7 @@ adapters, observability and the web API. See docs/agent-runtime-design.md.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,12 +27,38 @@ class Lane(StrEnum):
     BACKGROUND = "background"
 
 
+_THREAD_TYPE_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_EXTRA_THREAD_TYPES: dict[str, ThreadType] = {}
+
+
 class ThreadType(StrEnum):
     CHAT = "chat"
     GMAIL = "gmail"
     AUTOMATION = "automation"
     CRONTAL = "crontal"  # Crontal notifications (RFQs, bids, ...), per entity
     EMAIL = "email"  # mail forwarded to the intake address, per email conversation
+
+    # Integration-defined thread types. `ThreadType(name)` also accepts any name
+    # registered here (integrations register theirs when an instance loads them),
+    # returning a pseudo-member that behaves like the built-ins (a `str`).
+    # Parsing only: which types an instance actually serves is up to its
+    # integrations. Built-in values and stored threads are unaffected.
+
+    @classmethod
+    def register(cls, name: str) -> ThreadType:
+        if name in cls._value2member_map_:
+            return cls._value2member_map_[name]
+        if not _THREAD_TYPE_NAME.fullmatch(name):
+            raise ValueError(f"invalid thread type name {name!r}")
+        member = str.__new__(cls, name)
+        member._name_ = name.upper()
+        member._value_ = name
+        _EXTRA_THREAD_TYPES[name] = member
+        return member
+
+    @classmethod
+    def _missing_(cls, value: object) -> ThreadType | None:
+        return _EXTRA_THREAD_TYPES.get(value) if isinstance(value, str) else None
 
 
 class EventStatus(StrEnum):

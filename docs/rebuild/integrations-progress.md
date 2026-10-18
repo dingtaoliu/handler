@@ -70,7 +70,8 @@ sets it in prod), so each move is safe to ship alone.
 Branch `feat/integrations-p2-crontal` (worktree `../handler-wt-int-crontal`), from `rebuild`.
 
 - [x] started
-- [ ] ThreadType accepts integration thread types
+- [x] ThreadType accepts integration thread types (`ThreadType.register(name)` + `_missing_`;
+  registry.load registers each spec; unknown unregistered names still raise)
 - [ ] `integrations/crontal/__init__.py` + register in `default_registry`
 - [ ] server.py skips legacy crontal blocks when enabled
 - [ ] tests (parity, empty list, multi-instance)

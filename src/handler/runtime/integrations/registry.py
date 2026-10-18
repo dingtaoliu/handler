@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..types import ThreadType
 from .base import (
     BackgroundTask,
     Integration,
@@ -207,6 +208,10 @@ class IntegrationRegistry:
                     raise IntegrationError(
                         f"{where}: thread type {spec.name!r} from {n!r} duplicates one "
                         f"from {loaded.thread_types[spec.name][0]!r}")
+                try:
+                    ThreadType.register(spec.name)  # no-op for built-in values
+                except ValueError as exc:
+                    raise IntegrationError(f"{where}: integration {n!r}: {exc}") from exc
                 loaded.thread_types[spec.name] = (n, spec)
             for section in integration.settings_sections():
                 if section.key in loaded.settings_sections:
