@@ -234,3 +234,10 @@ async def test_harness_setting_is_read_live(tmp_path):
     assert await resolve_harness(source) == "openai_agents"
     assert await resolve_harness("codex") == "codex"
     await store.close()
+
+
+async def test_defaults_report_what_a_bare_request_uses():
+    harness = oa.OpenAIAgentsHarness("k", default_reasoning_effort="low")
+    assert await harness.defaults() == {"model": "gpt-6.1-sol", "reasoning_effort": "low"}
+    harness = oa.OpenAIAgentsHarness("k", default_model="gpt-6-luna")
+    assert await harness.defaults() == {"model": "gpt-6-luna", "reasoning_effort": None}

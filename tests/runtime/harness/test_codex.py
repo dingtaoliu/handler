@@ -576,3 +576,51 @@ def test_auth_json_link_mode(request_for, tmp_path):
     target.write_text("stale copy")
     harness._prepare(req)
     assert target.is_symlink() and target.read_text() == '{"token":"refreshed"}'
+
+
+CATALOG = {"models": [
+    {"slug": "hidden-top", "priority": 0, "visibility": "hide", "default_reasoning_level": "max"},
+    {"slug": "second", "priority": 3, "visibility": "list", "default_reasoning_level": "high"},
+    {"slug": "first", "priority": 1, "visibility": "list", "default_reasoning_level": "medium"},
+]}
+
+
+def catalog_codex(tmp_path, payload, exit_code=0):
+    binary = tmp_path / "codex-catalog"
+    calls = tmp_path / "calls"
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        f"sys.stdout.write({json.dumps(payload)!r})\n"
+        f"sys.exit({exit_code})\n")
+    binary.chmod(0o755)
+    return binary, calls
+
+
+async def test_defaults_from_catalog(tmp_path):
+    binary, calls = catalog_codex(tmp_path, CATALOG)
+    harness = CodexHarness(binary)
+    assert await harness.defaults() == {"model": "first", "reasoning_effort": "medium"}
+    assert await harness.defaults() == {"model": "first", "reasoning_effort": "medium"}
+    assert calls.read_text().splitlines() == ["debug models"]  # cached
+
+
+async def test_defaults_configured_skip_catalog_and_mix(tmp_path):
+    binary, calls = catalog_codex(tmp_path, CATALOG)
+    assert await CodexHarness(binary, default_model="m", default_reasoning_effort="low").defaults() \
+        == {"model": "m", "reasoning_effort": "low"}
+    assert not calls.exists()
+    # A configured model takes its own catalog level.
+    assert await CodexHarness(binary, default_model="second").defaults() == {
+        "model": "second", "reasoning_effort": "high"}
+
+
+async def test_defaults_unknown_when_catalog_fails(tmp_path):
+    binary, calls = catalog_codex(tmp_path, {}, exit_code=1)
+    harness = CodexHarness(binary)
+    assert await harness.defaults() == {"model": None, "reasoning_effort": None}
+    # Tried refreshed then bundled; the failure is not retried immediately.
+    assert calls.read_text().splitlines() == ["debug models", "debug models --bundled"]
+    await harness.defaults()
+    assert len(calls.read_text().splitlines()) == 2

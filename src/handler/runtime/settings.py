@@ -66,10 +66,10 @@ class ReasoningEffort(StrEnum):
 class ThreadSettings(Section):
     harness: HarnessName = Field(HarnessName.CODEX, title="Harness", description="Agent harness that runs this thread type.")
     model: ModelName | None = Field(None, title="Model",
-                                    description="Model override; empty uses the instance default.")
+                                    description="Model override; empty uses the default shown (instance, else harness).")
     reasoning_effort: ReasoningEffort | None = Field(
         None, title="Reasoning effort",
-        description="Reasoning effort override; empty uses the instance default.")
+        description="Reasoning effort override; empty uses the default shown (instance, else harness).")
 
 
 # Each field carries its own title: settings UIs resolve the shared
@@ -114,11 +114,16 @@ class InstanceDefaults:
     reasoning_effort: str | None = "low"
 
 
-# Built-in model of a harness when neither settings nor the instance set one.
+# Built-in model of a harness when neither settings nor the instance set one,
+# used when that harness isn't running here to ask (codex: its catalog decides).
 HARNESS_DEFAULT_MODELS: dict[str, str | None] = {
     HarnessName.OPENAI_AGENTS.value: "gpt-6.1-sol",
     HarnessName.CODEX.value: None,
 }
+
+# Asks a harness what model/effort it uses when a run sets neither:
+# harness name -> {"model", "reasoning_effort"} (None = only the vendor knows).
+HarnessDefaults = Callable[[str], Awaitable[dict]]
 
 
 class SettingsConflict(Exception):
@@ -126,25 +131,58 @@ class SettingsConflict(Exception):
 
 
 class SettingsService:
-    def __init__(self, store: SettingsStore, defaults: InstanceDefaults | None = None) -> None:
+    def __init__(self, store: SettingsStore, defaults: InstanceDefaults | None = None,
+                 harness_defaults: HarnessDefaults | None = None) -> None:
         self.store = store
         self.defaults = defaults or InstanceDefaults()
+        self.harness_defaults = harness_defaults
 
-    def effective_thread(self, entry: dict) -> dict:
-        """Resolve one thread type's settings to concrete values (nulls replaced)."""
-        harness = entry.get("harness") or HarnessName.CODEX.value
+    async def fallback(self, harness: str) -> dict:
+        """What an empty model/effort setting resolves to on `harness`.
+
+        Mirrors a run: RunExecutor._plan leaves an unset value empty, the
+        harness then applies the instance default (HANDLER_RT_MODEL /
+        HANDLER_RT_EFFORT) and, failing that, its own built-in default.
+        """
+        builtin: dict = {"model": HARNESS_DEFAULT_MODELS.get(harness)}
+        if self.harness_defaults is not None:
+            builtin = await self.harness_defaults(harness) or builtin
         return {
-            "harness": harness,
-            "model": entry.get("model") or self.defaults.model
-            or HARNESS_DEFAULT_MODELS.get(harness),
-            "reasoning_effort": entry.get("reasoning_effort") or self.defaults.reasoning_effort,
+            "model": self.defaults.model or builtin.get("model"),
+            "reasoning_effort": self.defaults.reasoning_effort or builtin.get("reasoning_effort"),
         }
 
-    def effective(self, section: str, value: dict) -> dict:
-        """Effective values mirroring the section's shape; {} where nothing is nullable."""
-        if section == "threads":
-            return {name: self.effective_thread(entry or {}) for name, entry in value.items()}
-        return {}
+    async def resolve_thread(self, entry: dict, *, harness: str | None = None,
+                             thread_model: str | None = None) -> dict:
+        """Concrete harness/model/effort a run uses with no per-message override."""
+        harness = harness or entry.get("harness") or HarnessName.CODEX.value
+        fallback = await self.fallback(harness)
+        return {
+            "harness": harness,
+            "model": thread_model or entry.get("model") or fallback["model"],
+            "reasoning_effort": entry.get("reasoning_effort") or fallback["reasoning_effort"],
+        }
+
+    async def harness_fallbacks(self) -> dict[str, dict]:
+        """fallback() for every harness, so UIs can relabel when the harness changes."""
+        return {h.value: await self.fallback(h.value) for h in HarnessName}
+
+    async def effective(self, section: str, value: dict) -> dict:
+        """What each nullable field resolves to when left empty; {} if none.
+
+        Same shape as the section. For threads the model/effort are the values
+        an empty field gives on that type's saved harness, independent of any
+        override currently set (they label the "Default (...)" option).
+        """
+        if section != "threads":
+            return {}
+        fallbacks = await self.harness_fallbacks()
+        out = {}
+        for name, entry in value.items():
+            harness = (entry or {}).get("harness") or HarnessName.CODEX.value
+            out[name] = {"harness": harness,
+                         **(fallbacks.get(harness) or await self.fallback(harness))}
+        return out
 
     def harness_source(self, thread_type: str) -> Callable[[], Awaitable[str]]:
         """Live lookup of the harness configured for new threads of a type."""

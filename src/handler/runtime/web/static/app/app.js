@@ -14,7 +14,7 @@ const API = {
     stream: "/api/stream",
     run: (id) => `/api/runs/${enc(id)}`,
     chat: "/api/chat",
-    chatOptions: "/api/chat/options",
+    chatOptions: (k) => "/api/chat/options" + (k ? `?thread_key=${enc(k)}` : ""),
     prompt: (t) => `/api/settings/prompt?thread_type=${enc(t)}`,
     memory: "/api/memory",
     memoryItem: (n) => `/api/memory/${encPath(n)}`,
@@ -421,6 +421,7 @@ async function selectThread(key) {
     if (t && t.pending_since && !t.dead) chat.thinking = true;
     setChatMode();
     renderChatOpts();
+    refreshChatOpts().catch(() => {});
     await Promise.all([loadMessages(true), loadThreads()]);
     setChatMode();
     connectStream();
@@ -436,6 +437,7 @@ actions["download-upload"] = async (el) => download(await fetchBlob(API.upload(e
 function newConversation() {
     chat.key = null; chat.sig = ""; chat.thinking = false;
     $("messages").innerHTML = ""; setChatMode(); loadThreads().catch(() => {});
+    renderChatOpts(); refreshChatOpts().catch(() => {});
     connectStream();
     $("input").focus();
 }
@@ -495,9 +497,11 @@ function saveOptStore() {
     try { localStorage.setItem(CHAT_OPTS_KEY, JSON.stringify(chatOpts.store)); } catch { /* storage unavailable */ }
 }
 const optSlot = (key) => key || "__new__";
+// Label of a select's empty option: the value the server says it resolves to.
+const defaultLabel = (v) => `Default (${v != null && v !== "" ? v : "harness default"})`;
 function fillSelect(sel, values, dflt, current) {
     sel.innerHTML = "";
-    sel.add(new Option(dflt != null ? `Default (${dflt})` : "Default", ""));
+    sel.add(new Option(defaultLabel(dflt), ""));
     for (const v of values) sel.add(new Option(v, v));
     sel.value = values.includes(current) ? current : "";
 }
@@ -512,11 +516,18 @@ function rememberOpts() {
     chatOpts.store[optSlot(chat.key)] = {model: $("opt-model").value || null, reasoning_effort: $("opt-effort").value || null};
     saveOptStore();
 }
+// Defaults depend on the thread (an existing one keeps its harness and model).
+async function refreshChatOpts() {
+    const key = chat.key;
+    const data = await apiOpt(API.chatOptions(key), null);
+    if (key !== chat.key) return; // switched threads meanwhile
+    chatOpts.data = data;
+    $("opt-model").hidden = $("opt-effort").hidden = !data;
+    renderChatOpts();
+}
 async function initChatOpts() {
     chatOpts.store = loadOptStore();
-    chatOpts.data = await apiOpt(API.chatOptions, null);
-    $("opt-model").hidden = $("opt-effort").hidden = !chatOpts.data;
-    renderChatOpts();
+    await refreshChatOpts();
 }
 $("opt-model").addEventListener("change", rememberOpts);
 $("opt-effort").addEventListener("change", rememberOpts);
@@ -870,7 +881,7 @@ function buildNode(schemaIn, value, root, name, dflt) {
     const {schema, nullable, description} = resolveSchema(schemaIn, root);
     if (schema.enum) {
         const sel = document.createElement("select");
-        if (nullable) sel.add(new Option(dflt != null ? `Default (${dflt})` : "Default", ""));
+        if (nullable) sel.add(new Option(defaultLabel(dflt), ""));
         for (const v of schema.enum) sel.add(new Option(String(v), String(v)));
         sel.value = value == null ? "" : String(value);
         return {el: sel, description, get: () => sel.value === "" ? null : sel.value};
@@ -902,12 +913,13 @@ function buildNode(schemaIn, value, root, name, dflt) {
         const fs = document.createElement("fieldset");
         fs.className = "sf-group";
         const lg = document.createElement("legend"); lg.textContent = name; fs.appendChild(lg);
-        const getters = {};
+        const getters = {}, children = {};
         for (const [k, sub] of Object.entries(schema.properties)) {
             const child = buildNode(sub, value ? value[k] : undefined, root, k, dflt ? dflt[k] : undefined);
-            getters[k] = child.get;
+            getters[k] = child.get; children[k] = child;
             fs.appendChild(child.fieldset ? child.el : wrapField(k, child));
         }
+        followHarness(children);
         return {el: fs, fieldset: true, get: () => Object.fromEntries(Object.entries(getters).map(([k, g]) => [k, g()]))};
     }
     if (schema.type === "object" && schema.additionalProperties) {
@@ -977,6 +989,19 @@ function buildNode(schemaIn, value, root, name, dflt) {
     ta.className = "input"; ta.rows = 5; ta.value = json(value ?? null);
     return {el: ta, description, get: () => { try { return JSON.parse(ta.value); } catch { throw new Error(`${name}: invalid JSON`); } }};
 }
+// A thread type's model/effort defaults depend on its harness: relabel their
+// "Default (...)" options from the server's per-harness table when it changes.
+function followHarness(children) {
+    const table = sett.harnessDefaults, h = children.harness;
+    if (!table || !h || h.el.tagName !== "SELECT") return;
+    h.el.addEventListener("change", () => {
+        const d = table[h.el.value] || {};
+        for (const k of ["model", "reasoning_effort"]) {
+            const opt = children[k] && children[k].el.tagName === "SELECT" && children[k].el.options[0];
+            if (opt && opt.value === "") opt.text = defaultLabel(d[k]);
+        }
+    });
+}
 function wrapField(label, child) {
     if (child.inline) {
         const w = field(label, child.el, child.description);
@@ -1006,6 +1031,7 @@ function openSection(name) {
     const form = $("settings-form");
     form.innerHTML = "";
     const root = s.schema;
+    sett.harnessDefaults = s.harness_defaults || null;
     const top = buildNode(root, s.value, root, name, s.defaults);
     sett.build = top;
     if (top.fieldset) {

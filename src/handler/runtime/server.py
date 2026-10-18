@@ -221,6 +221,12 @@ async def serve(args: argparse.Namespace) -> None:
         logger.info("openai_agents harness off: set OPENAI_API_KEY to enable it")
     if not harnesses:
         raise SystemExit("no harness available: install Codex or set OPENAI_API_KEY")
+
+    async def harness_defaults(name: str) -> dict:
+        harness = harnesses.get(name)
+        return await harness.defaults() if hasattr(harness, "defaults") else {}
+
+    settings.harness_defaults = harness_defaults
     workspace_sync = WorkspaceSync(file_store, data_dir)
     executor = RunExecutor(
         store, harnesses, bus, config, PriceTable.from_yaml(),
