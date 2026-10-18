@@ -124,9 +124,10 @@ class Store(EventQueue, Protocol):
         ...
 
     async def list_messages(
-        self, thread_key: str, limit: int = 200, before: datetime | None = None
+        self, thread_key: str, limit: int = 200, before: datetime | None = None,
+        *, newest: bool = False,
     ) -> list[Message]:
-        """Messages oldest first."""
+        """Messages in chronological order; newest selects the most recent window."""
         ...
 
     # --- run steps (observability; append-only, not fenced) ---

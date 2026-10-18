@@ -91,6 +91,8 @@ async def test_message_round_trip_ordering_limit_and_before(store, clock, runnin
     assert await store.add_messages(lease, [last, second, tied, first])
     assert await store.list_messages(run.thread_key) == [first, second, tied, last]
     assert await store.list_messages(run.thread_key, limit=2) == [first, second]
+    assert await store.list_messages(run.thread_key, limit=2, newest=True) == [tied, last]
+    assert await store.list_messages(run.thread_key, limit=2, before=last.created_at, newest=True) == [second, tied]
     assert await store.list_messages(run.thread_key, before=second.created_at) == [first]
     assert await store.list_messages(run.thread_key, before=last.created_at) == [first, second, tied]
     assert await store.list_messages("missing") == []

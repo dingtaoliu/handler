@@ -190,7 +190,7 @@ def create_app(
     @router.get("/api/threads/{key:path}/messages")
     async def thread_messages(key: str, principal: Principal = principal_dep) -> Any:
         visible_thread(principal, key)
-        return _json(await fill_tool_inputs(store, await store.list_messages(key)))
+        return _json(await fill_tool_inputs(store, await store.list_messages(key, newest=True)))
 
     @router.get("/api/threads/{key:path}/runs")
     async def thread_runs(key: str, principal: Principal = principal_dep) -> Any:

@@ -420,17 +420,20 @@ class PostgresCore:
         return await self._fenced(lease, write)
 
     async def list_messages(
-        self, thread_key: str, limit: int = 200, before: datetime | None = None
+        self, thread_key: str, limit: int = 200, before: datetime | None = None,
+        *, newest: bool = False,
     ) -> list[Message]:
         where = "thread_key = %s"
         parameters: tuple[Any, ...] = (thread_key,)
         if before is not None:
             where += " AND created_at < %s"
             parameters += (before,)
-        return await self._list(
+        direction = "DESC" if newest else "ASC"
+        rows = await self._list(
             Message, f"SELECT {_columns(Message)} FROM messages WHERE {where} "
-            "ORDER BY created_at, seq LIMIT %s", parameters + (limit,),
+            f"ORDER BY created_at {direction}, seq {direction} LIMIT %s", parameters + (limit,),
         )
+        return list(reversed(rows)) if newest else rows
 
     # --- steps ------------------------------------------------------------
     async def add_step(self, step: RunStep) -> None:

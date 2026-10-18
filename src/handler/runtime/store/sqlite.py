@@ -388,17 +388,20 @@ class SQLiteCore:
         return await self._fenced(lease, write)
 
     async def list_messages(
-        self, thread_key: str, limit: int = 200, before: datetime | None = None
+        self, thread_key: str, limit: int = 200, before: datetime | None = None,
+        *, newest: bool = False,
     ) -> list[Message]:
         where = "thread_key = ?"
         parameters: tuple[Any, ...] = (thread_key,)
         if before is not None:
             where += " AND created_at < ?"
             parameters += (_timestamp(before),)
-        return await self._list(
+        direction = "DESC" if newest else "ASC"
+        rows = await self._list(
             Message, f"SELECT * FROM messages WHERE {where} "
-            "ORDER BY created_at, rowid LIMIT ?", parameters + (limit,),
+            f"ORDER BY created_at {direction}, rowid {direction} LIMIT ?", parameters + (limit,),
         )
+        return list(reversed(rows)) if newest else rows
 
     async def add_step(self, step: RunStep) -> None:
         await self._call(lambda db: _insert(db, "run_steps", _values(step)))

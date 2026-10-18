@@ -68,8 +68,9 @@ class FakeStore:
     async def list_runs(self, key, limit=50):
         return [r for r in self.runs.values() if r.thread_key == key]
 
-    async def list_messages(self, key, limit=200, before=None):
-        return [m for m in self.messages if m.thread_key == key]
+    async def list_messages(self, key, limit=200, before=None, *, newest=False):
+        rows = [m for m in self.messages if m.thread_key == key]
+        return rows[-limit:] if newest else rows[:limit]
 
     async def list_steps(self, run_id):
         return [s for s in self.steps if s.run_id == run_id]
@@ -232,3 +233,18 @@ async def test_messages_fill_in_tool_arguments_of_older_threads(client, store):
     assert inputs == {"c1": {"rfq_id": 7}, "c2": {}, "i1": {
         "server": "gateway", "tool": "lookup", "arguments": {"q": "x"}},
         "i2": "ls -la", "c3": {"path": "a.txt"}}
+
+
+async def test_thread_transcript_keeps_showing_new_activity_after_200_messages(client, store):
+    key = "chat:u1:long"
+    await client.post("/api/chat", json={"text": "start", "conversation_id": "long"})
+    store.messages.extend(
+        Message(key, Role.ASSISTANT, [{"type": "text", "text": f"Update {i}"}])
+        for i in range(205)
+    )
+    response = await client.get(f"/api/threads/{key}/messages")
+    assert response.status_code == 200
+    messages = response.json()
+    assert len(messages) == 200
+    assert messages[0]["blocks"][0]["text"] == "Update 5"
+    assert messages[-1]["blocks"][0]["text"] == "Update 204"
