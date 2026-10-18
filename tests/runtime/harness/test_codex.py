@@ -91,7 +91,8 @@ async def test_fixture_events(fake_codex, request_for, fixture, session_id, usag
             "input": raw[2]["item"]["command"],
         }
         assert events[3].data == {
-            "id": "item_0", "tool": "shell", "kind": "command_execution", "output": "hi",
+            "id": "item_0", "tool": "shell", "kind": "command_execution",
+            "input": raw[2]["item"]["command"], "output": "hi",
             "status": "completed", "exit_code": 0,
         }
 
@@ -253,6 +254,7 @@ async def test_reasoning_other_tools_and_usage(fake_codex, request_for, tmp_path
         assert finish.kind == RunEventKind.TOOL_FINISHED
         assert finish.data == {
             "id": items[index]["id"], "tool": tool, "kind": items[index]["type"],
+            "input": {k: v for k, v in items[index].items() if k not in {"id", "type"}},
             "output": {"ok": True}, "status": "completed", "exit_code": None,
         }
     assert events[-2].usage == TokenUsage(17, 5, 2, 9, 4)

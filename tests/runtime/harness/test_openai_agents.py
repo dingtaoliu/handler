@@ -16,9 +16,10 @@ from handler.runtime.harness.base import (
     RunEventKind,
     RunRequest,
 )
-from handler.runtime.run import _missing_session
+from handler.runtime.run import _missing_session, transcript_message
 from handler.runtime.settings import HarnessName, SettingsService, resolve_harness
 from handler.runtime.store.sqlite import SQLiteStore
+from handler.runtime.types import Role
 
 
 class FakeConversations:
@@ -116,6 +117,7 @@ async def test_new_thread_creates_a_conversation_and_maps_events(tmp_path, runne
     started, finished = events[2].data, events[3].data
     assert started["tool"] == "crontal_get_rfqs" and started["input"] == {}
     assert finished["tool"] == "crontal_get_rfqs" and finished["output"] == '{"success": true}'
+    assert finished["input"] == {}
     usage = events[5].usage
     assert (usage.input_tokens, usage.cached_input_tokens, usage.output_tokens,
             usage.reasoning_tokens) == (120, 40, 30, 5)
@@ -234,3 +236,33 @@ async def test_harness_setting_is_read_live(tmp_path):
     assert await resolve_harness(source) == "openai_agents"
     assert await resolve_harness("codex") == "codex"
     await store.close()
+
+
+async def test_tool_arguments_reach_the_transcript(tmp_path, runner):
+    calls = [
+        SimpleNamespace(raw_item={"type": "function_call", "call_id": "c1",
+                                  "name": "crontal_get_rfq", "arguments": '{"rfq_id": 7}'}),
+        SimpleNamespace(raw_item={"type": "function_call", "call_id": "c2",
+                                  "name": "list_files", "arguments": "{}"}),
+    ]
+    outputs = [SimpleNamespace(raw_item={"type": "function_call_output", "call_id": c},
+                               output="ok") for c in ("c2", "c1")]
+    search = SimpleNamespace(raw_item={"type": "web_search_call", "id": "ws1",
+                                       "status": "completed",
+                                       "action": {"type": "search", "query": "steel"}})
+    runner.state["next"] = FakeStream([
+        _item_event("tool_called", calls[0]), _item_event("tool_called", calls[1]),
+        _item_event("tool_output", outputs[0]), _item_event("tool_output", outputs[1]),
+        _item_event("tool_called", search),
+    ])
+    events = await _collect(oa.OpenAIAgentsHarness("k", client=FakeClient()), _req(tmp_path))
+
+    inputs: dict = {}
+    messages = [m for ev in events
+                if (m := transcript_message("t", "run_1", ev, inputs)) is not None]
+    calls_by_id = {m.blocks[0]["id"]: m.blocks[0] for m in messages if m.role == Role.TOOL}
+    assert calls_by_id["c1"]["name"] == "crontal_get_rfq"
+    assert calls_by_id["c1"]["input"] == {"rfq_id": 7}
+    assert calls_by_id["c2"]["name"] == "list_files" and calls_by_id["c2"]["input"] == {}
+    assert calls_by_id["ws1"]["input"] == {"type": "search", "query": "steel"}
+    assert inputs == {}

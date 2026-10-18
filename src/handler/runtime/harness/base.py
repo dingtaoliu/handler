@@ -22,7 +22,7 @@ class RunEventKind(StrEnum):
     ASSISTANT_TEXT = "assistant_text"  # data: {"text"}
     REASONING = "reasoning"  # data: {"text"} (summary, may be empty)
     TOOL_STARTED = "tool_started"  # data: {"id", "tool", "kind", "input"}
-    TOOL_FINISHED = "tool_finished"  # data: {"id", "tool", "kind", "output", "status", "exit_code"?}
+    TOOL_FINISHED = "tool_finished"  # data: {"id", "tool", "kind", "input", "output", "status", "exit_code"?}
     USAGE = "usage"  # usage: TokenUsage for one turn/model call; data: {"model"}
     ERROR = "error"  # data: {"message", "retryable": bool}
     FINAL = "final"  # data: {"text", "session_id"}; always the last event on success

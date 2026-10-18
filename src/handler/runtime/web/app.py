@@ -18,6 +18,7 @@ from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
 from ..bus import BusMessage, RunEventBus
 from ..store.base import Store
 from ..uploads import UploadStore
+from ..run import fill_tool_inputs
 from ..settings import HarnessSource, ModelName, ReasoningEffort, resolve_harness
 from ..types import Event, Lane, ThreadSpec, ThreadType
 from .auth_api import auth_router
@@ -179,7 +180,7 @@ def create_app(
     @router.get("/api/threads/{key:path}/messages")
     async def thread_messages(key: str, principal: Principal = principal_dep) -> Any:
         visible_thread(principal, key)
-        return _json(await store.list_messages(key))
+        return _json(await fill_tool_inputs(store, await store.list_messages(key)))
 
     @router.get("/api/threads/{key:path}/runs")
     async def thread_runs(key: str, principal: Principal = principal_dep) -> Any:

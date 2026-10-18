@@ -16,6 +16,7 @@ import re
 import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 from .bus import BusMessage, RunEventBus
 from .context import RunContext, reset_current_run, set_current_run
@@ -29,6 +30,7 @@ from .harness.base import (
     RunLimits,
     RunRequest,
 )
+from .harness.codex import tool_input as codex_tool_input
 from .instructions import build_instructions
 from .memory import MemoryTools
 from .observability.pricing import PriceTable
@@ -147,22 +149,76 @@ def event_messages(thread_key: str, run_id: str, events: list[Event],
     return msgs
 
 
-def transcript_message(thread_key: str, run_id: str, ev: RunEvent) -> Message | None:
-    """Convert a harness event into a transcript message (or None)."""
+def transcript_message(thread_key: str, run_id: str, ev: RunEvent,
+                       tool_inputs: dict[str, Any] | None = None) -> Message | None:
+    """Convert a harness event into a transcript message (or None).
+
+    Tool calls become one message when they finish. Harnesses report a call's
+    arguments on TOOL_STARTED, so pass the same `tool_inputs` dict for every
+    event of a run: started inputs are remembered by call id and attached to
+    the finished call (an input on the finished event itself wins).
+    """
+    if ev.kind is RunEventKind.TOOL_STARTED:
+        if tool_inputs is not None and ev.data.get("id") is not None:
+            tool_inputs[str(ev.data["id"])] = ev.data.get("input")
+        return None
     if ev.kind is RunEventKind.ASSISTANT_TEXT:
         return Message(thread_key, Role.ASSISTANT, [{"type": "text", "text": ev.data.get("text", "")}],
                        run_id=run_id, raw=ev.raw)
     if ev.kind is RunEventKind.TOOL_FINISHED:
         d = ev.data
+        started = (tool_inputs or {}).pop(str(d.get("id")), None)
         blocks = [
             {"type": "tool_call", "id": d.get("id"), "name": d.get("tool"), "kind": d.get("kind"),
-             "input": d.get("input")},
+             "input": d["input"] if d.get("input") is not None else started},
             {"type": "tool_result", "id": d.get("id"), "output": d.get("output"),
              "is_error": d.get("status") not in (None, "completed", "ok"),
              "exit_code": d.get("exit_code")},
         ]
         return Message(thread_key, Role.TOOL, blocks, run_id=run_id, raw=ev.raw)
     return None
+
+
+def _step_input(preview: Any) -> Any:
+    if not isinstance(preview, str):
+        return preview
+    try:
+        return json.loads(preview)
+    except ValueError:  # a plain string (e.g. a shell command) or a truncated preview
+        return preview
+
+
+async def fill_tool_inputs(store: Store, messages: list[Message]) -> list[Message]:
+    """Fill in tool-call arguments missing from older transcript messages.
+
+    Tool messages written before the call's arguments were carried onto the
+    finished event have `input: None`. Codex messages keep the completed item
+    (with its arguments) in `raw`; for other harnesses the run's TOOL_CALL
+    step holds an input preview (truncated past the recorder's preview limit).
+    """
+    by_run: dict[str, dict[str, Any]] = {}
+    for message in messages:
+        if message.role != Role.TOOL:
+            continue
+        call = next((b for b in message.blocks if b.get("type") == "tool_call"), None)
+        if call is None or call.get("input") is not None:
+            continue
+        item = (message.raw or {}).get("item")
+        if isinstance(item, dict) and item.get("type"):
+            call["input"] = codex_tool_input(item)
+            continue
+        if message.run_id is None or call.get("id") is None:
+            continue
+        if message.run_id not in by_run:
+            by_run[message.run_id] = {
+                str(step.data["id"]): step.data.get("input")
+                for step in await store.list_steps(message.run_id)
+                if step.kind == StepKind.TOOL_CALL and step.data.get("id") is not None
+            }
+        preview = by_run[message.run_id].get(str(call["id"]))
+        if preview is not None:
+            call["input"] = _step_input(preview)
+    return messages
 
 
 @dataclass
@@ -413,6 +469,7 @@ class RunExecutor:
         for attempt in range(2):
             final_text = ""
             progressed = False
+            tool_inputs: dict[str, Any] = {}
             try:
                 if (req.session_id and harness.name == "codex"
                         and not await asyncio.to_thread(_has_rollout, req.home, req.session_id)):
@@ -432,7 +489,7 @@ class RunExecutor:
                             thread.session_id = sid
                     elif ev.kind is RunEventKind.FINAL:
                         final_text = ev.data.get("text", "")
-                    msg = transcript_message(thread.key, run.id, ev)
+                    msg = transcript_message(thread.key, run.id, ev, tool_inputs)
                     if msg is not None:
                         transcript.append(msg)
                 return final_text

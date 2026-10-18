@@ -204,7 +204,8 @@ class OpenAIAgentsHarness:
                                          workflow_name=f"handler:{req.thread_key}"),
                 )
                 self._runs[req.run_id] = result
-                names: dict[str, str] = {}
+                # Calls by id, so each output is reported with its call's name and arguments.
+                calls: dict[str, tuple[str, Any]] = {}
                 async for event in result.stream_events():
                     if event.type != "run_item_stream_event":
                         continue
@@ -212,21 +213,22 @@ class OpenAIAgentsHarness:
                     if event.name == "tool_called":
                         call_id = raw.get("call_id") or raw.get("id")
                         tool = raw.get("name") or raw.get("type", "tool")
-                        names[str(call_id)] = tool
+                        args = raw.get("action") if "arguments" not in raw else _arguments(raw)
+                        calls[str(call_id)] = (tool, args)
                         yield RunEvent(RunEventKind.TOOL_STARTED, {
                             "id": call_id, "tool": tool, "kind": raw.get("type", "function_call"),
-                            "input": raw.get("action") if "arguments" not in raw else _arguments(raw)},
-                            raw=raw)
+                            "input": args}, raw=raw)
                         if raw.get("type") in _HOSTED_TOOLS:
                             # Hosted tools run inside the model call; no output item follows.
                             yield RunEvent(RunEventKind.TOOL_FINISHED, {
-                                "id": call_id, "tool": tool, "kind": raw["type"],
+                                "id": call_id, "tool": tool, "kind": raw["type"], "input": args,
                                 "output": raw.get("action"), "status": raw.get("status")}, raw=raw)
                     elif event.name == "tool_output":
                         call_id = raw.get("call_id") or raw.get("id")
+                        tool, args = calls.pop(str(call_id), ("tool", None))
                         yield RunEvent(RunEventKind.TOOL_FINISHED, {
-                            "id": call_id, "tool": names.get(str(call_id), "tool"),
-                            "kind": "function_call_output", "output": getattr(item, "output", None),
+                            "id": call_id, "tool": tool, "kind": "function_call_output",
+                            "input": args, "output": getattr(item, "output", None),
                             "status": "completed"}, raw=raw)
                     elif event.name == "message_output_created":
                         message = ItemHelpers.text_message_output(item)
