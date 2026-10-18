@@ -27,7 +27,6 @@ from .bus import RunEventBus
 from .dispatcher import Dispatcher
 from .files import LocalFileStore, S3FileStore
 from .gateway.api import approvals_router
-from .gateway.crontal import crontal_connector
 from .gateway.gateway import Gateway
 from .gateway.gmail import GmailTools
 from .gateway.google_oauth import INSTANCE_OWNER, google_oauth_from_env, user_owner
@@ -37,6 +36,7 @@ from .gateway.tokens import RunTokens
 from .harness.codex import SANDBOX_MODES, CodexHarness, codex_binary
 from .gateway.crontal_api import CrontalApiTools, crontal_base_url
 from .harness.openai_agents import OpenAIAgentsHarness
+from .integrations.crontal.connector import run_crontal_connector
 from .integrations.crontal.sink import crontal_sink_from_config
 from .integrations.base import IntegrationContext
 from .integrations.registry import (
@@ -419,21 +419,27 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                            base_path: str = "", instance_name: str = "",
                            registry: IntegrationRegistry | None = None):
     """Own one instance and close all its resources when the host stops."""
-    integration_names = enabled_names(env)
-    if integration_names is None:
-        # Unconfigured: legacy wiring only (phase 1 keeps it in every case).
-        integrations = LoadedIntegrations(instance_name, [], configured=False)
-    else:
-        integrations = (registry or default_registry).load(
-            integration_names, instance_name=instance_name, env=env, base_path=base_path,
-            reserved_thread_types=CORE_THREAD_TYPES)
-        logger.info("integrations enabled", extra={"instance": instance_name or "main",
-                                                   "integrations": integrations.names})
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     env = dict(env)
     if args.harness_env_file:
         env = {**read_env_file(args.harness_env_file), **env}
+    integration_names = enabled_names(env)
+    if integration_names is None:
+        # Unconfigured: legacy wiring (crontal, email intake, google) as before.
+        integrations = LoadedIntegrations(instance_name, [], configured=False)
+    else:
+        # Integrations see the same values the legacy wiring reads; CRONTAL_URL
+        # comes from args so `--crontal-url` still wins.
+        integration_env = {**env, "CRONTAL_URL": args.crontal_url or ""}
+        integrations = (registry or default_registry).load(
+            integration_names, instance_name=instance_name, env=integration_env,
+            base_path=base_path, reserved_thread_types=CORE_THREAD_TYPES)
+        logger.info("integrations enabled", extra={"instance": instance_name or "main",
+                                                   "integrations": integrations.names})
+    # Legacy crontal wiring runs only when HANDLER_INTEGRATIONS is unset; once it
+    # is set, Crontal comes from the `crontal` integration (or not at all).
+    legacy_crontal = not integrations.configured
     store = (PostgresStore(args.database_url, schema=args.db_schema,
                            max_size=int(env.get("HANDLER_DB_POOL_MAX", "5")))
              if args.database_url
@@ -465,7 +471,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         outbox = Outbox(store)
         crontal_sink = crontal_sink_from_config(
             args.crontal_url, env.get("CRONTAL_AGENT_TOKEN"), env.get("HANDLER_WEBHOOK_SECRET"),
-            instance_name)
+            instance_name) if legacy_crontal else None
         if crontal_sink is not None:
             outbox.register(crontal_sink)
             logger.info("crontal notification sink on", extra={"url": crontal_sink.url})
@@ -562,7 +568,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                 owner_for=lambda ctx: (user_owner(ctx.user_id)
                                        if ctx.user_id else INSTANCE_OWNER)))
         webhook_secret = env.get("HANDLER_WEBHOOK_SECRET")
-        if webhook_secret:
+        if webhook_secret and legacy_crontal:
             app.include_router(crontal_ingest_router(store, webhook_secret,
                                                      harness=settings.harness_source("crontal")))
         app.include_router(ui_manifest_router(integrations, auth))
@@ -587,33 +593,16 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                     await asyncio.wait_for(stop.wait(), timeout=15)
 
         crontal_token = env.get("CRONTAL_AGENT_TOKEN")
-        if args.crontal_url and crontal_token:
+        if legacy_crontal and args.crontal_url and crontal_token:
             gateway.register(CrontalApiTools(
                 crontal_base_url(args.crontal_url), crontal_token,
                 workspace_for=lambda key: config.workspaces_dir / thread_slug(key)))
 
         async def start_crontal_connector() -> None:
             """Discover Crontal's tools (retrying until reachable), then expose them."""
-            token = env.get("CRONTAL_AGENT_TOKEN")
-            if not args.crontal_url or not token:
-                if args.crontal_url:
-                    logger.error("CRONTAL_URL set but CRONTAL_AGENT_TOKEN missing; Crontal tools off")
-                return
-            connector = crontal_connector(args.crontal_url, token)
-            delay = 5.0
-            while not stop.is_set():
-                try:
-                    await connector.start()
-                    gateway.register(connector)
-                    logger.info("crontal tools registered",
-                                extra={"tools": [s.name for s in connector.tools()]})
-                    return
-                except Exception as exc:
-                    logger.warning("crontal connector not ready, retrying",
-                                   extra={"error": str(exc), "retry_in": delay})
-                    with contextlib.suppress(asyncio.TimeoutError):
-                        await asyncio.wait_for(stop.wait(), timeout=delay)
-                    delay = min(delay * 2, 300.0)
+            if legacy_crontal:
+                await run_crontal_connector(args.crontal_url, env.get("CRONTAL_AGENT_TOKEN"),
+                                            gateway, stop)
 
         # Integration contributions, after all core wiring so duplicates of core
         # routes and tools are reported with the integration's name.

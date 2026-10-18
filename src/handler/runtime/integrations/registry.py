@@ -224,5 +224,14 @@ class IntegrationRegistry:
         return loaded
 
 
-# The in-tree registry. Phase 2 registers crontal, email_intake and google here.
+# The in-tree registry (crontal so far; phase 2 adds email_intake and google).
 default_registry = IntegrationRegistry()
+
+
+def _register_in_tree() -> None:
+    from .crontal import CrontalIntegration
+
+    default_registry.register(CrontalIntegration)
+
+
+_register_in_tree()

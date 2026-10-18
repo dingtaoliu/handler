@@ -72,6 +72,11 @@ Branch `feat/integrations-p2-crontal` (worktree `../handler-wt-int-crontal`), fr
 - [x] started
 - [x] ThreadType accepts integration thread types (`ThreadType.register(name)` + `_missing_`;
   registry.load registers each spec; unknown unregistered names still raise)
-- [ ] `integrations/crontal/__init__.py` + register in `default_registry`
-- [ ] server.py skips legacy crontal blocks when enabled
+- [x] `integrations/crontal/__init__.py` (`CrontalIntegration`) + `connector.py`
+  (`run_crontal_connector`, shared with legacy); registered in `default_registry`
+- [x] server.py: `legacy_crontal = not integrations.configured` gates the legacy sink,
+  ingest router, CrontalApiTools and connector. So `HANDLER_INTEGRATIONS=""` (or any list
+  without crontal) has no Crontal at all; unset keeps legacy exactly. Integrations now load
+  after the harness env-file merge, with `CRONTAL_URL` = `args.crontal_url` (CLI wins).
+  Email/google legacy blocks are still unconditional.
 - [ ] tests (parity, empty list, multi-instance)
