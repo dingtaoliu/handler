@@ -61,7 +61,7 @@ async def test_run_gets_gateway_token_instructions_and_settings(tmp_path: Path):
     settings = SettingsService(store)
     await settings.put("persona", {"system": "", "identity": "You are Handler, an ops agent.",
                                    "persona": "Be brief."}, updated_by="t", expected_version=None)
-    await settings.put("threads", {"chat": {"harness": "codex", "model": "m-chat",
+    await settings.put("threads", {"chat": {"harness": "codex", "model": "gpt-6-luna",
                                             "reasoning_effort": "medium"}},
                        updated_by="t", expected_version=None)
     memory = MemoryTools(store)
@@ -81,7 +81,7 @@ async def test_run_gets_gateway_token_instructions_and_settings(tmp_path: Path):
     await _drain(dispatcher)
 
     (req,) = harness.requests
-    assert req.model == "m-chat" and req.reasoning_effort == "medium"
+    assert req.model == "gpt-6-luna" and req.reasoning_effort == "medium"
     assert "You are Handler" in req.instructions and "people/danny: Danny's preferences" in req.instructions
     assert "You are talking with danny" in req.instructions
     assert req.mcp_servers[0].url == "http://127.0.0.1:9/mcp/"

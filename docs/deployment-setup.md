@@ -90,6 +90,7 @@ Runs **alongside** the legacy instance, which is untouched on port 8000 and auto
 | Secrets/config | `~/.handler-rt/env` (mode 600): admin key, Codex settings, users |
 | Admin user token | `~/.handler-rt/danny.token` (mode 600) |
 | Codex CLI | `~/.local/bin/codex` (0.162.0, x86_64-apple-darwin, sha256-verified) |
+| Codex tool host | `~/.local/bin/codex-code-mode-host` (matching 0.162.0, x86_64-apple-darwin) |
 | Codex login | `~/.codex/auth.json` from `codex login --device-auth`, symlinked into each run (`HANDLER_RT_CODEX_AUTH_LINK=1`) |
 | Service | launchd `com.handler.rt` (`~/Library/LaunchAgents/com.handler.rt.plist`), runs `~/.handler-rt/run.sh` |
 | URL | `http://macbook-server:8100` (`/login`, then paste the token) |
@@ -109,3 +110,25 @@ ssh dannyliu@macbook-server 'cd ~/repos/handler-rt && .venv/bin/python -m handle
 ```
 
 The launchd job lives in the GUI session domain. After a reboot it starts when you log in; it doesn't start before login.
+
+### Missing Codex tool host
+
+The standalone Codex CLI installation also needs `codex-code-mode-host` next to
+`codex`. If it is missing, agent tool calls fail before commands execute; changing
+sandbox permissions does not repair the installation. Install both binaries from
+the same release and for the server's architecture when upgrading.
+
+On 2026-10-18, the missing helper on macbook-server was installed from the official
+`rust-v0.162.0` release asset `codex-code-mode-host-x86_64-apple-darwin.tar.gz`.
+The archive's SHA-256 was verified against the release asset digest:
+`a7e206e3177745467ac7cf2d43b8ff93134dfc955c1cb46529600e1a34213349`.
+
+Verify the helper without making a model call:
+
+```bash
+ssh dannyliu@macbook-server 'cd ~/repos/handler-rt && ~/.local/bin/codex sandbox -c '\''sandbox_mode="workspace-write"'\'' -- ~/.local/bin/codex-code-mode-host --help'
+```
+
+The helper launch and a source-file read both passed under `workspace-write` after
+the repair; `/healthz` returned `{"ok":true}`. An agent turn still needs to be
+retried to verify the full model/tool round trip.

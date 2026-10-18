@@ -29,10 +29,35 @@ class HarnessName(StrEnum):
     CODEX = "codex"
 
 
+class ModelName(StrEnum):
+    """Models the Codex harness lists (`codex debug models`, visibility=list)."""
+
+    GPT_6_1_SOL = "gpt-6.1-sol"
+    GPT_6_ASTRA = "gpt-6-astra"
+    GPT_6_SOL = "gpt-6-sol"
+    GPT_6_LUNA = "gpt-6-luna"
+    GPT_5_6_SOL = "gpt-5.6-sol"
+    GPT_5_6_TERRA = "gpt-5.6-terra"
+    GPT_5_6_LUNA = "gpt-5.6-luna"
+
+
+class ReasoningEffort(StrEnum):
+    """Levels every listed model supports."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
 class ThreadSettings(Section):
     harness: HarnessName = Field(HarnessName.CODEX, title="Harness", description="Agent harness that runs this thread type.")
-    model: str | None = Field(None, description="Model override; empty uses the instance default.")
-    reasoning_effort: str | None = Field(None, description="Reasoning effort override, e.g. low, medium or high.")
+    model: ModelName | None = Field(None, title="Model",
+                                    description="Model override; empty uses the instance default.")
+    reasoning_effort: ReasoningEffort | None = Field(
+        None, title="Reasoning effort",
+        description="Reasoning effort override; empty uses the instance default.")
 
 
 # Each field carries its own title: settings UIs resolve the shared

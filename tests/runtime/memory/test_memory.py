@@ -165,14 +165,14 @@ async def test_concurrent_settings_and_old_rollback(store):
 async def test_seeding(store, tmp_path):
     config = tmp_path / "handler.yaml"
     agent = tmp_path / "AGENT.md"
-    config.write_text("threads:\n  chat:\n    model: test-model\nlimits:\n  max_attempts: 7\ngrants:\n  actions:\n    memory.*: allow\n")
+    config.write_text("threads:\n  chat:\n    model: gpt-6-luna\nlimits:\n  max_attempts: 7\ngrants:\n  actions:\n    memory.*: allow\n")
     agent.write_text("ignored preamble\n# System\nSystem text\n## Subheading\nMore\n# Identity\nIdentity text\n# Persona\nPersona text\n")
     service = SettingsService(store)
     await service.seed_from_files(config, agent)
     persona, version = await service.get("persona")
     assert persona == {"system": "System text\n## Subheading\nMore", "identity": "Identity text", "persona": "Persona text"}
     assert version == 1
-    assert (await service.get("threads"))[0]["chat"]["model"] == "test-model"
+    assert (await service.get("threads"))[0]["chat"]["model"] == "gpt-6-luna"
     assert (await service.get("limits"))[0]["max_attempts"] == 7
     agent.write_text("# System\nOverwritten")
     await service.seed_from_files(config, agent)
