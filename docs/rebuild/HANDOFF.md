@@ -186,3 +186,33 @@ The in-flight branches in §7 are now implemented and merged:
 - Register both merchant rows in one database transaction to avoid a partial
   switch from legacy fallback. After checks, remove only Crontal's deprecated
   global URL/admin/webhook/agent-token variables, keeping HANDLER_ENABLED.
+
+## 9. Released: two Crontal merchants on one dyno (2026-10-18)
+
+Owner approved both deployments. This supersedes the pending status in §8.
+
+- `crontal-agent`: image `f19dcb728aea` released in v28; current **v30** runs
+  `HANDLER_INSTANCES=main,bss`. One Basic web dyno is up. Both pools cap at 3
+  connections each, plus their LISTEN connections.
+- Crontal: image `8d1de39aad7e` released in v104; current **v105** removes the
+  obsolete global HANDLER_URL/admin/webhook/agent credentials. HANDLER_ENABLED
+  remains on. Migration is now `r3n4o5p6q7s8`; backup is **b017**.
+- Merchant 2/user 1 (Danny) routes to main at the root. Merchant 1/user 2 (Eric)
+  routes to BSS at `/i/bss`. Registry activation inserted both rows atomically.
+- Live proxy/persona/threads/Google checks passed for both users, and repeated
+  after legacy globals were removed. Each agent token can mint a JWT only for
+  its own merchant. Both Crontal MCP discovery calls passed. Webhook signature
+  checks passed without creating events. Cross-instance admin keys return 401;
+  unknown instance routes return 404.
+- Main's Gmail connection and root Google callback are preserved. BSS has no
+  inherited Google/email configuration; its existing persona/schema/S3 prefix
+  are preserved. BSS user `2` is provisioned as admin in its own store only.
+- Crontal's served frontend matches tested bundle `index-UN7gf22n.js` exactly.
+  Final log review found no recent runtime errors. Open SSE streams were
+  cancelled during the bounded HTTP drain on restarts, followed by completed
+  workspace sync and clean shutdown; pre-registration BSS connector 401 retries
+  resolved with registry activation.
+- The separate `crontal-agent-bss` app remains scaled to zero, not deleted.
+- The Crontal deployment skill now covers Handler and coordinated releases;
+  existing user authorization persists through releases and migrations.
+- Full evidence: hephaestus `docs/handler-instances-rollout-2026-10-18.md`.
