@@ -108,6 +108,7 @@ Repo and code layout:
 - **Pricing.** `prices.yaml` rates are null, so costs show as unpriced.
 - **Workspace sync deletions.** Sync never deletes remote files (`known-issues.md` §1). To be fixed, but low priority (2026-10-18).
 - **Codex jobs.** Close stdin (`< /dev/null`). Codex's sandbox makes `.git` read-only, so the driver commits its work. The Codex plan is $20 Plus: run at most 2 jobs at a time.
+- **Crontal notification list should load in pages (backlog, 2026-10-18).** The bell/inbox component in Crontal's frontend (`NotificationBell` / `notification-dropdown`) should show only the most recent N (e.g. 10) with a "See more" control that loads older pages (cursor/limit API), instead of keeping every notification in the component. It must still scale once handler pushes notifications into Crontal.
 
 ## 7. In flight (2026-10-18, end of session)
 
