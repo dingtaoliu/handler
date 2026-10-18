@@ -9,13 +9,13 @@ harness ──MCP──▶ gateway ── gmail_* tools (gateway/gmail.py) ─�
                               │ bearer token
                               ▼
                  GoogleOAuth (gateway/google_oauth.py)
-                   · connections row: connector=google, owner=instance, provider=local
+                   · connections row: connector=google, owner=user:<id>, provider=local
                    · secrets row: Fernet-encrypted refresh token (secret_ref)
                    · access token cached in memory, refreshed near expiry
 ```
 
 - **Native tools, no upstream MCP server.** The tools call the Gmail REST API directly, following the `crontal_api` pattern: one `ToolProvider` registered with the gateway, which gives grants, audit and timeouts. Attachments are saved to the workspace and their text is extracted.
-- **One instance-level connection.** The connection has `owner = "instance"`, and every thread type (chat, automation, crontal, email …) uses it. The `connections` table already keys on `owner`, so per-user mailboxes (`user:<id>`) need only a different `owner_for` in `GmailTools` and a per-user connect button. Neither is built yet.
+- **One connection per Handler user.** Interactive connections have `owner = "user:<id>"`. Gmail tools select the connection for the user who owns the run, so two users on one instance can connect different Google accounts. Operator flows with a bare admin key and system-triggered runs without a user retain the `owner = "instance"` connection for backward compatibility.
 - **Credentials.** The design in §6.2 named a `SecretStore`, but none existed: `Connection.secret_ref` was a dangling reference. I added a minimal one:
   - a `secrets(key, value, updated_at)` table in both SQLite and Postgres (`CREATE TABLE IF NOT EXISTS`, so no migration step is needed);
   - `put_secret`/`get_secret`/`delete_secret` and `delete_connection` on both stores;
@@ -23,18 +23,18 @@ harness ──MCP──▶ gateway ── gmail_* tools (gateway/gmail.py) ─�
 
   The store only ever holds ciphertext. `GoogleOAuth` plugs into the existing `ConnectionCredentials` as its `local` resolver. That resolver does the connection lookup, raises `NeedsReauth` for `needs_reauth` rows, and updates `last_used_at`.
 - **OAuth flow** (`web/google_api.py`):
-  - `POST /api/connections/google/start` (admins only) returns Google's consent URL. The UI authenticates with a bearer header, so this is a JSON call and the browser then navigates to the URL.
-    - `state` is HMAC-signed and carries a nonce, the admin who started the flow, the redirect URI and the owner.
+  - `POST /api/connections/google/start` returns Google's consent URL for the signed-in Handler user. The UI authenticates with a bearer header, so this is a JSON call and the browser then navigates to the URL.
+    - `state` is HMAC-signed and carries a nonce, the user who started the flow, the redirect URI and the owner.
     - It expires after 10 minutes and works only once.
     - It is stateless, so it survives restarts.
   - `GET /oauth/google/callback` is public: the signed state authenticates it. It exchanges the code, stores the connection, and redirects to `/app?google=connected#connections`, or to `?google_error=…` on failure.
   - **Starting from another app (Crontal).** `start` takes an optional JSON body `{"return_to": "<url>"}`. Its origin (scheme, host, port) must be in `HANDLER_RETURN_TO_ORIGINS`, otherwise `start` answers 400; URLs with userinfo, backslashes, control characters or a non-http(s) scheme are always refused. The URL is signed into the state, and the callback checks it against the allowlist again before redirecting to it with `?google=connected` or `?google=error&reason=…`. Without `return_to`, or if the state can't be verified, the callback goes to handler's own Connections tab as before.
   - `GET /api/connections/google` returns the status for the Connections tab.
-  - `DELETE /api/connections/google/{id}` (admins only) revokes the grant at Google, then deletes the connection row and its secret.
+  - `DELETE /api/connections/google/{id}` revokes the signed-in user's grant at Google, then deletes the connection row and its secret. A user cannot delete another user's grant.
   - The consent URL uses `access_type=offline` and `prompt=consent`, so Google always returns a refresh token.
 - **Reconnecting** replaces the old connection without revoking it. Revoking would also kill the new grant, because Google revokes per client and account.
 - **Token refresh.** An access token is refreshed when it has less than 2 minutes left, or once after a Gmail 401.
-  - `invalid_grant` (revoked, expired, password changed, Testing-mode expiry): the connection is marked `needs_reauth` and tools return *"The Gmail connection (…) needs to be reconnected … an admin must open handler's Connections tab and click Reconnect Google."*
+  - `invalid_grant` (revoked, expired, password changed, Testing-mode expiry): the connection is marked `needs_reauth` and tools tell that user to open Handler's Connections tab and click **Reconnect Google**.
   - `invalid_client`: this is a configuration error. Tools say so, and the connection stays active.
   - A refresh token that can't be decrypted (secret key changed) is treated as `needs_reauth`.
 - **Scopes.** The scopes Google actually granted are stored on the connection and shown in the Connections tab; users can untick boxes on the consent screen. Each tool checks for the scope it needs:
@@ -155,7 +155,7 @@ First deploy a build that contains this branch. Then:
 ### 2.7 Connect in handler
 
 12. Open <https://crontal-agent-940cc88dda66.herokuapp.com/login> and sign in with the admin key (or an admin user's token).
-13. Go to **Connections**. The *Google (Gmail)* card shows *Not connected* and the redirect URI, which must match step 9 exactly. Click **Connect Google**.
+13. Go to **Connections**. The *Google (Gmail and Workspace)* card shows *Not connected* and the redirect URI, which must match step 9 exactly. Click **Connect Google**. Repeat this while signed in as each Handler user who needs a Google account.
 14. Sign in as **crontal.contacts@gmail.com**. On *"Google hasn't verified this app"*, click **Advanced** → **Go to Crontal Agent (unsafe)**. On the permissions screen, **tick every checkbox**, then click **Continue**.
 15. You land back on **Connections** with a "Google connected" toast. The card shows `crontal.contacts@gmail.com`, a **connected** badge and the granted scopes (they should include `…/gmail.modify`).
 16. Check that it works. In Chat, ask "search Gmail for newer_than:7d and list subjects". Or open **Tools**: the `gmail_*` tools should show `allow`.
@@ -167,7 +167,7 @@ First deploy a build that contains this branch. Then:
 - **Disconnect** revokes the grant at Google and deletes the connection and its encrypted token. If Google can't be reached, the toast says so; you can also remove the app at <https://myaccount.google.com/permissions>.
 - **Audit.** Every tool call is audited under its `gmail.*` action, like other gateway tools.
 - **Sends** appear in the Approvals tab (and the pending badge). Approving runs the send and posts the result into the thread; denying sends nothing.
-- **Not built:** push or new-mail triggers (the separate email-intake feature covers inbound mail), per-user Google connections, and label/delete tools.
+- **Not built:** push or new-mail triggers (the separate email-intake feature covers inbound mail), Drive/Docs/Sheets/Slides tools, and Gmail label/delete tools. Extra Workspace scopes may be present in the grant, but only Gmail tools currently consume them.
 
 ## 4. Upstream MCP evaluation (2026-10-18, not switched)
 

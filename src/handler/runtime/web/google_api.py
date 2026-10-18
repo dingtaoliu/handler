@@ -1,12 +1,12 @@
-"""Connect, inspect and disconnect the instance's Google account.
+"""Connect, inspect and disconnect each Handler user's Google account.
 
-- POST   /api/connections/google/start  (admin) → {"url": Google consent URL}
+- POST   /api/connections/google/start  → {"url": Google consent URL}
          optional JSON body {"return_to": "<url>"}: where the callback sends the
          browser afterwards. Its origin must be in HANDLER_RETURN_TO_ORIGINS
          (comma-separated origins), else 400. It is never an open redirect.
 - GET    /oauth/google/callback          (public; the signed state authenticates)
 - GET    /api/connections/google         status for the Connections tab
-- DELETE /api/connections/google/{id}    (admin) revoke at Google + delete
+- DELETE /api/connections/google/{id}    revoke the current user's grant + delete
 
 The browser authenticates with a bearer header, so `start` is a JSON call
 and the UI then navigates to the returned URL. The callback redirects back
@@ -31,6 +31,7 @@ from ..gateway.google_oauth import (
     INSTANCE_OWNER,
     GoogleOAuth,
     OAuthError,
+    user_owner,
 )
 
 
@@ -116,8 +117,13 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *,
     router = APIRouter()
     origins = parse_origins(os.environ.get(RETURN_TO_ORIGINS_ENV, "")
                             if return_to_origins is None else return_to_origins)
-    admin = Depends(auth.require_admin)
     user = Depends(auth.require_principal)
+
+    def owner_for(principal: Principal) -> str:
+        # A bare instance admin key has no Handler user. Keep its operator flow
+        # on the legacy instance owner; user tokens, trusted devices and an
+        # admin key acting as a user all get an isolated account.
+        return user_owner(principal.user_id) if principal.user_id else INSTANCE_OWNER
 
     def configured() -> GoogleOAuth:
         if oauth is None:
@@ -126,10 +132,10 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *,
         return oauth
 
     @router.get("/api/connections/google")
-    async def status(request: Request, _: Principal = user) -> dict:
+    async def status(request: Request, principal: Principal = user) -> dict:
         if oauth is None:
             return {"configured": False, "connection": None}
-        connection = await oauth.connection(INSTANCE_OWNER)
+        connection = await oauth.connection(owner_for(principal))
         return {
             "configured": True,
             "redirect_uri": oauth.redirect_uri(request_base_url(request)),
@@ -145,7 +151,7 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *,
 
     @router.post("/api/connections/google/start")
     async def start(request: Request, body: StartRequest | None = None,
-                    principal: Principal = admin) -> dict:
+                    principal: Principal = user) -> dict:
         google = configured()
         return_to = (body.return_to or "").strip() if body else ""
         if return_to and not allowed_return_to(return_to, origins):
@@ -154,6 +160,7 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *,
         redirect_uri = google.redirect_uri(request_base_url(request))
         return {"url": google.start(started_by=principal.identity,
                                     redirect_uri=redirect_uri,
+                                    owner=owner_for(principal),
                                     return_to=return_to or None),
                 "redirect_uri": redirect_uri}
 
@@ -188,10 +195,10 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *,
         return back(google="connected", account=connection.external_ref or "")
 
     @router.delete("/api/connections/google/{connection_id}")
-    async def disconnect(connection_id: str, _: Principal = admin) -> dict:
+    async def disconnect(connection_id: str, principal: Principal = user) -> dict:
         google = configured()
         connection = await google.get_connection(connection_id)
-        if connection is None:
+        if connection is None or connection.owner != owner_for(principal):
             raise HTTPException(404, "connection not found")
         revoked = await google.disconnect(connection)
         return {"deleted": True, "revoked": revoked}

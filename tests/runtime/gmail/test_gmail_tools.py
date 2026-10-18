@@ -13,6 +13,7 @@ from handler.runtime.gateway.gmail import (
     build_message,
     reply_subject,
 )
+from handler.runtime.gateway.google_oauth import user_owner
 from handler.runtime.settings import GrantsSettings
 from handler.runtime.types import Decision, Risk
 
@@ -90,6 +91,18 @@ def test_send_exact_rules_decide(world):
 async def test_not_connected(world):
     result = await world.call("gmail_search", query="x")
     assert result.is_error and "Connect Google" in result.content
+
+
+async def test_tools_use_the_run_users_google_connection(world):
+    await world.connect(owner=user_owner("u"))
+    gmail = GmailTools(world.oauth, workspace_for=lambda key: world.workspace,
+                       client=world.oauth._client,
+                       owner_for=lambda ctx: user_owner(ctx.user_id))
+    tools = {spec.name: spec for spec in gmail.tools()}
+    result = await tools["gmail_search"].handler(world.ctx, {"query": "x"})
+    assert not result.is_error
+    assert await world.oauth.connection() is None
+    assert await world.oauth.connection(user_owner("u")) is not None
 
 
 async def test_needs_reauth_is_a_clear_error(connected):

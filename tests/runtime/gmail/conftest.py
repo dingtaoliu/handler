@@ -206,8 +206,8 @@ class World:
         self.store, self.google, self.oauth = store, google, oauth
         self.tools, self.workspace, self.ctx, self.clock = tools, workspace, ctx, clock
 
-    async def connect(self):
-        url = self.oauth.start(started_by="root", redirect_uri=REDIRECT)
+    async def connect(self, owner="instance"):
+        url = self.oauth.start(started_by="root", redirect_uri=REDIRECT, owner=owner)
         state = parse_qs(httpx.URL(url).query.decode())["state"][0]
         return await self.oauth.complete("good-code", state)
 

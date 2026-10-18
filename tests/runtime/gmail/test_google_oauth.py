@@ -15,6 +15,7 @@ from handler.runtime.gateway.google_oauth import (
     GoogleOAuthConfig,
     OAuthError,
     google_oauth_from_env,
+    user_owner,
 )
 from handler.runtime.gateway.secret_box import SecretBox
 from handler.runtime.store.sqlite_users import User
@@ -192,12 +193,11 @@ async def web(world):
 
 async def test_routes_connect_status_disconnect(web, world):
     client, admin, member = web
-    assert (await client.post("/api/connections/google/start", headers=member)).status_code == 403
     assert (await client.post("/api/connections/google/start")).status_code == 401
     status = (await client.get("/api/connections/google", headers=member)).json()
     assert status["configured"] and status["connection"] is None
     assert status["redirect_uri"] == REDIRECT
-    start = (await client.post("/api/connections/google/start", headers=admin)).json()
+    start = (await client.post("/api/connections/google/start", headers=member)).json()
     assert start["redirect_uri"] == REDIRECT
     state = _query(start["url"])["state"]
 
@@ -216,11 +216,14 @@ async def test_routes_connect_status_disconnect(web, world):
     conn = status["connection"]
     assert conn["account"] == ACCOUNT and conn["status"] == "active"
     assert GMAIL_MODIFY in conn["scopes"]
+    assert (await world.oauth.connection(user_owner("alice"))).id == conn["id"]
+    assert (await client.get("/api/connections/google", headers=admin)).json()[
+        "connection"] is None
     url = f"/api/connections/google/{conn['id']}"
-    assert (await client.delete(url, headers=member)).status_code == 403
-    assert (await client.delete(url, headers=admin)).json() == {"deleted": True,
-                                                                "revoked": True}
     assert (await client.delete(url, headers=admin)).status_code == 404
+    assert (await client.delete(url, headers=member)).json() == {"deleted": True,
+                                                                 "revoked": True}
+    assert (await client.delete(url, headers=member)).status_code == 404
 
 
 async def test_forwarded_proto_builds_the_redirect_uri(web):

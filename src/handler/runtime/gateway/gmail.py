@@ -244,7 +244,7 @@ class GmailTools:
         for attempt in (1, 2):
             access = await self._credentials.resolve(CONNECTOR, owner)
             if access is None:
-                raise GmailError("Gmail is not connected. An admin must open handler's "
+                raise GmailError("Gmail is not connected for this user. Open handler's "
                                  "Connections tab and click Connect Google.")
             response = await self._client.request(
                 method, url, params=params, json=json_body, content=content,
@@ -264,8 +264,8 @@ class GmailTools:
         granted = await self._credentials.granted_scopes(self._owner_for(ctx))
         if granted is None or any(scope in granted for scope in needs):
             return None  # not connected is reported by the API call itself
-        return ("The Gmail connection was granted without the permission this tool needs. "
-                f"An admin must reconnect Google with the scope {GMAIL_MODIFY} (or one of: "
+        return ("The Gmail connection was granted without the permission this tool needs; "
+                f"reconnect Google with the scope {GMAIL_MODIFY} (or one of: "
                 + ", ".join(needs) + ") and tick every checkbox on Google's consent screen.")
 
     async def _guard(self, ctx: RunContext, args: dict[str, Any], run,
@@ -279,8 +279,8 @@ class GmailTools:
             return ToolResult(
                 "The Gmail connection" + (f" ({account})" if account else "")
                 + " needs to be reconnected: Google no longer accepts its sign-in. "
-                "Tell the user that an admin must open handler's Connections tab and "
-                "click Reconnect Google. Do not retry until then.", is_error=True)
+                "Tell the user to open handler's Connections tab and click Reconnect "
+                "Google. Do not retry until then.", is_error=True)
         except (GmailError, OAuthError) as exc:
             return ToolResult(str(exc), is_error=True)
         except httpx.HTTPError as exc:
@@ -770,8 +770,8 @@ def _api_error(response: httpx.Response) -> str:
         message = response.text[:300]
     status = response.status_code
     if status == 403 and "insufficient" in (message or "").lower():
-        return ("Gmail refused: the connection lacks a required permission. An admin must "
-                "reconnect Google and grant every permission.")
+        return ("Gmail refused: the connection lacks a required permission. Reconnect "
+                "Google and grant every permission.")
     if status == 404:
         return f"Gmail: not found ({message})"
     return f"Gmail API error {status}: {message}"

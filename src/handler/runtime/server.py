@@ -30,7 +30,7 @@ from .gateway.api import approvals_router
 from .gateway.crontal import crontal_connector
 from .gateway.gateway import Gateway
 from .gateway.gmail import GmailTools
-from .gateway.google_oauth import google_oauth_from_env
+from .gateway.google_oauth import INSTANCE_OWNER, google_oauth_from_env, user_owner
 from .gateway.mcp_server import create_mcp_app
 from .gateway.policy import GrantPolicy
 from .gateway.tokens import RunTokens
@@ -533,7 +533,10 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                                          return_to_origins=env.get("HANDLER_RETURN_TO_ORIGINS", "")))
         if google_oauth is not None:
             gateway.register(GmailTools(
-                google_oauth, workspace_for=lambda key: config.workspaces_dir / thread_slug(key)))
+                google_oauth,
+                workspace_for=lambda key: config.workspaces_dir / thread_slug(key),
+                owner_for=lambda ctx: (user_owner(ctx.user_id)
+                                       if ctx.user_id else INSTANCE_OWNER)))
         webhook_secret = env.get("HANDLER_WEBHOOK_SECRET")
         if webhook_secret:
             app.include_router(crontal_ingest_router(store, webhook_secret,

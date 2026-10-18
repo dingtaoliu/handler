@@ -1340,7 +1340,7 @@ async function loadConnections() {
     box.innerHTML = items.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Connector</th><th>Owner</th><th>Provider</th><th>Status</th><th>Scopes</th><th>Last used</th></tr></thead><tbody>` +
         items.map((c) => `<tr><td><b>${esc(c.connector)}</b></td><td>${esc(c.owner)}</td><td>${esc(c.provider)}</td><td>${badge(c.status, c.status === "active" ? "green" : c.status === "needs_reauth" ? "yellow" : "red")}</td><td class="mono">${esc((c.scopes || []).join(", "))}</td><td>${esc(fmtTime(c.last_used_at))}</td></tr>`).join("") + "</tbody></table></div>" : empty("No connections yet");
 }
-// Google (Gmail): one instance-level connection, see /api/connections/google.
+// Google (Gmail and Workspace): one connection for the signed-in Handler user.
 async function loadGoogleConnection() {
     const box = $("google-connection");
     const params = new URLSearchParams(location.search);
@@ -1352,21 +1352,20 @@ async function loadGoogleConnection() {
     const g = await apiOpt("/api/connections/google", null);
     if (g === null) { box.innerHTML = ""; return; }
     const c = g.connection;
-    const admin = isAdmin();
     let body;
     if (!g.configured) {
         body = `<span class="muted">Not configured: set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET.</span>`;
     } else if (!c) {
-        body = `<span class="muted">Not connected.</span> ` + (admin ? `<button class="btn-small btn-primary" data-action="google-connect">Connect Google</button>` : "");
+        body = `<span class="muted">Not connected for your Handler user.</span> <button class="btn-small btn-primary" data-action="google-connect">Connect Google</button>`;
     } else {
         const ok = c.status === "active";
         body = `<b>${esc(c.account || "(unknown account)")}</b> ${badge(ok ? "connected" : "needs reconnect", ok ? "green" : "yellow")}` +
-            (admin ? ` <button class="btn-small${ok ? "" : " btn-primary"}" data-action="google-connect">${ok ? "Reconnect" : "Reconnect Google"}</button> <button class="btn-small btn-danger" data-action="google-disconnect" data-id="${esc(c.id)}">Disconnect</button>` : "") +
+            ` <button class="btn-small${ok ? "" : " btn-primary"}" data-action="google-connect">${ok ? "Reconnect" : "Reconnect Google"}</button> <button class="btn-small btn-danger" data-action="google-disconnect" data-id="${esc(c.id)}">Disconnect</button>` +
             `<div class="muted">Granted scopes: <span class="mono">${esc((c.scopes || []).join(" "))}</span></div>` +
             `<div class="muted">Connected by ${esc(c.created_by || "-")} on ${esc(fmtTime(c.created_at))}; last used ${esc(fmtTime(c.last_used_at))}</div>`;
     }
     const redirect = g.redirect_uri ? `<div class="muted">Redirect URI: <span class="mono">${esc(g.redirect_uri)}</span></div>` : "";
-    box.innerHTML = `<div class="card"><div><b>Google (Gmail)</b></div><div>${body}</div>${redirect}</div>`;
+    box.innerHTML = `<div class="card"><div><b>Google (Gmail and Workspace)</b></div><div>${body}</div>${redirect}</div>`;
 }
 $("google-connection").addEventListener("click", async (e) => {
     const btn = e.target.closest("[data-action]");
@@ -1376,7 +1375,7 @@ $("google-connection").addEventListener("click", async (e) => {
             const r = await sendJson("POST", "/api/connections/google/start", {});
             location.assign(r.url);
         } else if (btn.dataset.action === "google-disconnect") {
-            if (!confirm("Disconnect Google? This revokes handler's access to the mailbox.")) return;
+            if (!confirm("Disconnect Google? This revokes handler's access to your Google account.")) return;
             const r = await api(`/api/connections/google/${enc(btn.dataset.id)}`, {method: "DELETE"});
             toast(r && r.revoked ? "Disconnected and revoked" : "Disconnected (Google did not confirm the revoke)");
             await loaders.connections();

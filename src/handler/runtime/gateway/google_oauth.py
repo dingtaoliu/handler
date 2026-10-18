@@ -1,8 +1,8 @@
 """Handler's own Google OAuth flow and the `google` connection's tokens.
 
-One instance-level connection (owner "instance") holds a shared mailbox.
-The store layout already allows per-user connections (owner "user:<id>"),
-but only the instance owner is wired up.
+Interactive users connect their own Google account (owner ``user:<id>``).
+The instance owner remains available for system-triggered work and backward
+compatibility with operator flows that do not act as a Handler user.
 
 - `start()` signs a short-lived `state` (who started it, the redirect URI,
   a nonce) and returns Google's consent URL.
@@ -60,6 +60,11 @@ SEND_SCOPES = (GMAIL_FULL, GMAIL_MODIFY, GMAIL_COMPOSE, GMAIL_SEND)
 CALLBACK_PATH = "/oauth/google/callback"
 STATE_TTL_SECONDS = 600
 REFRESH_MARGIN_SECONDS = 120
+
+
+def user_owner(user_id: str) -> str:
+    """Stable connection owner for a Handler user."""
+    return f"user:{user_id}"
 
 
 class OAuthError(Exception):
