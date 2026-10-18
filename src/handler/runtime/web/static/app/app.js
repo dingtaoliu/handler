@@ -63,6 +63,16 @@ class ApiError extends Error {
     }
 }
 
+// crypto.randomUUID exists only in secure contexts (HTTPS or localhost);
+// getRandomValues works over plain HTTP too (e.g. a LAN or tailnet host).
+function uuid() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 function authHeaders(extra) {
     const h = {...(extra || {}), Authorization: "Bearer " + (store.get("handler.token") || "")};
     const actAs = store.get("handler.actAs");
@@ -485,7 +495,7 @@ async function sendMessage() {
             const up = await uploadFiles(chat.pending.map((p) => p.file));
             ids = (up || []).map((u) => u.id);
         }
-        const body = {text: text || "(see attached files)", client_message_id: crypto.randomUUID()};
+        const body = {text: text || "(see attached files)", client_message_id: uuid()};
         if (ids.length) body.attachments = ids;
         if (chat.key && isOwnChat(chat.key)) body.conversation_id = chat.key.slice(ownPrefix().length);
         const r = await sendJson("POST", API.chat, body);

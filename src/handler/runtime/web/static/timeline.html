@@ -243,7 +243,7 @@ $("chat").onsubmit = async (e) => {
   e.preventDefault();
   const text = $("text").value.trim();
   if (!text) return;
-  const body = {text, client_message_id: crypto.randomUUID()};
+  const body = {text, client_message_id: (crypto.randomUUID ? crypto.randomUUID() : [...crypto.getRandomValues(new Uint8Array(16))].map((x) => x.toString(16).padStart(2, "0")).join(""))};
   if (current && me) {
     const parts = current.split(":");
     if (parts[0] === "chat" && parts[1] === me.user_id)
