@@ -7,7 +7,7 @@ compatibility_date = "2025-09-01"
 # forward target of contact@crontal.ai).
 FORWARD_TO = "crontal.contacts@gmail.com"
 # Handler's email endpoint on the crontal-agent Heroku app.
-HANDLER_INGEST_URL = "https://crontal-agent-REPLACE.herokuapp.com/ingest/email"
+HANDLER_INGEST_URL = "https://crontal-agent-940cc88dda66.herokuapp.com/ingest/email"
 HANDLER_TIMEOUT_MS = "60000"
 
 # Secret (not in this file): wrangler secret put HANDLER_EMAIL_SECRET
