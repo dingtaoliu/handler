@@ -691,7 +691,17 @@ loaders.automations = loadAutomations;
 
 // ─── Activity ────────────────────────────────────────────────────────────────
 const act = {run: null};
+async function loadIgnoredEmail() {
+    const rows = await apiOpt("/api/events?source=email&status=ignored&limit=30", []);
+    const box = $("activity-ignored");
+    if (!rows || !rows.length) { box.innerHTML = ""; return; }
+    box.innerHTML = `<div class="section-title" style="margin-top:20px">Ignored email</div><div class="table-wrap"><table class="data-table"><thead><tr><th>Received</th><th>From</th><th>Subject</th><th>Reason</th></tr></thead><tbody>` +
+        rows.map((e) => { const p = e.payload || {}, f = p.forwarder || {};
+            const detail = p.auth && p.auth.detail ? `<div class="muted">${esc(String(p.auth.detail).slice(0, 160))}</div>` : "";
+            return `<tr><td>${esc(fmtTime(e.received_at))}</td><td class="mono">${esc(f.address || "")}</td><td>${esc(p.subject || "")}</td><td>${esc(p.ignored_reason || "")}${detail}</td></tr>`; }).join("") + "</tbody></table></div>";
+}
 async function loadActivity() {
+    loadIgnoredEmail().catch(() => {});
     const threads = (await api(API.threads)).slice(0, 40);
     const lists = await Promise.all(threads.map((t) => api(API.threadRuns(t.key)).catch(() => [])));
     const runs = lists.flat().sort((a, b) => String(b.started_at).localeCompare(String(a.started_at))).slice(0, 60);
@@ -844,7 +854,7 @@ async function refreshBadges() {
 
 // ─── Settings (forms rendered from JSON Schema) ──────────────────────────────
 const sett = {all: null, section: null, build: null};
-const LONG_TEXT = new Set(["system", "identity", "persona", "prompt"]);
+const LONG_TEXT = new Set(["system", "identity", "persona", "prompt", "instructions"]);
 
 function resolveSchema(schema, root) {
     let s = schema || {}, nullable = false, extra = {};
@@ -1046,7 +1056,7 @@ function openSection(name) {
     if (!admin) form.querySelectorAll("input,select,textarea,button").forEach((e) => { e.disabled = true; });
     renderPromptPreview(name);
 }
-const PROMPT_TYPES = ["chat", "gmail", "automation", "crontal"];
+const PROMPT_TYPES = ["chat", "gmail", "automation", "crontal", "email"];
 let promptType = "chat";
 function renderPromptPreview(section) {
     const box = $("settings-prompt");
