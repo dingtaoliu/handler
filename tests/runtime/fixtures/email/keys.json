@@ -1,0 +1,4 @@
+{
+  "sel1._domainkey.client.example": "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAplX/MWfVmTlwUJUu8/x3xeR8YGZQaAdOyiJzDwRkDKvxSlBZ/x5BXNpj0eEv5zrgwJBKgeeURNo2n4foP5AOODDnhBd46Nl3WcVzSjA7xihdZqKCAck3Yd2VIHvKIIsasWbu2qY4/V+xkMKjKiCb21kzX8H5qNhycMonKW7GdOvmGHbFJe7xpaiI3KI1UG6Y7dVkQxLGqw5fCWZ1+tfdiiosFjLH+hfvkXkbrGSqWiASBCrtFhr3VyJ6a6AS6DawfyRIHi5aXnXEw1/BpdfQTVJ2WJ42xifLZcDJ0lwvC7qSXiN++RwJzBkUnJpNjYwMkFbhvjH5TQEe5yVze6kzVwIDAQAB",
+  "ed1._domainkey.client.example": "v=DKIM1; k=ed25519; p=AvH4Kp9hq/uj53c5D5e0mPC9OtC7QC9GGKcq/ZaVwS4="
+}

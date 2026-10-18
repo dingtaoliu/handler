@@ -1,0 +1,62 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=client.example;
+ i=@client.example; q=dns/txt; s=sel1; t=1792354656; h=from : to :
+ subject : date : message-id;
+ bh=42mmU0pl9w4th06lpZ3mYPRGfg/+tSTbvOk8VZDq19E=;
+ b=BbG8o+huBxVLrnTS2KkCcI9ZHRl20iKTTtvjxz4EIcXkQ2UFHOToQR62G2QfK/Hr/8vey
+ vGyFXQAWHcluCuQdR+m2CN7RrsEeXuYHEHWemweuYgcf3fGAvxMTXzJbybtL622siD+ZyiG
+ tsEorxTBzL8XQuPwFvH78Ok5aqCcKDstrZ5fF+MBMZWxOnop2jsxFnBDfgJnKK6cRRWIlWq
+ ryKdrd87nnK/nTZ8LVok4+c39jIhBHig9F1K6I2dxT87MUoATwGhzqpFmEh6e/9EHmmPwPq
+ 5u6IhAuJUBYngduqGkkCYCVfeSmFHKejPcaLtriRw0PRv4GmaOJlHdyjNO0Q==
+From: Lin Mei <mei.lin@client.example>
+To: contact@crontal.ai
+Subject: Fwd: RFQ 316L flat bar - urgent
+Date: Wed, 14 Oct 2026 09:12:33 +0800
+Message-ID: <CAfwd-001@mail.client.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============3529738840322814452=="
+
+--===============3529738840322814452==
+Content-Type: multipart/alternative;
+ boundary="===============6207041791195192606=="
+
+--===============6207041791195192606==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Please quote this one.
+
+---------- Forwarded message ---------
+From: Wang Wei <wei.wang@buyer.example>
+Date: Tue, Oct 13, 2026 at 4:05 PM
+Subject: RFQ 316L flat bar
+To: Lin Mei <mei.lin@client.example>
+
+Hi Mei,
+
+We need 316L flat bar 50x6mm, 2 tons, delivery to Kaohsiung by Nov 30.
+Spec sheet attached.
+
+Thanks,
+Wang Wei
+
+--===============6207041791195192606==
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+<div>Please quote this one.</div><div class=3D"gmail_quote">---------- Forwar=
+ded message ---------<br>From: <b>Wang Wei</b> &lt;wei.wang@buyer.example&gt;=
+<br>Date: Tue, Oct 13, 2026 at 4:05 PM<br>Subject: RFQ 316L flat bar<br></div=
+><p>We need 316L flat bar 50x6mm, 2 tons.</p>
+
+--===============6207041791195192606==--
+
+--===============3529738840322814452==
+Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="../../etc/spec sheet (v2).xlsx"
+MIME-Version: 1.0
+
+UEsDBCBmYWtlIHhsc3ggYnl0ZXM=
+
+--===============3529738840322814452==--

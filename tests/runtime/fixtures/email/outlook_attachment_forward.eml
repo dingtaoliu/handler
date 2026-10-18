@@ -1,0 +1,101 @@
+DKIM-Signature: v=1; a=rsa-sha256; c=simple/simple; d=client.example;
+ i=@client.example; q=dns/txt; s=sel1; t=1792354656; h=from : to :
+ subject : date : message-id;
+ bh=Da6L1ND5dppFucrp2MAjGLpq6jP4SyhXMNDAQTJ/R0c=;
+ b=CSf8IpJHIETmFbVgTnyPGRb0GzEVBlUkU7NM7J+/IV0/McQZni+RXgw6K08zDPmRQ8278
+ PglWFqwaV72wPkIwqR8bn46KZQLsVzBhyZR/vs7ev/Qv6PuxX6sYo0onPvKQfKkqDSP5GZs
+ 5weJgnZCwgDEQxNk3POJWDXgQ0Qslx9Q53SHHjwRfzmha31+r9DjODTb1U0aVoagVQFeZ7C
+ EWlpCmppw4Y0QLTAVhcMAdSz+7VQQpLmBxCy4ruR0HIgrgz1EhApjrXd1QS6QEYvkkjK07r
+ 57i63Gg5M+36eAM2ZzKnPZT4fK1VIOmH4mFgQW56g107LDJgH16u2QnVU7HQ==
+From: Lin Mei <mei.lin@client.example>
+To: contact@crontal.ai
+Subject: FW: Quotation Q-7781 for RFQ 316L flat bar
+Date: Thu, 15 Oct 2026 11:00:00 +0800
+Message-ID: <fw-q7781@mail.client.example>
+In-Reply-To: <q7781@supplier.example>
+References: <rfq-thread-root@buyer.example> <q7781@supplier.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============3298052801164095921=="
+
+--===============3298052801164095921==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+FYI - supplier quote for the 316L RFQ.
+
+--===============3298052801164095921==
+Content-Type: message/rfc822
+Content-Transfer-Encoding: 8bit
+MIME-Version: 1.0
+Content-Disposition: attachment
+
+From: "Supplier Sales" <quotes@supplier.example>
+To: mei.lin@client.example
+Subject: Quotation Q-7781 for RFQ 316L flat bar
+Date: Thu, 15 Oct 2026 10:30:00 +0800
+Message-ID: <q7781@supplier.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============5847211298080021134=="
+
+--===============5847211298080021134==
+Content-Type: multipart/alternative;
+ boundary="===============0365612511025138137=="
+
+--===============0365612511025138137==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Dear Mei,
+
+Our price: USD 3,950/t CIF Kaohsiung, 3 weeks.
+
+--===============0365612511025138137==
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+MIME-Version: 1.0
+
+<p>Dear Mei,</p><p>Our price: <b>USD 3,950/t</b></p>
+
+--===============0365612511025138137==--
+
+--===============5847211298080021134==
+Content-Type: application/pdf
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="Quotation Q-7781.pdf"
+MIME-Version: 1.0
+
+JVBERi0xLjQgcXVvdGF0aW9u
+
+--===============5847211298080021134==
+Content-Type: message/rfc822
+Content-Transfer-Encoding: 8bit
+MIME-Version: 1.0
+Content-Disposition: attachment
+
+From: Origin Mill <sales@mill.example>
+To: purchasing@supplier.example
+Subject: Mill certificate
+Date: Mon, 12 Oct 2026 08:00:00 +0000
+Message-ID: <mill-cert-1@mill.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============5814132464553105898=="
+
+--===============5814132464553105898==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Certificate attached.
+
+--===============5814132464553105898==
+Content-Type: application/pdf
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="cert.pdf"
+MIME-Version: 1.0
+
+JVBERi0xLjQgY2VydA==
+
+--===============5814132464553105898==--
+
+--===============5847211298080021134==--
+
+--===============3298052801164095921==--

@@ -1,0 +1,59 @@
+DKIM-Signature: v=1; a=ed25519-sha256; c=relaxed/relaxed;
+ d=client.example; i=@client.example; q=dns/txt; s=ed1; t=1792354656;
+ h=from : to : subject : date : message-id;
+ bh=9TUk2k0wf+F1Sa1LSSvnE+AhLGGvm+3oqel0ecPZ5CE=;
+ b=7+vkga6MmHXC12Ddb/TBGPY0fphtAX244uh7tV4CTKtodLg1katavTIljVSUv1TymJQ+M
+ ogbWfaoZtSnfXjhCA==
+From: Lin Mei <mei.lin@client.example>
+To: contact@crontal.ai
+Subject: Fwd: RFQ 316L flat bar - urgent
+Date: Wed, 14 Oct 2026 09:12:33 +0800
+Message-ID: <CAfwd-001@mail.client.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============5376752182305110646=="
+
+--===============5376752182305110646==
+Content-Type: multipart/alternative;
+ boundary="===============3792158342483833451=="
+
+--===============3792158342483833451==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Please quote this one.
+
+---------- Forwarded message ---------
+From: Wang Wei <wei.wang@buyer.example>
+Date: Tue, Oct 13, 2026 at 4:05 PM
+Subject: RFQ 316L flat bar
+To: Lin Mei <mei.lin@client.example>
+
+Hi Mei,
+
+We need 316L flat bar 50x6mm, 2 tons, delivery to Kaohsiung by Nov 30.
+Spec sheet attached.
+
+Thanks,
+Wang Wei
+
+--===============3792158342483833451==
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+<div>Please quote this one.</div><div class=3D"gmail_quote">---------- Forwar=
+ded message ---------<br>From: <b>Wang Wei</b> &lt;wei.wang@buyer.example&gt;=
+<br>Date: Tue, Oct 13, 2026 at 4:05 PM<br>Subject: RFQ 316L flat bar<br></div=
+><p>We need 316L flat bar 50x6mm, 2 tons.</p>
+
+--===============3792158342483833451==--
+
+--===============5376752182305110646==
+Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="../../etc/spec sheet (v2).xlsx"
+MIME-Version: 1.0
+
+UEsDBCBmYWtlIHhsc3ggYnl0ZXM=
+
+--===============5376752182305110646==--
