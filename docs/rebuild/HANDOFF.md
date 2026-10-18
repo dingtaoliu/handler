@@ -124,7 +124,7 @@ Working mode: the main session acts as architect and hands implementation to bac
 - **Credentials:** the Postgres credentials were rotated on 2026-10-18.
 
 **Next:**
-1. **Integrations refactor** (`docs/rebuild/integrations.md`, approved). **Phase 1 is merged** (interface, registry, per-instance `HANDLER_INTEGRATIONS`, `GET /api/ui/manifest`; no behaviour change). The owner approved its decisions: the package is `src/handler/runtime/integrations/`; legacy wiring stays until each integration takes over; `HANDLER_INTEGRATIONS` is not inherited by other instances; `chat`/`automation` are reserved thread types. **Next: phase 2**, moving code into the `crontal`, then `email_intake`, then `google` integrations. The ordered plan is in `docs/rebuild/integrations-progress.md`.
+1. **Integrations refactor** (`docs/rebuild/integrations.md`, approved). **Phase 1 is merged** (interface, registry, per-instance `HANDLER_INTEGRATIONS`, `GET /api/ui/manifest`; no behaviour change). The owner approved its decisions: the package is `src/handler/runtime/integrations/`; legacy wiring stays until each integration takes over; `HANDLER_INTEGRATIONS` is not inherited by other instances; `chat`/`automation` are reserved thread types. **Phase 2 step 1 (`crontal`) started on 2026-10-18 ~20:00** on branch `feat/integrations-p2-crontal` (worktree `../handler-wt-int-crontal`), and may have been cut off. Check that branch's `docs/rebuild/integrations-progress.md`, finish it, then do `email_intake` and `google`. The ordered plan is in `docs/rebuild/integrations-progress.md`.
 2. **Native read-only Drive tools** (recommended over MCP). The owner must add `drive.readonly`, enable the Drive API and reconnect. Waiting on the owner's go-ahead.
 
 **Waiting on the owner:**
