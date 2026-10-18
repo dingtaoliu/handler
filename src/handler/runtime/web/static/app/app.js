@@ -14,6 +14,8 @@ const API = {
     stream: "/api/stream",
     run: (id) => `/api/runs/${enc(id)}`,
     chat: "/api/chat",
+    chatOptions: "/api/chat/options",
+    prompt: (t) => `/api/settings/prompt?thread_type=${enc(t)}`,
     memory: "/api/memory",
     memoryItem: (n) => `/api/memory/${encPath(n)}`,
     automations: "/api/automations",
@@ -418,6 +420,7 @@ async function selectThread(key) {
     const t = chat.threads.find((x) => x.key === key);
     if (t && t.pending_since && !t.dead) chat.thinking = true;
     setChatMode();
+    renderChatOpts();
     await Promise.all([loadMessages(true), loadThreads()]);
     setChatMode();
     connectStream();
@@ -482,6 +485,42 @@ async function uploadFiles(files) {
     return api(API.uploads, {method: "POST", body: fd});
 }
 
+// Per-message model / effort selection, remembered per thread in localStorage.
+const CHAT_OPTS_KEY = "handler.chatOpts";
+const chatOpts = {data: null, store: {}};
+function loadOptStore() {
+    try { return JSON.parse(localStorage.getItem(CHAT_OPTS_KEY) || "{}") || {}; } catch { return {}; }
+}
+function saveOptStore() {
+    try { localStorage.setItem(CHAT_OPTS_KEY, JSON.stringify(chatOpts.store)); } catch { /* storage unavailable */ }
+}
+const optSlot = (key) => key || "__new__";
+function fillSelect(sel, values, dflt, current) {
+    sel.innerHTML = "";
+    sel.add(new Option(dflt != null ? `Default (${dflt})` : "Default", ""));
+    for (const v of values) sel.add(new Option(v, v));
+    sel.value = values.includes(current) ? current : "";
+}
+function renderChatOpts() {
+    const o = chatOpts.data;
+    if (!o) return;
+    const cur = chatOpts.store[optSlot(chat.key)] || {};
+    fillSelect($("opt-model"), o.models, o.default_model, cur.model);
+    fillSelect($("opt-effort"), o.reasoning_efforts, o.default_reasoning_effort, cur.reasoning_effort);
+}
+function rememberOpts() {
+    chatOpts.store[optSlot(chat.key)] = {model: $("opt-model").value || null, reasoning_effort: $("opt-effort").value || null};
+    saveOptStore();
+}
+async function initChatOpts() {
+    chatOpts.store = loadOptStore();
+    chatOpts.data = await apiOpt(API.chatOptions, null);
+    $("opt-model").hidden = $("opt-effort").hidden = !chatOpts.data;
+    renderChatOpts();
+}
+$("opt-model").addEventListener("change", rememberOpts);
+$("opt-effort").addEventListener("change", rememberOpts);
+
 let sending = false;
 async function sendMessage() {
     if (sending) return;
@@ -497,8 +536,14 @@ async function sendMessage() {
         }
         const body = {text: text || "(see attached files)", client_message_id: uuid()};
         if (ids.length) body.attachments = ids;
+        if ($("opt-model").value) body.model = $("opt-model").value;
+        if ($("opt-effort").value) body.reasoning_effort = $("opt-effort").value;
         if (chat.key && isOwnChat(chat.key)) body.conversation_id = chat.key.slice(ownPrefix().length);
         const r = await sendJson("POST", API.chat, body);
+        if (r.thread_key !== chat.key && !chat.key) {
+            chatOpts.store[optSlot(r.thread_key)] = chatOpts.store[optSlot(null)] || {};
+            saveOptStore();
+        }
         input.value = ""; input.style.height = "auto";
         chat.pending.forEach((p) => p.preview && URL.revokeObjectURL(p.preview));
         chat.pending = []; renderPending();
@@ -509,6 +554,7 @@ async function sendMessage() {
 }
 
 loaders.chat = async () => {
+    if (!chatOpts.data) await initChatOpts().catch(() => {});
     await loadThreads();
     setChatMode();
     if (!chat.stream) connectStream();
@@ -820,11 +866,11 @@ function field(label, node, description) {
 }
 
 // Returns {el, get}; get() throws Error on invalid input.
-function buildNode(schemaIn, value, root, name) {
+function buildNode(schemaIn, value, root, name, dflt) {
     const {schema, nullable, description} = resolveSchema(schemaIn, root);
     if (schema.enum) {
         const sel = document.createElement("select");
-        if (nullable) sel.add(new Option("(none)", ""));
+        if (nullable) sel.add(new Option(dflt != null ? `Default (${dflt})` : "Default", ""));
         for (const v of schema.enum) sel.add(new Option(String(v), String(v)));
         sel.value = value == null ? "" : String(value);
         return {el: sel, description, get: () => sel.value === "" ? null : sel.value};
@@ -858,7 +904,7 @@ function buildNode(schemaIn, value, root, name) {
         const lg = document.createElement("legend"); lg.textContent = name; fs.appendChild(lg);
         const getters = {};
         for (const [k, sub] of Object.entries(schema.properties)) {
-            const child = buildNode(sub, value ? value[k] : undefined, root, k);
+            const child = buildNode(sub, value ? value[k] : undefined, root, k, dflt ? dflt[k] : undefined);
             getters[k] = child.get;
             fs.appendChild(child.fieldset ? child.el : wrapField(k, child));
         }
@@ -880,7 +926,7 @@ function buildNode(schemaIn, value, root, name) {
                 keyEl.value = k || keySchema.enum[0];
             } else { keyEl = document.createElement("input"); keyEl.type = "text"; keyEl.value = k || ""; keyEl.placeholder = "key"; }
             keyEl.setAttribute("aria-label", name + " key");
-            const child = buildNode(schema.additionalProperties, v, root, name);
+            const child = buildNode(schema.additionalProperties, v, root, name, dflt ? dflt[k] : undefined);
             child.el.setAttribute("aria-label", name + " value");
             const rm = document.createElement("button");
             rm.type = "button"; rm.className = "btn-small"; rm.textContent = "Remove";
@@ -960,7 +1006,7 @@ function openSection(name) {
     const form = $("settings-form");
     form.innerHTML = "";
     const root = s.schema;
-    const top = buildNode(root, s.value, root, name);
+    const top = buildNode(root, s.value, root, name, s.defaults);
     sett.build = top;
     if (top.fieldset) {
         // Flatten the outermost group: its legend is the section title already.
@@ -972,6 +1018,32 @@ function openSection(name) {
     $("settings-save").hidden = !admin; $("settings-reset").hidden = !admin;
     $("settings-actions").hidden = false;
     if (!admin) form.querySelectorAll("input,select,textarea,button").forEach((e) => { e.disabled = true; });
+    renderPromptPreview(name);
+}
+const PROMPT_TYPES = ["chat", "gmail", "automation", "crontal"];
+let promptType = "chat";
+function renderPromptPreview(section) {
+    const box = $("settings-prompt");
+    box.innerHTML = "";
+    if (section !== "persona") return;
+    const title = document.createElement("div");
+    title.className = "section-title"; title.style.marginTop = "20px"; title.textContent = "Rendered prompt";
+    const sel = document.createElement("select");
+    sel.setAttribute("aria-label", "Thread type");
+    for (const t of PROMPT_TYPES) sel.add(new Option(t, t));
+    sel.value = promptType;
+    const pre = document.createElement("pre");
+    pre.className = "prompt-preview"; pre.textContent = "Loading...";
+    const load = async () => {
+        promptType = sel.value;
+        try { const r = await api(API.prompt(sel.value)); pre.textContent = r.prompt; }
+        catch (e) { pre.textContent = "Could not load prompt: " + e.message; }
+    };
+    sel.addEventListener("change", load);
+    const note = document.createElement("span");
+    note.className = "help"; note.textContent = "Read-only: saved persona plus memory index, as the agent sees it (unsaved edits not included).";
+    box.append(title, sel, note, pre);
+    load();
 }
 actions["sett-open"] = (el) => openSection(el.dataset.name);
 $("settings-sections").addEventListener("keydown", (e) => {

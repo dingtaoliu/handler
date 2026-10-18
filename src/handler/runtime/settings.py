@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -105,13 +106,45 @@ MODELS = {
 }
 
 
+@dataclass(frozen=True)
+class InstanceDefaults:
+    """Per-instance fallbacks used when a thread type's setting is empty."""
+
+    model: str | None = None
+    reasoning_effort: str | None = "low"
+
+
+# Built-in model of a harness when neither settings nor the instance set one.
+HARNESS_DEFAULT_MODELS: dict[str, str | None] = {
+    HarnessName.OPENAI_AGENTS.value: "gpt-6.1-sol",
+    HarnessName.CODEX.value: None,
+}
+
+
 class SettingsConflict(Exception):
     pass
 
 
 class SettingsService:
-    def __init__(self, store: SettingsStore) -> None:
+    def __init__(self, store: SettingsStore, defaults: InstanceDefaults | None = None) -> None:
         self.store = store
+        self.defaults = defaults or InstanceDefaults()
+
+    def effective_thread(self, entry: dict) -> dict:
+        """Resolve one thread type's settings to concrete values (nulls replaced)."""
+        harness = entry.get("harness") or HarnessName.CODEX.value
+        return {
+            "harness": harness,
+            "model": entry.get("model") or self.defaults.model
+            or HARNESS_DEFAULT_MODELS.get(harness),
+            "reasoning_effort": entry.get("reasoning_effort") or self.defaults.reasoning_effort,
+        }
+
+    def effective(self, section: str, value: dict) -> dict:
+        """Effective values mirroring the section's shape; {} where nothing is nullable."""
+        if section == "threads":
+            return {name: self.effective_thread(entry or {}) for name, entry in value.items()}
+        return {}
 
     def harness_source(self, thread_type: str) -> Callable[[], Awaitable[str]]:
         """Live lookup of the harness configured for new threads of a type."""

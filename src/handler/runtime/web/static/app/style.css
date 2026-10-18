@@ -838,3 +838,30 @@ fieldset.sf-group legend { font-size: 11px; padding: 0 6px; color: var(--muted);
 
 .msg.pending { opacity: 0.65; }
 .msg.run-error { color: var(--danger); }
+
+/* ── Composer model / effort selects ── */
+.opt-select {
+    padding: 9px 6px;
+    max-width: 140px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel-3);
+    color: var(--muted);
+    font-size: 12px;
+    font-family: inherit;
+}
+.opt-select:hover { color: var(--text); }
+
+.prompt-preview {
+    margin: 8px 0 0;
+    padding: 12px;
+    max-height: 420px;
+    overflow: auto;
+    white-space: pre-wrap;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-3);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.5;
+}

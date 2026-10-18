@@ -33,7 +33,7 @@ from .observability.logging import configure_json_logging
 from .observability.pricing import PriceTable
 from .run import RunConfig, RunExecutor, thread_slug
 from .scheduler import Scheduler
-from .settings import HarnessName, SettingsService
+from .settings import HarnessName, InstanceDefaults, SettingsService
 from .store.postgres import PostgresStore
 from .store.sqlite import SQLiteStore
 from .tools.automation import AutomationTools
@@ -166,7 +166,8 @@ async def serve(args: argparse.Namespace) -> None:
              else SQLiteStore(data_dir / "handler.db"))
     bus = RunEventBus()
 
-    settings = SettingsService(store)
+    settings = SettingsService(
+        store, InstanceDefaults(args.model, args.reasoning_effort))
     await settings.seed_from_files(
         Path(args.handler_yaml).expanduser() if args.handler_yaml else None,
         Path(args.agent_md).expanduser() if args.agent_md else None,
@@ -242,7 +243,7 @@ async def serve(args: argparse.Namespace) -> None:
                      uploads=uploads)
     app.mount("/mcp", mcp_app)
     app.include_router(approvals_router(gateway, store, auth))
-    app.include_router(settings_router(settings, auth))
+    app.include_router(settings_router(settings, auth, memory_tools))
     app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
                                     uploads=uploads, log_file=_log_file(args)))
     webhook_secret = os.environ.get("HANDLER_WEBHOOK_SECRET")

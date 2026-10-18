@@ -5,7 +5,12 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..auth import Authenticator, Principal
-from ..settings import MODELS, SettingsConflict, SettingsService
+from ..instructions import build_instructions
+from ..memory import MemoryTools
+from ..settings import (
+    MODELS, ModelName, ReasoningEffort, SettingsConflict, SettingsService,
+)
+from ..types import ThreadType
 
 
 class RollbackRequest(BaseModel):
@@ -14,7 +19,8 @@ class RollbackRequest(BaseModel):
     updated_by: str | None = None  # accepted for compatibility; the principal is recorded
 
 
-def settings_router(service: SettingsService, auth: Authenticator) -> APIRouter:
+def settings_router(service: SettingsService, auth: Authenticator,
+                    memory_tools: MemoryTools | None = None) -> APIRouter:
     router = APIRouter()
     user = Depends(auth.require_principal)
     admin = Depends(auth.require_admin)
@@ -25,11 +31,38 @@ def settings_router(service: SettingsService, auth: Authenticator) -> APIRouter:
 
     async def section_value(section: str) -> dict:
         value, version = await service.get(section)
-        return {"value": value, "version": version, "schema": service.schemas()[section]}
+        return {"value": value, "version": version, "schema": service.schemas()[section],
+                "defaults": service.effective(section, value)}
 
     @router.get("/api/settings")
     async def all_settings(_: Principal = user) -> dict:
         return {section: await section_value(section) for section in MODELS}
+
+    @router.get("/api/settings/prompt")
+    async def rendered_prompt(thread_type: str, principal: Principal = user) -> dict:
+        try:
+            kind = ThreadType(thread_type)
+        except ValueError:
+            raise HTTPException(422, f"Unknown thread_type: {thread_type}")
+        speaker = principal.user_id
+        get_user = getattr(service.store, "get_user", None)
+        if speaker is not None and get_user is not None:
+            found = await get_user(speaker)
+            speaker = getattr(found, "display_name", None) or getattr(found, "name", None) or speaker
+        text = await build_instructions(
+            service, memory_tools or MemoryTools(service.store),
+            speaker=speaker if kind == ThreadType.CHAT else None, thread_type=kind)
+        return {"thread_type": kind.value, "prompt": text}
+
+    @router.get("/api/chat/options")
+    async def chat_options(_: Principal = user) -> dict:
+        threads, _ = await service.get("threads")
+        chat = service.effective("threads", threads)["chat"]
+        return {"models": [m.value for m in ModelName],
+                "reasoning_efforts": [e.value for e in ReasoningEffort],
+                "default_model": chat["model"],
+                "default_reasoning_effort": chat["reasoning_effort"],
+                "harness": chat["harness"]}
 
     @router.get("/api/settings/{section}")
     async def get_settings(section: str, _: Principal = user) -> dict:

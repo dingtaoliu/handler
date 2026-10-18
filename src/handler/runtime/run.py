@@ -89,6 +89,19 @@ def thread_slug(key: str) -> str:
     return f"{readable}-{digest}"
 
 
+def chat_override(events: list[Event]) -> tuple[str | None, str | None]:
+    """Model / reasoning effort picked on the newest chat message that sets one."""
+    model = effort = None
+    for ev in reversed(events):
+        if ev.type != "chat.message":
+            continue
+        model = model or ev.payload.get("model") or None
+        effort = effort or ev.payload.get("reasoning_effort") or None
+        if model and effort:
+            break
+    return model, effort
+
+
 def render_turn(events: list[Event]) -> str:
     """Render pending events as one turn for the harness.
 
@@ -234,7 +247,7 @@ class RunExecutor:
             trigger_event_ids=[e.id for e in events],
             status=RunStatus.RUNNING,
             harness=thread.harness,
-            model=thread.model,
+            model=chat_override(events)[0] or thread.model,
         )
         if not await self.store.create_run(lease, run):
             logger.warning("lease lost before run start: %s", thread.key)
@@ -281,11 +294,11 @@ class RunExecutor:
 
     async def _run(self, lease: Lease, thread: Thread, run: Run, events: list[Event]) -> None:
         harness = self.harnesses.get(thread.harness)
-        recorder = _RunRecorder(self.store, run.id, model=thread.model, prices=self.prices,
+        plan = await self._plan(thread, events)
+        recorder = _RunRecorder(self.store, run.id, model=run.model, prices=self.prices,
                                 raw_sink=self.raw_sink)
         transcript = event_messages(thread.key, run.id, events, self.uploads)
         slug = thread_slug(thread.key)
-        plan = await self._plan(thread)
         mcp_token: str | None = None
         try:
             if harness is None:
@@ -455,7 +468,7 @@ class RunExecutor:
             lines.append(f"{message.role}: {excerpt}")
         return "\n".join(lines)
 
-    async def _plan(self, thread: Thread) -> "RunPlan":
+    async def _plan(self, thread: Thread, events: list[Event] | None = None) -> "RunPlan":
         """Resolve instructions, model and limits from settings (with config fallbacks)."""
         plan = RunPlan(
             instructions=self.config.instructions,
@@ -464,12 +477,17 @@ class RunExecutor:
             timeout_seconds=self.config.timeout_seconds,
             max_attempts=self.config.max_attempts,
         )
+        override_model, override_effort = chat_override(events or [])
         if self.settings is None:
+            plan.model = override_model or plan.model
+            plan.reasoning_effort = override_effort or plan.reasoning_effort
             return plan
         threads, _ = await self.settings.get("threads")
         per_type = threads.get(str(thread.type), {}) or {}
         plan.model = thread.model or per_type.get("model")
         plan.reasoning_effort = per_type.get("reasoning_effort") or plan.reasoning_effort
+        plan.model = override_model or plan.model
+        plan.reasoning_effort = override_effort or plan.reasoning_effort
         limits, _ = await self.settings.get("limits")
         plan.timeout_seconds = float(limits.get("run_timeout_seconds", plan.timeout_seconds))
         plan.max_attempts = int(limits.get("max_attempts", plan.max_attempts))

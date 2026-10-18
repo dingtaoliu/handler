@@ -18,7 +18,7 @@ from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
 from ..bus import BusMessage, RunEventBus
 from ..store.base import Store
 from ..uploads import UploadStore
-from ..settings import HarnessSource, resolve_harness
+from ..settings import HarnessSource, ModelName, ReasoningEffort, resolve_harness
 from ..types import Event, Lane, ThreadSpec, ThreadType
 from .auth_api import auth_router
 
@@ -34,6 +34,8 @@ class ChatRequest(BaseModel):
     attachments: list[str] = []  # ids of the caller's own uploads
     conversation_id: str | None = None
     client_message_id: str | None = None
+    model: ModelName | None = None  # per-message override; validated against the enum
+    reasoning_effort: ReasoningEffort | None = None
 
 
 def _json(obj: Any) -> Any:
@@ -98,6 +100,10 @@ def create_app(
         if user_id is None:
             raise HTTPException(400, f"{ACT_AS_HEADER} is required for admin-key chat")
         payload: dict[str, Any] = {"text": body.text}
+        if body.model is not None:
+            payload["model"] = body.model.value
+        if body.reasoning_effort is not None:
+            payload["reasoning_effort"] = body.reasoning_effort.value
         if body.attachments:
             if uploads is None:
                 raise HTTPException(400, "attachments are not enabled")

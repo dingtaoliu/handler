@@ -51,6 +51,8 @@
         <div id="input-area">
           <button id="upload-btn" type="button" title="Attach files" aria-label="Attach files">+</button>
           <input id="file-input" type="file" multiple aria-label="Attach files">
+          <select id="opt-model" class="opt-select" aria-label="Model" title="Model" hidden></select>
+          <select id="opt-effort" class="opt-select" aria-label="Reasoning effort" title="Reasoning effort" hidden></select>
           <textarea id="input" rows="1" placeholder="Type a message..." aria-label="Message"></textarea>
           <button id="send-btn" type="button">Send</button>
         </div>
@@ -147,6 +149,7 @@
             <button class="btn-small" id="settings-hist-btn" type="button">History</button>
           </div>
           <div id="settings-history"></div>
+          <div id="settings-prompt"></div>
         </div>
       </div>
     </section>
