@@ -29,6 +29,14 @@ class GrantPolicy:
         action = spec.action
         if action in self._actions:
             return Decision(self._actions[action]), f"action rule '{action}'"
+        decision, reason = self._fallback(spec)
+        if spec.explicit_allow_only and decision == Decision.ALLOW:
+            return Decision.ASK, (f"{reason} would allow, but {action} needs an exact "
+                                  "grant rule to run without approval")
+        return decision, reason
+
+    def _fallback(self, spec: ToolSpec) -> tuple[Decision, str]:
+        action = spec.action
         globs = [p for p in self._actions if fnmatchcase(action, p)]
         if globs:
             best = max(globs, key=len)

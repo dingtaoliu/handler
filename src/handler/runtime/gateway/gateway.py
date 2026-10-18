@@ -129,6 +129,18 @@ class Gateway:
             await self._audit(ctx, spec, args, Decision.DENY, "denied", error=reason)
             return ToolResult(f"Denied: {reason}", is_error=True)
         if decision == Decision.ASK:
+            if spec.approval_preview is not None:
+                try:
+                    previewed = await spec.approval_preview(ctx, args)
+                except Exception as exc:  # never raise to MCP
+                    log.exception("approval preview for %s failed", spec.name)
+                    previewed = ToolResult(f"Tool {spec.name} failed: {exc}", is_error=True)
+                if isinstance(previewed, ToolResult):
+                    await self._audit(ctx, spec, args, Decision.ASK, "error",
+                                      error=result_text(previewed)[:500])
+                    return previewed
+                summary, args = previewed
+                reason = f"{summary}\n\n({reason})"
             approval = Approval(
                 run_id=ctx.run_id, thread_key=ctx.thread_key, tool=spec.name,
                 action=spec.action, args=args, requested_by=actor, reason=reason,

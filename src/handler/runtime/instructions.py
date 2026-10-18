@@ -21,8 +21,11 @@ async def build_instructions(
     else:
         sections.append(_GUIDANCE[thread_type])
     sections.append("Durable facts go to memory_save, not files.")
-    sections.append("If you have gmail_* tools: you can search, read and draft email but never "
-                    "send it. Drafts wait in the mailbox for a human to review and send.")
+    sections.append("If you have gmail_* tools: you can search, read and draft email. Drafts "
+                    "wait in the mailbox for a human to review and send. Send (gmail_send, "
+                    "gmail_send_draft) only when the user asked for it: every send waits for "
+                    "a human's approval, so never say an email was sent until a result says "
+                    "status 'sent'.")
     return "\n\n".join(sections)
 
 

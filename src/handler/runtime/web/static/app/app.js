@@ -934,6 +934,7 @@ async function loadApprovals() {
     const box = $("approvals-content");
     let html = `<div class="section-title">Pending (${pending.length})</div>`;
     html += pending.length ? pending.map((a) => `<div class="card"><div><b>${esc(a.tool)}</b> <span class="muted mono">${esc(a.action)}</span> ${a.requested_by ? "by " + esc(a.requested_by) : ""} <span class="muted">· ${fmtAge(a.created_at)} ago · ${esc(a.thread_key)}</span></div>
+        ${a.reason ? `<pre style="white-space:pre-wrap;word-break:break-word;margin:8px 0">${esc(a.reason)}</pre>` : ""}
         <pre class="mono" style="white-space:pre-wrap;word-break:break-all;margin:8px 0">${esc(argsPreview(a.args))}</pre>
         <div class="inline-actions"><input type="text" id="reason-${esc(a.id)}" placeholder="Reason (optional)" aria-label="Reason">
         <button class="btn-small btn-primary" data-action="appr-approve" data-id="${esc(a.id)}">Approve</button>

@@ -1,9 +1,15 @@
-"""Native Gmail tools: search, read, attachments and drafts. Never send or delete.
+"""Native Gmail tools: search, read, attachments, drafts and send. Never delete.
 
 The tools call the Gmail REST API directly with the instance's `google`
-connection (gateway/google_oauth.py). There is deliberately no send, delete,
-trash, label or modify tool: drafts wait in the mailbox for a human to review
-and send.
+connection (gateway/google_oauth.py). There is deliberately no delete, trash,
+label or modify tool. Drafts wait in the mailbox for a human to review and
+send. Sending (`gmail_send`, `gmail_send_draft`) is `write_external` and
+`explicit_allow_only`: every send goes through handler's approval flow unless
+an exact grant rule allows it, and the approver sees the recipients, subject,
+a body preview and the attachment names. What runs after approval is what was
+shown: recipients and subject are resolved before the approval is parked,
+attachment contents are pinned by hash, and a draft is pinned to its current
+message id.
 
 Attachments are saved into the thread's workspace under
 `downloads/gmail/<message_id>/`, with document text extracted like
@@ -14,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import mimetypes
 import re
@@ -39,6 +46,7 @@ from .google_oauth import (
     GMAIL_MODIFY,
     INSTANCE_OWNER,
     READ_SCOPES,
+    SEND_SCOPES,
     OAuthError,
 )
 
@@ -53,8 +61,14 @@ SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024  # larger drafts go through the upload end
 MAX_DRAFT_BYTES = 30 * 1024 * 1024
 FETCH_CONCURRENCY = 5
 SUMMARY_HEADERS = ("From", "To", "Cc", "Date", "Subject")
-DRAFT_NOTE = ("Drafts are saved in the mailbox for a human to review and send; you cannot "
-              "send email, so never say an email was sent.")
+DRAFT_NOTE = ("Drafts are saved in the mailbox for a human to review and send; a draft is "
+              "not sent, so never say it was.")
+SEND_NOTE = ("Sending needs a human's approval: the call returns pending_approval and the "
+             "email goes out only once someone approves it. Never say an email was sent "
+             "until the result says status 'sent'.")
+BODY_PREVIEW_CHARS = 600
+PIN_HASHES = "_approved_attachment_sha256"  # set by the approval preview, not the agent
+PIN_DRAFT = "_approved_message_id"
 
 
 class GmailError(Exception):
@@ -369,15 +383,22 @@ class GmailTools:
 
     # ── drafts ─────────────────────────────────────────────────────────────
 
-    def _files(self, ctx: RunContext, paths: list[str]) -> list[tuple[str, bytes, str]]:
+    def _files(self, ctx: RunContext, paths: list[str],
+               pins: dict[str, str] | None = None) -> list[tuple[str, bytes, str]]:
+        """Workspace files as (name, bytes, mime). With `pins` (path → sha256 from
+        the approval preview), a file whose content changed since is refused."""
         workspace = self._workspace_for(ctx.thread_key).resolve()
         files = []
         for path in paths:
             source = (workspace / path).resolve()
             if workspace not in source.parents or not source.is_file():
                 raise GmailError(f"attachment not found in the workspace: {path}")
+            data = source.read_bytes()
+            if pins is not None and pins.get(path) != hashlib.sha256(data).hexdigest():
+                raise GmailError(f"attachment {path} changed after the send was approved; "
+                                 "not sent. Request the send again.")
             mime = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
-            files.append((source.name, source.read_bytes(), mime))
+            files.append((source.name, data, mime))
         return files
 
     async def _reply_headers(self, ctx: RunContext, message_id: str) -> dict[str, Any]:
@@ -394,15 +415,21 @@ class GmailTools:
     async def _upload_draft(self, ctx: RunContext, method: str, path: str,
                             message: EmailMessage, thread_id: str | None,
                             draft_id: str | None = None) -> dict[str, Any]:
-        raw = message.as_bytes()
-        if len(raw) > MAX_DRAFT_BYTES:
-            raise GmailError(f"The draft is {len(raw) // (1024 * 1024)} MB; Gmail allows "
-                             "about 25 MB of attachments.")
         meta: dict[str, Any] = {"message": {"threadId": thread_id} if thread_id else {}}
         if draft_id:
             meta["id"] = draft_id
+        return await self._upload(ctx, method, path, message, meta, meta["message"])
+
+    async def _upload(self, ctx: RunContext, method: str, path: str, message: EmailMessage,
+                      meta: dict[str, Any], raw_into: dict[str, Any]) -> dict[str, Any]:
+        """Send `meta` with the MIME message: as `raw_into["raw"]` when small, else
+        through Gmail's multipart upload endpoint."""
+        raw = message.as_bytes()
+        if len(raw) > MAX_DRAFT_BYTES:
+            raise GmailError(f"The email is {len(raw) // (1024 * 1024)} MB; Gmail allows "
+                             "about 25 MB of attachments.")
         if len(raw) <= SIMPLE_UPLOAD_LIMIT:
-            meta["message"]["raw"] = base64.urlsafe_b64encode(raw).decode()
+            raw_into["raw"] = base64.urlsafe_b64encode(raw).decode()
             return await self._api(ctx, method, path, json_body=meta)
         boundary = f"handler-{uuid.uuid4().hex}"
         content = (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
@@ -423,25 +450,36 @@ class GmailTools:
                 "thread_id": message.get("threadId"), "gmail_link": link,
                 "note": "Saved as a draft for a human to review and send. Not sent."}
 
-    async def _create_draft(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+    async def _resolve_new(self, ctx: RunContext, args: dict[str, Any]) -> dict[str, Any]:
+        """Recipients, subject and threading for a new email or a reply."""
         reply = (await self._reply_headers(ctx, args["reply_to_message_id"])
                  if args.get("reply_to_message_id") else {})
         to = _addresses(args.get("to")) or reply.get("to")
         if not to:
-            return ToolResult("`to` is required unless reply_to_message_id is given",
-                              is_error=True)
+            raise GmailError("`to` is required unless reply_to_message_id is given")
         subject = args.get("subject") or ""
         if reply:
             subject = reply_subject(subject or reply.get("subject", ""))
         elif not subject.strip():
-            return ToolResult("`subject` is required for a new email", is_error=True)
+            raise GmailError("`subject` is required for a new email")
+        return {"to": to, "subject": subject, "cc": _addresses(args.get("cc")),
+                "bcc": _addresses(args.get("bcc")), "thread_id": reply.get("thread_id"),
+                "in_reply_to": reply.get("in_reply_to"),
+                "references": reply.get("references")}
+
+    async def _compose(self, ctx: RunContext, args: dict[str, Any],
+                       pins: dict[str, str] | None = None) -> tuple[EmailMessage, str | None]:
+        fields = await self._resolve_new(ctx, args)
         message = build_message(
-            to=to, subject=subject, body=args["body"], cc=_addresses(args.get("cc")),
-            bcc=_addresses(args.get("bcc")), in_reply_to=reply.get("in_reply_to"),
-            references=reply.get("references"),
-            files=self._files(ctx, args.get("attachments") or []))
-        draft = await self._upload_draft(ctx, "POST", "/drafts", message,
-                                         reply.get("thread_id"))
+            to=fields["to"], subject=fields["subject"], body=args["body"], cc=fields["cc"],
+            bcc=fields["bcc"], in_reply_to=fields["in_reply_to"],
+            references=fields["references"],
+            files=self._files(ctx, args.get("attachments") or [], pins))
+        return message, fields["thread_id"]
+
+    async def _create_draft(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        message, thread_id = await self._compose(ctx, args)
+        draft = await self._upload_draft(ctx, "POST", "/drafts", message, thread_id)
         return ToolResult(await self._draft_result(ctx, draft))
 
     async def _update_draft(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
@@ -505,17 +543,106 @@ class GmailTools:
         drafts = await asyncio.gather(*(one(d["id"]) for d in listed.get("drafts") or []))
         return ToolResult({"drafts": list(drafts)})
 
+    # ── send (approval-gated) ────────────────────────────────────────────
+
+    async def _sent_result(self, ctx: RunContext, sent: dict[str, Any],
+                           shown: dict[str, Any]) -> dict[str, Any]:
+        account = await self._credentials.account(self._owner_for(ctx))
+        link = "https://mail.google.com/mail/" + (
+            f"?authuser={quote(account)}" if account else "") + f"#all/{sent.get('id')}"
+        return {"status": "sent", "message_id": sent.get("id"),
+                "thread_id": sent.get("threadId"), "gmail_link": link,
+                **{k: v for k, v in shown.items() if v}}
+
+    async def _send(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        pins = args.get(PIN_HASHES)
+        message, thread_id = await self._compose(ctx, args, pins)
+        meta: dict[str, Any] = {"threadId": thread_id} if thread_id else {}
+        sent = await self._upload(ctx, "POST", "/messages/send", message, meta, meta)
+        return ToolResult(await self._sent_result(ctx, sent, {
+            "to": message["To"], "cc": message["Cc"], "bcc": message["Bcc"],
+            "subject": message["Subject"]}))
+
+    async def _preview_send(self, ctx: RunContext,
+                            args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        fields = await self._resolve_new(ctx, args)
+        paths = args.get("attachments") or []
+        files = self._files(ctx, paths)
+        pinned = {**args, "to": fields["to"], "subject": fields["subject"],
+                  PIN_HASHES: {path: hashlib.sha256(data).hexdigest()
+                               for path, (_, data, _) in zip(paths, files)}}
+        return _email_summary(
+            "Send email" + (" (reply)" if fields["in_reply_to"] else ""),
+            to=fields["to"], cc=fields["cc"], bcc=fields["bcc"],
+            subject=fields["subject"], body=args["body"],
+            attachments=[(name, len(data)) for name, data, _ in files]), pinned
+
+    async def _draft_message(self, ctx: RunContext, draft_id: str):
+        current = await self._api(ctx, "GET", f"/drafts/{quote(draft_id)}",
+                                  params={"format": "raw"})
+        message = current.get("message") or {}
+        parsed = BytesParser(policy=policy.default).parsebytes(
+            _b64decode(message.get("raw", "")))
+        return message, parsed
+
+    async def _send_draft(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        draft_id = args["draft_id"]
+        message, parsed = await self._draft_message(ctx, draft_id)
+        pinned = args.get(PIN_DRAFT)
+        if pinned is not None and message.get("id") != pinned:
+            raise GmailError("The draft changed after the send was approved; not sent. "
+                             "Request the send again so the new version can be reviewed.")
+        sent = await self._api(ctx, "POST", "/drafts/send", json_body={"id": draft_id})
+        return ToolResult(await self._sent_result(ctx, sent, {
+            "draft_id": draft_id, "to": parsed.get("To"), "cc": parsed.get("Cc"),
+            "bcc": parsed.get("Bcc"), "subject": parsed.get("Subject")}))
+
+    async def _preview_send_draft(self, ctx: RunContext,
+                                  args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        message, parsed = await self._draft_message(ctx, args["draft_id"])
+        if not parsed.get("To") and not parsed.get("Cc") and not parsed.get("Bcc"):
+            raise GmailError("The draft has no recipients; set `to` with gmail_update_draft.")
+        part = parsed.get_body(("plain", "html"))
+        body = "" if part is None else part.get_content()
+        if part is not None and part.get_content_subtype() == "html":
+            body = html_to_text(body)
+        files = [(a.get_filename() or "attachment", len(a.get_payload(decode=True) or b""))
+                 for a in parsed.iter_attachments()]
+        summary = _email_summary(
+            f"Send draft {args['draft_id']}", to=parsed.get("To"), cc=parsed.get("Cc"),
+            bcc=parsed.get("Bcc"), subject=parsed.get("Subject"), body=body,
+            attachments=files)
+        return summary, {**args, PIN_DRAFT: message.get("id")}
+
+    def _preview(self, run, needs: tuple[str, ...]):
+        """An ApprovalPreview: errors become a ToolResult, so nothing is parked."""
+
+        async def preview(ctx: RunContext, args: dict[str, Any]):
+            result: dict[str, Any] = {}
+
+            async def capture(ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+                result["value"] = await run(ctx, args)
+                return ToolResult("ok")
+
+            outcome = await self._guard(ctx, args, capture, needs)
+            return result.get("value", outcome)
+
+        return preview
+
     # ── specs ─────────────────────────────────────────────────────────────
 
     def _spec(self, name: str, risk: Risk, description: str, schema: dict[str, Any],
-              run) -> ToolSpec:
-        needs = DRAFT_SCOPES if "draft" in name else READ_SCOPES
+              run, *, needs: tuple[str, ...] | None = None, preview=None) -> ToolSpec:
+        needs = needs or (DRAFT_SCOPES if "draft" in name else READ_SCOPES)
 
         async def handler(ctx: RunContext, args: dict[str, Any]) -> ToolResult:
             return await self._guard(ctx, args, run, needs)
 
-        return ToolSpec(f"gmail_{name}", f"gmail.{name}", risk, description,
-                        {"type": "object", **schema}, handler)
+        return ToolSpec(
+            f"gmail_{name}", f"gmail.{name}", risk, description,
+            {"type": "object", **schema}, handler,
+            explicit_allow_only=preview is not None,
+            approval_preview=self._preview(preview, needs) if preview else None)
 
     def tools(self) -> list[ToolSpec]:
         addresses = {"type": ["array", "string"], "items": {"type": "string"},
@@ -596,7 +723,43 @@ class GmailTools:
                 + DRAFT_NOTE,
                 {"properties": {"max_results": {**max_results, "default": 20}}},
                 self._list_drafts),
+            self._spec(
+                "send", Risk.WRITE_EXTERNAL,
+                "Send an email from the shared Gmail mailbox: a new email, or a reply with "
+                "reply_to_message_id (threaded, In-Reply-To/References set, 'Re:' subject, "
+                "`to` defaults to the sender). Attachments are workspace paths. "
+                + SEND_NOTE + " Prefer gmail_create_draft unless the user asked to send.",
+                {"properties": draft_fields, "required": ["body"]},
+                self._send, needs=SEND_SCOPES, preview=self._preview_send),
+            self._spec(
+                "send_draft", Risk.WRITE_EXTERNAL,
+                "Send an existing Gmail draft as it is now (see gmail_list_drafts). "
+                + SEND_NOTE + " If the draft is changed after approval, the send is "
+                "refused.",
+                {"properties": {"draft_id": {"type": "string"}}, "required": ["draft_id"]},
+                self._send_draft, needs=SEND_SCOPES, preview=self._preview_send_draft),
         ]
+
+
+def _email_summary(title: str, *, to: str | None, cc: str | None, bcc: str | None,
+                   subject: str | None, body: str,
+                   attachments: list[tuple[str, int]]) -> str:
+    """What an approver sees for a send: recipients, subject, body preview, files."""
+    lines = [title, f"To: {to or '-'}"]
+    if cc:
+        lines.append(f"Cc: {cc}")
+    if bcc:
+        lines.append(f"Bcc: {bcc}")
+    lines.append(f"Subject: {subject or '(no subject)'}")
+    if attachments:
+        lines.append("Attachments: " + ", ".join(
+            f"{name} ({size:,} bytes)" for name, size in attachments))
+    else:
+        lines.append("Attachments: none")
+    text = (body or "").strip()
+    preview, cut = _truncate(text, BODY_PREVIEW_CHARS)
+    lines.append("Body:\n" + preview + (f"\n… ({len(text):,} characters in all)" if cut else ""))
+    return "\n".join(lines)
 
 
 def _api_error(response: httpx.Response) -> str:

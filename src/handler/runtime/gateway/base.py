@@ -21,6 +21,14 @@ class ToolResult:
 
 
 ToolHandler = Callable[[RunContext, dict[str, Any]], Awaitable[ToolResult]]
+# Before an `ask` call is parked: a human-readable summary for the approver and
+# the arguments to store (e.g. with resolved recipients and pinned content
+# hashes, so what runs after approval is exactly what was shown). Returning a
+# ToolResult instead rejects the call with that (error) result.
+ApprovalPreview = Callable[
+    [RunContext, dict[str, Any]],
+    Awaitable["tuple[str, dict[str, Any]] | ToolResult"],
+]
 
 
 @dataclass(frozen=True)
@@ -30,6 +38,10 @@ class ToolSpec:
     name: MCP tool name, snake_case, unique (e.g. "memory_save").
     action: dotted action id used by grants and audit (e.g. "memory.save").
     input_schema: JSON Schema (type: object) for the arguments.
+    explicit_allow_only: only an exact grant rule for `action` may allow the
+        call without approval; risk defaults and glob rules that say `allow`
+        become `ask` (globs and defaults can still deny).
+    approval_preview: see ApprovalPreview.
     """
 
     name: str
@@ -38,6 +50,8 @@ class ToolSpec:
     description: str
     input_schema: dict[str, Any]
     handler: ToolHandler = field(compare=False, repr=False)
+    explicit_allow_only: bool = False
+    approval_preview: ApprovalPreview | None = field(default=None, compare=False, repr=False)
 
 
 class Policy(Protocol):
