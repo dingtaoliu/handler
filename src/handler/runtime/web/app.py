@@ -18,6 +18,7 @@ from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
 from ..bus import BusMessage, RunEventBus
 from ..store.base import Store
 from ..uploads import UploadStore
+from ..settings import HarnessSource, resolve_harness
 from ..types import Event, Lane, ThreadSpec, ThreadType
 from .auth_api import auth_router
 
@@ -72,7 +73,7 @@ async def sse_stream(
 
 
 def create_app(
-    store: Store, bus: RunEventBus, auth: Authenticator, *, default_harness: str = "codex",
+    store: Store, bus: RunEventBus, auth: Authenticator, *, default_harness: HarnessSource = "codex",
     uploads: UploadStore | None = None,
 ) -> FastAPI:
     # No interactive docs / OpenAPI: the API is authenticated, its schema needn't be public.
@@ -120,7 +121,7 @@ def create_app(
             type=ThreadType.CHAT,
             lane=Lane.INTERACTIVE,
             owner_user_id=user_id,
-            harness=default_harness,
+            harness=await resolve_harness(default_harness),
         )
         stored = await store.put(event, spec)
         if stored:

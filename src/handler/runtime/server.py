@@ -26,12 +26,13 @@ from .gateway.mcp_server import create_mcp_app
 from .gateway.policy import GrantPolicy
 from .gateway.tokens import RunTokens
 from .harness.codex import SANDBOX_MODES, CodexHarness, codex_binary
+from .harness.openai_agents import OpenAIAgentsHarness
 from .memory import MemoryTools
 from .observability.logging import configure_json_logging
 from .observability.pricing import PriceTable
 from .run import RunConfig, RunExecutor
 from .scheduler import Scheduler
-from .settings import SettingsService
+from .settings import HarnessName, SettingsService
 from .store.postgres import PostgresStore
 from .store.sqlite import SQLiteStore
 from .tools.automation import AutomationTools
@@ -128,6 +129,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                    choices=SANDBOX_MODES,
                    help="Codex sandbox mode; use danger-full-access only where the container "
                         "itself is the isolation boundary (e.g. Heroku dynos)")
+    s.add_argument("--default-harness", default=os.environ.get("HANDLER_DEFAULT_HARNESS"),
+                   choices=[h.value for h in HarnessName],
+                   help="harness for every thread type on a fresh instance "
+                        "(later changes go through settings)")
     s.add_argument("--crontal-url", default=os.environ.get("CRONTAL_URL"),
                    help="Crontal MCP endpoint, e.g. https://crontal.ai/api/v1/agent-mcp "
                         "(token from $CRONTAL_AGENT_TOKEN)")
@@ -162,7 +167,14 @@ async def serve(args: argparse.Namespace) -> None:
         Path(args.handler_yaml).expanduser() if args.handler_yaml else None,
         Path(args.agent_md).expanduser() if args.agent_md else None,
     )
-    threads_cfg, _ = await settings.get("threads")
+    if args.default_harness:
+        # Fresh instances only: once threads settings exist, the UI owns them.
+        threads_cfg, threads_version = await settings.get("threads")
+        if threads_version is None:
+            for per_type in threads_cfg.values():
+                per_type["harness"] = args.default_harness
+            await settings.put("threads", threads_cfg, updated_by="default-harness",
+                               expected_version=None)
     limits_cfg, _ = await settings.get("limits")
     grants_cfg, grants_version = await settings.get("grants")
 
@@ -170,7 +182,7 @@ async def serve(args: argparse.Namespace) -> None:
 
     users = [u.strip() for u in args.users.split(",") if u.strip()]
     memory_tools = MemoryTools(store)
-    scheduler = Scheduler(store, default_harness=threads_cfg["automation"]["harness"])
+    scheduler = Scheduler(store, default_harness=settings.harness_source("automation"))
     gateway = Gateway(store, GrantPolicy(grants_cfg), emit_event=emit_event)
     for provider in (memory_tools, AutomationTools(store, scheduler),
                      NotifyTools(store, bus, users_provider=lambda: users)):
@@ -178,22 +190,34 @@ async def serve(args: argparse.Namespace) -> None:
     tokens = RunTokens()
     mcp_app = create_mcp_app(gateway, tokens)
 
-    harness = CodexHarness(
-        codex_binary(),
-        default_model=args.model,
-        default_reasoning_effort=args.reasoning_effort,
-        auth_json=Path(args.codex_auth_json).expanduser() if args.codex_auth_json else None,
-        sandbox=args.codex_sandbox,
-        auth_json_link=args.codex_auth_link,
-    )
     config = RunConfig(data_dir=data_dir, reasoning_effort=args.reasoning_effort,
                        timeout_seconds=float(limits_cfg["run_timeout_seconds"]),
                        max_attempts=int(limits_cfg["max_attempts"]))
     local_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
     file_store = (S3FileStore.from_env(prefix=os.environ.get("HANDLER_FILE_PREFIX", ""))
                   if args.file_store == "s3" else LocalFileStore(data_dir / "files"))
+    harnesses: dict = {}
+    try:
+        harnesses["codex"] = CodexHarness(
+            codex_binary(),
+            default_model=args.model,
+            default_reasoning_effort=args.reasoning_effort,
+            auth_json=Path(args.codex_auth_json).expanduser() if args.codex_auth_json else None,
+            sandbox=args.codex_sandbox,
+            auth_json_link=args.codex_auth_link,
+        )
+    except FileNotFoundError as exc:
+        logger.warning("codex harness off: %s", exc)
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY")
+    if api_key:
+        harnesses["openai_agents"] = OpenAIAgentsHarness(
+            api_key, default_model=args.model, default_reasoning_effort=args.reasoning_effort)
+    else:
+        logger.info("openai_agents harness off: set OPENAI_API_KEY to enable it")
+    if not harnesses:
+        raise SystemExit("no harness available: install Codex or set OPENAI_API_KEY")
     executor = RunExecutor(
-        store, {"codex": harness}, bus, config, PriceTable.from_yaml(),
+        store, harnesses, bus, config, PriceTable.from_yaml(),
         tokens=tokens, mcp_url=f"http://{local_host}:{args.port}/mcp/",
         settings=settings, memory_tools=memory_tools,
         workspace_sync=WorkspaceSync(file_store, data_dir),
@@ -209,7 +233,7 @@ async def serve(args: argparse.Namespace) -> None:
     if not args.admin_key:
         logger.warning("no admin key set; only user tokens can authenticate")
     uploads = UploadStore(data_dir / "uploads")
-    app = create_app(store, bus, auth, default_harness=threads_cfg["chat"]["harness"],
+    app = create_app(store, bus, auth, default_harness=settings.harness_source("chat"),
                      uploads=uploads)
     app.mount("/mcp", mcp_app)
     app.include_router(approvals_router(gateway, store, auth))
@@ -218,12 +242,8 @@ async def serve(args: argparse.Namespace) -> None:
                                     uploads=uploads, log_file=_log_file(args)))
     webhook_secret = os.environ.get("HANDLER_WEBHOOK_SECRET")
     if webhook_secret:
-
-        async def crontal_harness() -> str:
-            threads, _ = await settings.get("threads")
-            return threads.get("crontal", {}).get("harness", "codex")
-
-        app.include_router(crontal_ingest_router(store, webhook_secret, harness=crontal_harness))
+        app.include_router(crontal_ingest_router(store, webhook_secret,
+                                                 harness=settings.harness_source("crontal")))
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):

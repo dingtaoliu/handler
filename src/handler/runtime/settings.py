@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 from pathlib import Path
+from typing import Awaitable, Callable
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +28,16 @@ class HarnessName(StrEnum):
     """Harnesses this runtime can run; settings UIs render it as a dropdown."""
 
     CODEX = "codex"
+    OPENAI_AGENTS = "openai_agents"
+
+
+# Where a new thread's harness comes from: a fixed name, or a lookup that
+# reads the current settings (so changing it needs no restart).
+HarnessSource = str | Callable[[], Awaitable[str]]
+
+
+async def resolve_harness(source: HarnessSource) -> str:
+    return source if isinstance(source, str) else await source()
 
 
 class ModelName(StrEnum):
@@ -101,6 +112,15 @@ class SettingsConflict(Exception):
 class SettingsService:
     def __init__(self, store: SettingsStore) -> None:
         self.store = store
+
+    def harness_source(self, thread_type: str) -> Callable[[], Awaitable[str]]:
+        """Live lookup of the harness configured for new threads of a type."""
+
+        async def lookup() -> str:
+            threads, _ = await self.get("threads")
+            return (threads.get(thread_type) or {}).get("harness") or HarnessName.CODEX.value
+
+        return lookup
 
     async def get(self, section: str) -> tuple[dict, int | None]:
         model = MODELS[section]

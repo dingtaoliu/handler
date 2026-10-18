@@ -43,6 +43,12 @@ heroku config:set -a crontal-agent \
 ```
 
 - `CODEX_API_KEY`: Codex reads it from the environment; no `codex login` is needed.
+  The native `openai_agents` harness uses the same key (or `OPENAI_API_KEY`).
+- `HANDLER_DEFAULT_HARNESS=openai_agents` (recommended here): every thread type uses the
+  native Agents SDK harness, which runs in-process (no Codex subprocess per run, far less
+  memory) and has no shell, only handler's tools and workspace file tools. Applied once,
+  on a fresh instance; afterwards change it per thread type in Settings → Threads, which
+  takes effect for new threads without a restart. Codex stays installed as an option.
 - `HANDLER_ADMIN_KEY`: the instance admin key (package L). Crontal's backend uses it with
   `X-Handler-User` to act for users. Keep it in Crontal's own config as well.
 - `HANDLER_DB_SCHEMA`: defaults to `handler_crontal` if unset. Created on first start.

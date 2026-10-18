@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from croniter import croniter
 
 from .store.base import ScheduleStore
+from .settings import HarnessSource, resolve_harness
 from .types import Event, Lane, ThreadSpec, ThreadType, utcnow
 
 
@@ -63,7 +64,7 @@ class Scheduler:
         store: ScheduleStore,
         *,
         clock: Callable[[], datetime] = utcnow,
-        default_harness: str = "codex",
+        default_harness: HarnessSource = "codex",
         max_sleep_seconds: float = 300,
     ) -> None:
         if max_sleep_seconds <= 0:
@@ -111,7 +112,7 @@ class Scheduler:
                 thread = ThreadSpec(
                     key, ThreadType.AUTOMATION, Lane.BACKGROUND,
                     owner_user_id=schedule.created_by,
-                    harness=schedule.harness or self.default_harness, model=schedule.model,
+                    harness=schedule.harness or await resolve_harness(self.default_harness), model=schedule.model,
                 )
                 fired += await self.store.fire_schedule(schedule, expected, next_run, event, thread)
         return fired

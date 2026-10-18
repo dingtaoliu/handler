@@ -19,6 +19,7 @@ from ..context import RunContext
 from ..gateway.gateway import Gateway
 from ..memory import MemoryTools
 from ..scheduler import Scheduler, parse_spec
+from ..settings import resolve_harness
 from ..store.base import Store
 from ..types import Event, Lane, MemoryTopic, Run, Schedule, ThreadSpec, ThreadType, TokenUsage
 from ..uploads import (
@@ -267,7 +268,7 @@ def admin_router(
         )
         spec = ThreadSpec(key, ThreadType.AUTOMATION, Lane.BACKGROUND,
                           owner_user_id=schedule.created_by,
-                          harness=schedule.harness or scheduler.default_harness,
+                          harness=schedule.harness or await resolve_harness(scheduler.default_harness),
                           model=schedule.model)
         await store.put(event, spec)
         return {"event_id": event.id, "thread_key": key}
