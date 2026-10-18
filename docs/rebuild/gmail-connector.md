@@ -168,3 +168,27 @@ First deploy a build that contains this branch. Then:
 - **Audit.** Every tool call is audited under its `gmail.*` action, like other gateway tools.
 - **Sends** appear in the Approvals tab (and the pending badge). Approving runs the send and posts the result into the thread; denying sends nothing.
 - **Not built:** push or new-mail triggers (the separate email-intake feature covers inbound mail), per-user Google connections, and label/delete tools.
+
+## 4. Upstream MCP evaluation (2026-10-18, not switched)
+
+We looked at replacing these native tools with an upstream Google MCP server (design §6.1). Per the owner's timebox, the switch is left for a follow-up and the native tools stay.
+
+**Google's official servers** (`https://gmailmcp.googleapis.com/mcp/v1`, `https://drivemcp.googleapis.com/mcp/v1`; streamable HTTP, OAuth bearer):
+- They are Developer Preview only. Using them needs the Cloud project enrolled in the Workspace Developer Preview Program, and the application asks for a **Google Workspace account**. `crontal-test` is owned by a consumer account. Our agentic client is required (enforced from 2026-11-11) and is in place.
+- To set them up you would enable `gmailmcp.googleapis.com` and `drivemcp.googleapis.com` as well as the REST APIs. They use the scopes `gmail.readonly` + `gmail.compose` and `drive.readonly`/`drive.file`. No quotas or pricing are published.
+- Gmail has 10 tools: search_threads, get_thread, get_message, create_draft, list_drafts, list/label/unlabel. It has **no send**, no attachment download, no draft update, and drafts can't carry attachments yet. Drive is good: `read_file_content` returns text for Docs/Sheets/Slides/PDF/Office, and `download_file_content` returns the file as inline base64.
+- Not usable for us now.
+
+**Fallback `taylorwilsdon/google_workspace_mcp`** (PyPI `workspace-mcp`, v2.1.0 from 2026-10-09; MIT; about 3.4k stars):
+- This can work. In `MCP_ENABLE_OAUTH21=true EXTERNAL_OAUTH21_PROVIDER=true WORKSPACE_MCP_STATELESS_MODE=true` mode it takes the caller's `ya29.` bearer on each request, validates it against userinfo (so it needs `userinfo.email`) and writes nothing to disk. It does not run its own OAuth flow and stores no tokens. A bad token gets HTTP 401. A token Google rejects mid-call comes back as a tool error, "Authentication error occurred …". Checked locally.
+- To keep sends inside handler's approval flow, run it with `--permissions gmail:drafts drive:readonly`, which drops its send tool, and `--disabled-tools` for the label and sharing tools.
+- The costs:
+  - It needs its own venv: it installs top-level packages named `auth`, `core`, `gmail`, `main`. That is a 187 MB venv and about **127 MB RSS** idle (measured on macOS arm64).
+  - It needs a sidecar process on a 512 MB dyno.
+  - Tool results are formatted text rather than JSON.
+  - It has no list-drafts or update-draft tools.
+  - A stateless attachment download carries no filename.
+  - Draft attachments take server-local `path` or `url` values, which handler would have to replace with base64 content to avoid file exfiltration or SSRF.
+- Handler would still need thin native tools for drafts, attachment saving and approval-gated send. So the gain is mostly Drive.
+
+**Recommendation:** keep the native Gmail tools. Add Drive as small native read-only tools on the same `GoogleOAuth` connection: search/list, metadata, and export/download into the workspace with text extracted. They need `drive.readonly` plus the Drive API, and the owner reconnects. Revisit the official servers when they reach GA for consumer accounts, or the sidecar when several more Workspace services are wanted.
