@@ -39,7 +39,7 @@ def request_base_url(request: Request) -> str:
     proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0]
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") \
         or request.url.netloc
-    return f"{proto.strip()}://{host.split(',')[0].strip()}"
+    return f"{proto.strip()}://{host.split(',')[0].strip()}{request.scope.get('root_path', '')}"
 
 
 RETURN_TO_ORIGINS_ENV = "HANDLER_RETURN_TO_ORIGINS"
@@ -158,7 +158,7 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *,
                 "redirect_uri": redirect_uri}
 
     @router.get(CALLBACK_PATH)
-    async def callback(state: str = "", code: str = "", error: str = "") -> RedirectResponse:
+    async def callback(request: Request, state: str = "", code: str = "", error: str = "") -> RedirectResponse:
         # The state is signed, but re-check the allowlist anyway: it may have
         # shrunk since the flow started, and an unknown target falls back home.
         return_to = oauth.state_return_to(state) if oauth is not None else None
@@ -173,7 +173,7 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *,
                 else:
                     target = _with_query(return_to, google="connected")
                 return RedirectResponse(target, status_code=303)
-            return RedirectResponse(f"/app?{urlencode(query)}#connections", status_code=303)
+            return RedirectResponse(f"{request.scope.get('root_path', '')}/app?{urlencode(query)}#connections", status_code=303)
 
         if oauth is None:
             return back(google_error="Google OAuth is not configured on this instance.")

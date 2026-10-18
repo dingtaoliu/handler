@@ -46,8 +46,9 @@ class SecretBox:
         self._signing = _derive(key, "signing")
 
     @classmethod
-    def from_env(cls) -> SecretBox | None:
-        key = os.environ.get("HANDLER_SECRET_KEY") or os.environ.get("HANDLER_ADMIN_KEY")
+    def from_env(cls, env=None) -> SecretBox | None:
+        env = os.environ if env is None else env
+        key = env.get("HANDLER_SECRET_KEY") or env.get("HANDLER_ADMIN_KEY")
         return cls(key) if key else None
 
     def encrypt(self, plaintext: str) -> str:

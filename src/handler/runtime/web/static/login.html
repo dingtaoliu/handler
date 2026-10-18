@@ -16,16 +16,21 @@ form { display: grid; gap: 12px; } input, button { padding: 10px; }
 <p id="error" role="alert"></p>
 </form>
 <script>
+const handlerBase = (window.HANDLER_CONFIG || {}).base || "";
+const handlerInstance = (window.HANDLER_CONFIG || {}).instance || "";
+const handlerPath = (path) => handlerBase + path;
+const handlerKey = (key) => handlerInstance ? "handler.instance." + handlerInstance + ":" + key : key;
+
 async function enter(token, actAs) {
   try {
     const headers = {Authorization: "Bearer " + token};
     if (actAs) headers["X-Handler-User"] = actAs;
-    const response = await fetch("/api/me", {headers, cache: "no-store"});
+    const response = await fetch(handlerPath("/api/me"), {headers, cache: "no-store"});
     if (!response.ok) throw new Error("Sign in failed. Check your token and user.");
-    sessionStorage.setItem("handler.token", token);
-    if (actAs) sessionStorage.setItem("handler.actAs", actAs);
-    else sessionStorage.removeItem("handler.actAs");
-    location.replace("/");
+    sessionStorage.setItem(handlerKey("handler.token"), token);
+    if (actAs) sessionStorage.setItem(handlerKey("handler.actAs"), actAs);
+    else sessionStorage.removeItem(handlerKey("handler.actAs"));
+    location.replace(handlerPath("/"));
   } catch (error) {
     document.getElementById("error").textContent = error.message;
   }
@@ -36,8 +41,8 @@ document.getElementById("login").onsubmit = (event) => {
         document.getElementById("act-as").value.trim());
 };
 try {
-  const token = sessionStorage.getItem("handler.token");
-  if (token) enter(token, sessionStorage.getItem("handler.actAs") || "");
+  const token = sessionStorage.getItem(handlerKey("handler.token"));
+  if (token) enter(token, sessionStorage.getItem(handlerKey("handler.actAs")) || "");
 } catch {}
 </script>
 </html>

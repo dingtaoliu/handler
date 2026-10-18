@@ -72,13 +72,14 @@ class GoogleOAuthConfig:
     scopes: tuple[str, ...] = DEFAULT_SCOPES
 
     @classmethod
-    def from_env(cls) -> GoogleOAuthConfig | None:
-        client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
-        client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+    def from_env(cls, env=None) -> GoogleOAuthConfig | None:
+        env = os.environ if env is None else env
+        client_id = env.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+        client_secret = env.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
         if not client_id or not client_secret:
             return None
-        public = os.environ.get("HANDLER_PUBLIC_URL", "").strip().rstrip("/") or None
-        scopes = tuple(os.environ.get("GOOGLE_OAUTH_SCOPES", "").split()) or DEFAULT_SCOPES
+        public = env.get("HANDLER_PUBLIC_URL", "").strip().rstrip("/") or None
+        scopes = tuple(env.get("GOOGLE_OAUTH_SCOPES", "").split()) or DEFAULT_SCOPES
         return cls(client_id, client_secret, public, scopes)
 
 
@@ -329,17 +330,18 @@ class GoogleOAuth:
         await self._store.delete_connection(connection.id)
 
 
-def google_oauth_from_env(store: Any) -> GoogleOAuth | None:
+def google_oauth_from_env(store: Any, *, env=None) -> GoogleOAuth | None:
     """GoogleOAuth when GOOGLE_OAUTH_CLIENT_ID/SECRET and a secret key are set."""
-    config = GoogleOAuthConfig.from_env()
+    env = os.environ if env is None else env
+    config = GoogleOAuthConfig.from_env(env)
     if config is None:
         return None
-    box = SecretBox.from_env()
+    box = SecretBox.from_env(env)
     if box is None:
         log.error("Google OAuth configured but neither HANDLER_SECRET_KEY nor "
                   "HANDLER_ADMIN_KEY is set to encrypt tokens; Gmail tools off")
         return None
-    if not os.environ.get("HANDLER_SECRET_KEY"):
+    if not env.get("HANDLER_SECRET_KEY"):
         log.warning("HANDLER_SECRET_KEY not set; encrypting Google tokens with a key "
                     "derived from HANDLER_ADMIN_KEY (rotating it forces a reconnect)")
     return GoogleOAuth(config, store, box)

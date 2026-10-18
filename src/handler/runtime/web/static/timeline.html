@@ -101,13 +101,18 @@ pre { margin: 0; padding: 8px; background: var(--asst); border-radius: 4px;
   </form>
 </div>
 <script>
+const handlerBase = (window.HANDLER_CONFIG || {}).base || "";
+const handlerInstance = (window.HANDLER_CONFIG || {}).instance || "";
+const handlerPath = (path) => handlerBase + path;
+const handlerKey = (key) => handlerInstance ? "handler.instance." + handlerInstance + ":" + key : key;
+
 const $ = (id) => document.getElementById(id);
 let current = null, currentRun = null, source = null, me = null;
 
 const store = {
-  get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } },
-  set: (k, v) => { try { sessionStorage.setItem(k, v); } catch {} },
-  del: (k) => { try { sessionStorage.removeItem(k); } catch {} },
+  get: (k) => { try { return sessionStorage.getItem(handlerKey(k)); } catch { return null; } },
+  set: (k, v) => { try { sessionStorage.setItem(handlerKey(k), v); } catch {} },
+  del: (k) => { try { sessionStorage.removeItem(handlerKey(k)); } catch {} },
 };
 function logout(message) {
   store.del("handler.token"); store.del("handler.actAs");
@@ -126,7 +131,7 @@ const api = async (path, opts = {}) => {
     Authorization: "Bearer " + (store.get("handler.token") || "")};
   const actAs = store.get("handler.actAs");
   if (actAs) headers["X-Handler-User"] = actAs;
-  const r = await fetch(path, {...opts, headers});
+  const r = await fetch(handlerPath(path), {...opts, headers});
   if (r.status === 401) { logout("Session expired or token invalid."); throw new Error("401"); }
   if (!r.ok) throw new Error(path + " " + r.status);
   return r.json();
@@ -203,7 +208,7 @@ async function loadSteps() {
 function connect() {
   if (source) source.close();
   const token = encodeURIComponent(store.get("handler.token") || "");
-  source = new EventSource((current ?
+  source = new EventSource(handlerPath(current ?
     `/api/threads/${encodeURIComponent(current)}/stream` : "/api/stream") +
     "?access_token=" + token + "&act_as=" +
     encodeURIComponent(store.get("handler.actAs") || ""));

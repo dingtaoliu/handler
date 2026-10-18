@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from handler.runtime import server
@@ -27,7 +29,7 @@ async def test_server_wires_workspace_sync_without_starting_services(tmp_path, m
     captured = {}
     remote = LocalFileStore(tmp_path / "fake-s3")
 
-    def from_env(*, prefix):
+    def from_env(*, prefix, env):
         captured["prefix"] = prefix
         return remote
 
@@ -45,7 +47,8 @@ async def test_server_wires_workspace_sync_without_starting_services(tmp_path, m
                                "--file-store", backend])
     try:
         with pytest.raises(WiringComplete):
-            await server.serve(args)
+            async with server.instance_runtime(args, dict(os.environ)):
+                pass
         sync = captured["sync"]
         assert isinstance(sync, WorkspaceSync) and sync.local_root == tmp_path / "data"
         if backend == "s3":
