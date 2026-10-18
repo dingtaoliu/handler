@@ -24,6 +24,7 @@ def config(tmp_path):
         'GOOGLE_OAUTH_CLIENT_ID': 'main-client',
         'GOOGLE_OAUTH_CLIENT_SECRET': 'main-secret',
         'HANDLER_TRUSTED_USER': 'alice',
+        'HANDLER_TRUSTED_DEVICE_USERS': '100.64.0.1=alice',
         'HANDLER_PUBLIC_URL': 'https://handler.example',
         'HANDLER_I_BSS__HANDLER_ADMIN_KEY': 'bss-admin',
         'HANDLER_I_BSS__HANDLER_WEBHOOK_SECRET': 'bss-hook',
@@ -45,8 +46,19 @@ def test_configuration_isolated_without_process_mutation(tmp_path):
                 'GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET'):
         assert key not in bss[2]
     assert 'HANDLER_TRUSTED_USER' not in bss[2]
+    assert 'HANDLER_TRUSTED_DEVICE_USERS' not in bss[2]
     assert not any(k.startswith('HANDLER_I_') for k in bss[2])
     assert dict(os.environ) == before
+
+
+def test_trusted_device_user_mapping_validates_and_normalizes_ips():
+    assert server._trusted_device_users(
+        '100.120.186.43=danny, fd7a:115c:a1e0::9e39:703e=zhijian') == {
+            '100.120.186.43': 'danny', 'fd7a:115c:a1e0::9e39:703e': 'zhijian'}
+    for invalid in ('not-an-ip=danny', '100.64.0.1=', '100.64.0.1=a:b',
+                    '100.64.0.1=danny,100.64.0.1=zhijian'):
+        with pytest.raises(ValueError):
+            server._trusted_device_users(invalid)
 
 
 @pytest.mark.parametrize('key,value', [

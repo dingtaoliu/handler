@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import contextlib
 import getpass
+import ipaddress
 import logging
 import os
 import re
@@ -192,6 +193,26 @@ def _log_file(args: argparse.Namespace) -> Path:
     return Path(args.data_dir).expanduser() / "logs" / "handler-rt.jsonl"
 
 
+def _trusted_device_users(raw: str) -> dict[str, str]:
+    """Parse exact Tailscale IP=user mappings; unknown peers remain unauthenticated."""
+    result = {}
+    for item in (part.strip() for part in raw.split(",")):
+        if not item:
+            continue
+        address, separator, user_id = item.partition("=")
+        address, user_id = address.strip(), user_id.strip()
+        if not separator or not user_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]*", user_id):
+            raise ValueError(f"invalid HANDLER_TRUSTED_DEVICE_USERS entry: {item!r}")
+        try:
+            normalized = str(ipaddress.ip_address(address))
+        except ValueError as exc:
+            raise ValueError(f"invalid trusted device IP: {address!r}") from exc
+        if normalized in result:
+            raise ValueError(f"duplicate trusted device IP: {normalized}")
+        result[normalized] = user_id
+    return result
+
+
 def _parse_args(argv: list[str] | None, env: Mapping[str, str] | None = None) -> argparse.Namespace:
     env = os.environ if env is None else env
     p = argparse.ArgumentParser(prog="handler-rt", description="Handler runtime (rebuild)")
@@ -268,7 +289,7 @@ def _parse_args(argv: list[str] | None, env: Mapping[str, str] | None = None) ->
 _PRIVATE_ENV = {
     "HANDLER_ADMIN_KEY", "HANDLER_WEBHOOK_SECRET", "HANDLER_EMAIL_SECRET",
     "HANDLER_SECRET_KEY", "HANDLER_PUBLIC_URL", "HANDLER_RETURN_TO_ORIGINS",
-    "HANDLER_TRUSTED_USER",
+    "HANDLER_TRUSTED_USER", "HANDLER_TRUSTED_DEVICE_USERS",
     "HANDLER_HARNESS_ENV_FILE", "HANDLER_RT_CODEX_AUTH", "HANDLER_RT_USERS",
     "HANDLER_RT_LOG_FILE", "CRONTAL_URL", "CRONTAL_AGENT_TOKEN",
 }
@@ -483,9 +504,12 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         )
 
         trusted_user = env.get("HANDLER_TRUSTED_USER", "").strip() or None
-        auth = Authenticator(store, args.admin_key, trusted_user_id=trusted_user)
-        if trusted_user:
-            logger.warning("trusted network authentication on", extra={"user": trusted_user})
+        trusted_devices = _trusted_device_users(env.get("HANDLER_TRUSTED_DEVICE_USERS", ""))
+        auth = Authenticator(store, args.admin_key, trusted_user_id=trusted_user,
+                             trusted_device_users=trusted_devices)
+        if trusted_user or trusted_devices:
+            logger.warning("trusted network authentication on", extra={
+                "user": trusted_user, "device_count": len(trusted_devices)})
         if not args.admin_key:
             logger.warning("no admin key set; only user tokens can authenticate")
         uploads = UploadStore(data_dir / "uploads")

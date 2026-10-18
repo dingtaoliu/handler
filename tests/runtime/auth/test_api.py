@@ -163,6 +163,21 @@ async def test_trusted_network_rejects_unknown_or_disabled_user(store, world):
         assert excinfo.value.status_code == 503
 
 
+async def test_trusted_network_maps_each_device_to_its_own_user(store, world):
+    auth = Authenticator(store, trusted_device_users={
+        "100.120.186.43": "root", "100.69.112.62": "alice"})
+    danny = await auth.require_principal(_request(
+        "/api/me", client=("100.120.186.43", 12345)))
+    wife = await auth.require_principal(_request(
+        "/api/me", client=("100.69.112.62", 12345)))
+    assert danny == Principal("root", "admin", "trusted_network")
+    assert wife == Principal("alice", "member", "trusted_network")
+    with pytest.raises(Exception) as excinfo:
+        await auth.require_principal(_request(
+            "/api/me", client=("100.64.0.99", 12345)))
+    assert excinfo.value.status_code == 401
+
+
 async def test_admin_key_compared_in_constant_time(store, monkeypatch):
     import handler.runtime.auth as auth_module
 
@@ -364,8 +379,10 @@ async def test_notifications_are_private(client, world, store):
 
 
 # --- SSE ---------------------------------------------------------------------------
-def _request(path: str, query: str = "", headers: dict[str, str] | None = None) -> Request:
+def _request(path: str, query: str = "", headers: dict[str, str] | None = None,
+             client: tuple[str, int] | None = None) -> Request:
     return Request({"type": "http", "method": "GET", "path": path, "query_string": query.encode(),
+                    "client": client,
                     "headers": [(k.lower().encode(), v.encode())
                                 for k, v in (headers or {}).items()]})
 

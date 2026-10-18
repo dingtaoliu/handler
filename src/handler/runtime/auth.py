@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -65,10 +66,12 @@ class Authenticator:
     """Resolves requests to principals; its methods are FastAPI dependencies."""
 
     def __init__(self, users: UsersStore, admin_key: str | None = None,
-                 trusted_user_id: str | None = None) -> None:
+                 trusted_user_id: str | None = None,
+                 trusted_device_users: Mapping[str, str] | None = None) -> None:
         self.users = users
         self._admin_digest = _digest(admin_key) if admin_key else None
         self._trusted_user_id = trusted_user_id.strip() if trusted_user_id else None
+        self._trusted_device_users = dict(trusted_device_users or {})
 
     def _is_admin_key(self, credential: str) -> bool:
         if self._admin_digest is None:
@@ -95,8 +98,10 @@ class Authenticator:
             # A malformed/presented credential must never fall through to trusted mode.
             if authorization is not None:
                 raise HTTPException(401, "Invalid credentials", headers=_BEARER)
-            if self._trusted_user_id:
-                user = await self.users.get_user(self._trusted_user_id)
+            peer = request.client.host if request.client else ""
+            trusted_user_id = self._trusted_device_users.get(peer) or self._trusted_user_id
+            if trusted_user_id:
+                user = await self.users.get_user(trusted_user_id)
                 if user is None or user.disabled:
                     raise HTTPException(503, "Trusted user is unknown or disabled")
                 return Principal(user.id, user.role, "trusted_network")
