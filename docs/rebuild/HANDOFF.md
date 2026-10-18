@@ -108,3 +108,48 @@ Repo and code layout:
 - **Pricing.** `prices.yaml` rates are null, so costs show as unpriced.
 - **Workspace sync deletions.** Sync never deletes remote files (`known-issues.md` §1). To be fixed, but low priority (2026-10-18).
 - **Codex jobs.** Close stdin (`< /dev/null`). Codex's sandbox makes `.git` read-only, so the driver commits its work. The Codex plan is $20 Plus: run at most 2 jobs at a time.
+
+## 7. In flight (2026-10-18, end of session)
+
+Working mode: the main session acts as architect and hands implementation to background sub-agents in git worktrees. The lead merges into `rebuild`/`main`, runs tests and deploys.
+
+**Done today and deployed:**
+- **Native-harness tool arguments.** Tool calls in native-harness transcripts now show their arguments.
+- **Pricing.** `prices.yaml` has official rates, and the double-billed cache writes are fixed.
+- **Default labels.** Settings show the real default model and effort, e.g. "Default (gpt-6.1-sol)".
+- **Crontal storage.** 20 file rows with no S3 object were deleted after backup `b015`, and Crontal now refuses to start outside dev/test without S3.
+- **Email intake** (`docs/rebuild/email-intake.md`), live on `crontal-agent`:
+  - Cloudflare Worker `crontal-email-intake` (Cloudflare account `yz2936@nyu.edu`) is deployed.
+  - The routing rule for `contact@crontal.ai` now points to the Worker. To roll back, change the rule's action to forward to `crontal.contacts@gmail.com`.
+  - `email.act_as=1` (Danny, Brava Canada).
+  - **`email.allowed_senders` is EMPTY**, so every email is stored and ignored. Needs the client's sender addresses.
+  - Not yet verified end to end. Next: a test email should still reach the Gmail inbox.
+- **Gmail connector** (`docs/rebuild/gmail-connector.md`), live:
+  - Google project `crontal-test`, an agentic OAuth client, published without verification, scope `gmail.modify`.
+  - `crontal.contacts@gmail.com` is connected on `crontal-agent`.
+  - Handler-side `return_to` for connecting from Crontal is live (`HANDLER_RETURN_TO_ORIGINS=https://crontal.ai`).
+
+**Decided:**
+- **Instances are scoped to merchants.** Brava Canada (merchant 2, Danny) runs instance `main`, which is today's `crontal-agent`. Brava Stainless Steel (merchant 1, Eric, `yz2936@nyu.edu`) runs instance `bss`.
+- **All instances share one dyno.** One process hosts every instance under `/i/<name>/`, and the root instance is also served at `/`.
+
+**Open branches (unmerged; check whether each finished before using it):**
+- hephaestus `feat/handler-google-connection` (`f1a86ac`): the Google account card in Crontal's Handler settings. Merge it together with the next item.
+- hephaestus `feat/handler-instances`: the `handler_instance` registry (merchant → base_url plus secrets), a CLI, merchant-based entitlement, routing for the proxy and the outbox, and agent tokens limited to their own merchant. Base URLs may include a path prefix.
+- handler `feat/multi-instance` (worktree `../handler-wt-multi`): the multi-instance host, `HANDLER_INSTANCES`, `HANDLER_I_<NAME>__<VAR>`, and the runbook in `docs/rebuild/multi-instance.md`.
+
+**Separate app `crontal-agent-bss`:**
+- It was provisioned (schema `handler_bss`, prefix `handler/bss/`, persona adapted to the merchant) and is now **scaled to 0**.
+- Its secrets are in the session scratchpad file `bss_instance_secrets.env`, which may be gone. They are also in `heroku config -a crontal-agent-bss`.
+- Delete the app (with the owner's OK) once `bss` runs inside `crontal-agent`.
+
+**Rollout order:**
+1. Deploy the multi-instance handler with only `main` and check nothing changed.
+2. Add the `HANDLER_I_BSS__*` vars and redeploy.
+3. Back up the database, deploy Crontal (migrate), then register `main` (root URL) for merchant 2 and `bss` (`…/i/bss`) for merchant 1.
+4. Check Handler as Danny and as Eric.
+5. Remove Crontal's legacy global `HANDLER_*` vars.
+
+**Infrastructure notes:**
+- Instances share Crontal's Postgres (Essential-1: one database user, 20 connections) and one Bucketeer key, so isolation is enforced only by the app. For a hard boundary, move to Standard-0 with a user per schema and a bucket per instance.
+- Rotate `hephaestus-backend-test`'s Bucketeer, OpenAI and database credentials: they were printed in a session log.
