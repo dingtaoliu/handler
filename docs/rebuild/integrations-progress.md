@@ -64,3 +64,13 @@ sets it in prod), so each move is safe to ship alone.
    and `_configure_google` CLI in `server.py`.
 4. Then core-only tests: an instance with `HANDLER_INTEGRATIONS=` has no crontal/email/google
    routes, tools or sinks.
+
+## Phase 2 crontal — status
+
+Branch `feat/integrations-p2-crontal` (worktree `../handler-wt-int-crontal`), from `rebuild`.
+
+- [x] started
+- [ ] ThreadType accepts integration thread types
+- [ ] `integrations/crontal/__init__.py` + register in `default_registry`
+- [ ] server.py skips legacy crontal blocks when enabled
+- [ ] tests (parity, empty list, multi-instance)
