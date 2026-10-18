@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
+from .tasks import announce_routed
 from ..types import Event, EventStatus, Schedule, ThreadSpec
 from .sqlite import _insert, _record, _timestamp, _transaction, _values
 
@@ -125,4 +126,5 @@ class ScheduleMixin:
         fired = await self._call(write)
         if fired:
             self._wake.set()
+            announce_routed(self, event, thread)
         return fired

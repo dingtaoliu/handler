@@ -41,6 +41,7 @@ from .scheduler import Scheduler
 from .settings import HarnessName, InstanceDefaults, SettingsService
 from .store.postgres import PostgresStore
 from .store.sqlite import SQLiteStore
+from .tasks import publish_queued
 from .tools.automation import AutomationTools
 from .tools.notify import NotifyTools
 from .tools.threads import ThreadTools
@@ -52,6 +53,7 @@ from .web.email_ingest import email_ingest_router
 from .web.google_api import google_router
 from .web.ingest import crontal_ingest_router
 from .web.settings_api import settings_router
+from .web.tasks_api import tasks_router
 from .workspaces import WorkspaceSync
 
 logger = logging.getLogger("handler.runtime.server")
@@ -397,6 +399,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                          uploads=uploads, instance_name=instance_name)
         app.mount("/mcp", mcp_app)
         app.include_router(approvals_router(gateway, store, auth))
+        app.include_router(tasks_router(store, bus, auth))
+        store.on_routed = lambda event, spec: publish_queued(bus, event, spec)
         app.include_router(settings_router(settings, auth, memory_tools))
         app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
                                         uploads=uploads, log_file=_log_file(args)))

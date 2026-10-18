@@ -17,6 +17,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from .tasks import announce_routed
 from ..types import (
     Event,
     EventStatus,
@@ -217,6 +218,7 @@ class PostgresCore:
                 return False
             await _notify(conn)
         self._wake.set()
+        announce_routed(self, event, thread)
         return True
 
     async def claim(
@@ -480,11 +482,12 @@ from .postgres_domains import (  # noqa: E402
 )
 
 
+from .tasks import TaskQueries  # noqa: E402
 from .thread_metadata import PostgresThreadMetadata  # noqa: E402
 
 
 class PostgresStore(
-    PostgresThreadMetadata, ScheduleMixin, ApprovalMixin, AuditMixin,
+    TaskQueries, PostgresThreadMetadata, ScheduleMixin, ApprovalMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, PostgresCore,
 ):

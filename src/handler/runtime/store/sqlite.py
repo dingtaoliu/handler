@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
+from .tasks import announce_routed
 from ..types import (
     Event,
     EventStatus,
@@ -196,6 +197,7 @@ class SQLiteCore:
         inserted = await self._call(write)
         if inserted:
             self._wake.set()
+            announce_routed(self, event, thread)
         return inserted
 
     async def claim(
@@ -449,11 +451,12 @@ from .sqlite_schedules import ScheduleMixin  # noqa: E402
 from .sqlite_users import UsersMixin  # noqa: E402
 
 
+from .tasks import TaskQueries  # noqa: E402
 from .thread_metadata import SQLiteThreadMetadata  # noqa: E402
 
 
 class SQLiteStore(
-    SQLiteThreadMetadata, ScheduleMixin, ApprovalMixin, AuditMixin,
+    TaskQueries, SQLiteThreadMetadata, ScheduleMixin, ApprovalMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, SQLiteCore,
 ):
