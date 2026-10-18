@@ -209,6 +209,7 @@ class CodexHarness:
         auth_json_link: bool = False,
         extra_args: list[str] | None = None,
         env_allowlist: tuple[str, ...] | list[str] = DEFAULT_ENV_ALLOWLIST,
+        environment: dict[str, str] | None = None,
     ) -> None:
         if sandbox not in SANDBOX_MODES:
             raise ValueError(f"sandbox must be one of {SANDBOX_MODES}, got {sandbox!r}")
@@ -228,6 +229,7 @@ class CodexHarness:
         # and rotated refresh tokens would invalidate each other).
         self.auth_json_link = auth_json_link
         self.extra_args = list(extra_args or [])
+        self.environment = dict(os.environ if environment is None else environment)
         self.env_allowlist = tuple(env_allowlist)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._catalog: list[dict] | None = None
@@ -266,8 +268,8 @@ class CodexHarness:
         with tempfile.TemporaryDirectory(prefix="handler-codex-catalog-") as home:
             if self.auth_json is not None and self.auth_json.exists():
                 os.symlink(self.auth_json.resolve(), Path(home) / "auth.json")
-            env = {k: os.environ[k] for k in (*self.env_allowlist, *CODEX_CREDENTIAL_ENV)
-                   if k in os.environ}
+            env = {k: self.environment[k] for k in (*self.env_allowlist, *CODEX_CREDENTIAL_ENV)
+                   if k in self.environment}
             env.update({"CODEX_HOME": home, "HOME": home})
             # The refreshed catalog is what runs see; the bundled one is the fallback.
             for extra in ([], ["--bundled"]):
@@ -335,8 +337,8 @@ class CodexHarness:
                         raise
         if req.instructions:
             (req.workspace / "AGENTS.md").write_text(req.instructions, encoding="utf-8")
-        env = {k: os.environ[k] for k in (*self.env_allowlist, *CODEX_CREDENTIAL_ENV)
-               if k in os.environ}
+        env = {k: self.environment[k] for k in (*self.env_allowlist, *CODEX_CREDENTIAL_ENV)
+               if k in self.environment}
         env.update({"CODEX_HOME": str(req.home), "HOME": str(req.home)})
         env.update(req.env)
         return env

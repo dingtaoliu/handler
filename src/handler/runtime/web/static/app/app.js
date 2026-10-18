@@ -1,4 +1,9 @@
 "use strict";
+const handlerBase = (window.HANDLER_CONFIG || {}).base || "";
+const handlerInstance = (window.HANDLER_CONFIG || {}).instance || "";
+const handlerPath = (path) => handlerBase + path;
+const handlerKey = (key) => handlerInstance ? "handler.instance." + handlerInstance + ":" + key : key;
+
 // Handler web UI (phase 4). Vanilla JS, no build step, no CDN.
 
 // ─── API client: every endpoint path the UI uses lives here ──────────────────
@@ -47,13 +52,13 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
     (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const store = {
-    get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } },
-    set: (k, v) => { try { sessionStorage.setItem(k, v); } catch { /* ignore */ } },
-    del: (k) => { try { sessionStorage.removeItem(k); } catch { /* ignore */ } },
+    get: (k) => { try { return sessionStorage.getItem(handlerKey(k)); } catch { return null; } },
+    set: (k, v) => { try { sessionStorage.setItem(handlerKey(k), v); } catch { /* ignore */ } },
+    del: (k) => { try { sessionStorage.removeItem(handlerKey(k)); } catch { /* ignore */ } },
 };
 const pref = {
-    get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
-    set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
+    get: (k) => { try { return localStorage.getItem(handlerKey(k)); } catch { return null; } },
+    set: (k, v) => { try { localStorage.setItem(handlerKey(k), v); } catch { /* ignore */ } },
 };
 let me = null;
 const isAdmin = () => me && me.role === "admin";
@@ -82,7 +87,7 @@ function authHeaders(extra) {
     return h;
 }
 
-function goLogin() { location.replace("/login"); }
+function goLogin() { location.replace(handlerPath("/login")); }
 function logout() {
     store.del("handler.token"); store.del("handler.actAs");
     goLogin();
@@ -98,7 +103,7 @@ function detailText(d) {
 }
 
 async function apiRaw(path, opts = {}) {
-    const r = await fetch(path, {...opts, headers: authHeaders(opts.headers), cache: "no-store"});
+    const r = await fetch(handlerPath(path), {...opts, headers: authHeaders(opts.headers), cache: "no-store"});
     if (r.status === 401) { logout(); throw new ApiError(401, "unauthorized", path); }
     if (!r.ok) {
         let body = null;
@@ -389,7 +394,7 @@ function setChatMode() {
     $("chat-title").textContent = key ? (threadTitle(chat.threads.find((t) => t.key === key) || {key, type: "chat"})) : "New conversation";
     const tl = $("chat-timeline");
     tl.hidden = !key;
-    if (key) tl.href = "/timeline";
+    if (key) tl.href = handlerPath("/timeline");
 }
 
 function debounce(name, fn, wait = 200) {
@@ -400,7 +405,7 @@ function debounce(name, fn, wait = 200) {
 function connectStream() {
     if (chat.stream) { chat.stream.close(); chat.stream = null; }
     const q = "?access_token=" + enc(store.get("handler.token") || "") + "&act_as=" + enc(store.get("handler.actAs") || "");
-    const es = new EventSource((chat.key ? API.threadStream(chat.key) : API.stream) + q);
+    const es = new EventSource(handlerPath((chat.key ? API.threadStream(chat.key) : API.stream) + q));
     chat.stream = es;
     es.onerror = () => { api(API.me).catch(() => {}); };
     es.onmessage = (ev) => {
@@ -491,10 +496,10 @@ async function uploadFiles(files) {
 const CHAT_OPTS_KEY = "handler.chatOpts";
 const chatOpts = {data: null, store: {}};
 function loadOptStore() {
-    try { return JSON.parse(localStorage.getItem(CHAT_OPTS_KEY) || "{}") || {}; } catch { return {}; }
+    try { return JSON.parse(localStorage.getItem(handlerKey(CHAT_OPTS_KEY)) || "{}") || {}; } catch { return {}; }
 }
 function saveOptStore() {
-    try { localStorage.setItem(CHAT_OPTS_KEY, JSON.stringify(chatOpts.store)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem(handlerKey(CHAT_OPTS_KEY), JSON.stringify(chatOpts.store)); } catch { /* storage unavailable */ }
 }
 const optSlot = (key) => key || "__new__";
 // Label of a select's empty option: the value the server says it resolves to.

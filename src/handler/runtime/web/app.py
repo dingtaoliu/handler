@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
@@ -78,6 +78,7 @@ async def sse_stream(
 def create_app(
     store: Store, bus: RunEventBus, auth: Authenticator, *, default_harness: HarnessSource = "codex",
     uploads: UploadStore | None = None,
+    instance_name: str = "",
 ) -> FastAPI:
     # No interactive docs / OpenAPI: the API is authenticated, its schema needn't be public.
     app = FastAPI(title="handler runtime", docs_url=None, redoc_url=None, openapi_url=None)
@@ -220,14 +221,23 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    def html(path: Path, request: Request) -> HTMLResponse:
+        base = request.scope.get("root_path", "").rstrip("/")
+        # Serialize trusted server config, keeping script contexts safe even under
+        # an externally supplied ASGI root path.
+        config = json.dumps({"base": base, "instance": instance_name}).replace("<", "\\u003c")
+        bootstrap = f"<script>window.HANDLER_CONFIG={config};</script>"
+        content = path.read_text().replace("<script", bootstrap + "<script", 1)
+        content = content.replace('href="/', f'href="{base}/').replace('src="/', f'src="{base}/')
+        return HTMLResponse(content, headers={"Cache-Control": "no-store"})
+
     @router.get("/")
     @router.get("/app")
     @router.get("/app/")
-    async def app_shell() -> FileResponse:
+    async def app_shell(request: Request) -> HTMLResponse:
         # Unauthenticated shell: it redirects to /login without a token, and
         # every data call carries one.
-        return FileResponse(APP_DIR / "index.html", media_type="text/html",
-                            headers={"Cache-Control": "no-store"})
+        return html(APP_DIR / "index.html", request)
 
     @router.get("/app/static/{name}")
     async def app_asset(name: str) -> FileResponse:
@@ -237,14 +247,12 @@ def create_app(
         return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
     @router.get("/login")
-    async def login() -> FileResponse:
-        return FileResponse(TIMELINE_HTML.with_name("login.html"), media_type="text/html",
-                            headers={"Cache-Control": "no-store"})
+    async def login(request: Request) -> HTMLResponse:
+        return html(TIMELINE_HTML.with_name("login.html"), request)
 
     @router.get("/timeline")
-    async def timeline(_: Principal = principal_dep) -> FileResponse:
-        return FileResponse(TIMELINE_HTML, media_type="text/html",
-                            headers={"Cache-Control": "no-store"})
+    async def timeline(request: Request, _: Principal = principal_dep) -> HTMLResponse:
+        return html(TIMELINE_HTML, request)
 
     app.include_router(router)
     app.include_router(auth_router(auth))

@@ -42,7 +42,7 @@ async def test_asset_lookup_is_confined(client, name):
 
 async def test_login_redirects_to_shell_and_timeline_stays_protected(client):
     login = await client.get("/login")
-    assert 'location.replace("/")' in login.text
+    assert 'location.replace(handlerPath("/"))' in login.text
     assert (await client.get("/timeline")).status_code == 401
 
 
