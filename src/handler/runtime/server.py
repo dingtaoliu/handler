@@ -8,9 +8,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import getpass
 import logging
 import os
 import re
+import secrets
+import shlex
 from collections.abc import Mapping
 
 from fastapi import FastAPI, HTTPException
@@ -56,6 +59,17 @@ from .workspaces import WorkspaceSync
 
 logger = logging.getLogger("handler.runtime.server")
 
+FULL_GOOGLE_SCOPES = (
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://mail.google.com/",
+    "https://www.googleapis.com/auth/gmail.settings.basic",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/presentations",
+)
+
 
 def thread_router(store: SQLiteStore | PostgresStore):
     """Route an event (e.g. approval.resolved) into its existing thread."""
@@ -86,6 +100,63 @@ def read_env_file(path: str | Path) -> dict[str, str]:
         if key:
             result[key] = value
     return result
+
+
+def _write_env_values(path: Path, values: Mapping[str, str]) -> None:
+    """Replace selected shell env assignments atomically without exposing values."""
+    path = path.expanduser()
+    lines = path.read_text().splitlines() if path.exists() else []
+    pending = dict(values)
+    output = []
+    assignment = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=")
+    for line in lines:
+        match = assignment.match(line)
+        key = match.group(1) if match else None
+        if key not in values:
+            output.append(line)
+        elif key in pending:
+            output.append(f"{key}={shlex.quote(pending.pop(key))}")
+    if output and output[-1]:
+        output.append("")
+    output.extend(f"{key}={shlex.quote(value)}" for key, value in pending.items())
+    payload = ("\n".join(output) + "\n").encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _configure_google(args: argparse.Namespace) -> None:
+    path = Path(args.env_file).expanduser()
+    current = read_env_file(path) if path.exists() else {}
+    current_id = current.get("GOOGLE_OAUTH_CLIENT_ID", "")
+    label = f" [{current_id}]" if current_id else ""
+    client_id = input(f"Google OAuth client ID{label}: ").strip() or current_id
+    secret_prompt = "Google OAuth client secret"
+    if current.get("GOOGLE_OAUTH_CLIENT_SECRET"):
+        secret_prompt += " (Enter keeps the current secret)"
+    client_secret = getpass.getpass(secret_prompt + ": ").strip()
+    client_secret = client_secret or current.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        raise SystemExit("Both the Google OAuth client ID and client secret are required.")
+    secret_key = current.get("HANDLER_SECRET_KEY") or secrets.token_urlsafe(48)
+    _write_env_values(path, {
+        "GOOGLE_OAUTH_CLIENT_ID": client_id,
+        "GOOGLE_OAUTH_CLIENT_SECRET": client_secret,
+        "HANDLER_PUBLIC_URL": args.public_url.rstrip("/"),
+        "HANDLER_SECRET_KEY": secret_key,
+        "GOOGLE_OAUTH_SCOPES": " ".join(FULL_GOOGLE_SCOPES),
+    })
+    print(f"Google OAuth configuration saved to {path} (mode 600).")
+    print("Restart Handler, open an SSH tunnel, then connect Google in Connections.")
 
 
 def load_env_file(path: str | Path) -> dict[str, str]:
@@ -178,6 +249,12 @@ def _parse_args(argv: list[str] | None, env: Mapping[str, str] | None = None) ->
     imp.add_argument("--data-dir", default=env.get("HANDLER_RT_DATA_DIR", "~/.handler-rt"))
     imp.add_argument("--default-user", default="danny",
                      help="owner for legacy data without a user id")
+    google = sub.add_parser("google", help="configure Google OAuth")
+    google_sub = google.add_subparsers(dest="google_command", required=True)
+    configure = google_sub.add_parser(
+        "configure", help="interactively configure full Gmail and Workspace access")
+    configure.add_argument("--env-file", default="~/.handler-rt/env")
+    configure.add_argument("--public-url", default="http://localhost:8100")
     return p.parse_args(argv)
 
 
@@ -536,6 +613,8 @@ def main(argv: list[str] | None = None) -> None:
         asyncio.run(serve(args))
     elif args.command == "import-legacy":
         asyncio.run(_import_legacy(args))
+    elif args.command == "google" and args.google_command == "configure":
+        _configure_google(args)
     else:
         raise SystemExit(run_cli(args))
 
