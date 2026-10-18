@@ -127,8 +127,9 @@ function logout(message) {
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
   (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const api = async (path, opts = {}) => {
-  const headers = {...(opts.headers || {}),
-    Authorization: "Bearer " + (store.get("handler.token") || "")};
+  const headers = {...(opts.headers || {})};
+  const token = store.get("handler.token");
+  if (token) headers.Authorization = "Bearer " + token;
   const actAs = store.get("handler.actAs");
   if (actAs) headers["X-Handler-User"] = actAs;
   const r = await fetch(handlerPath(path), {...opts, headers});
@@ -268,6 +269,7 @@ async function start() {
   $("login").hidden = true;
   $("who-text").textContent = "Signed in as " +
     (me.display_name || me.user_id || "admin key") + " (" + me.role + ")";
+  $("logout").hidden = me.via === "trusted_network";
   loadThreads(); connect();
 }
 $("login-form").onsubmit = async (e) => {
@@ -279,7 +281,7 @@ $("login-form").onsubmit = async (e) => {
   await start();
 };
 $("logout").onclick = () => logout("");
-if (store.get("handler.token")) start(); else logout("");
+start();
 </script>
 </body>
 </html>

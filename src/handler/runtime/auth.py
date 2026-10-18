@@ -27,7 +27,7 @@ from fastapi import HTTPException, Request
 from .store import sqlite as _sqlite  # noqa: F401  (sqlite must load first)
 from .store.sqlite_users import USER_ID, User, UsersStore
 
-Via = Literal["admin_key", "user_token"]
+Via = Literal["admin_key", "user_token", "trusted_network"]
 ACT_AS_HEADER = "X-Handler-User"
 _BEARER = {"WWW-Authenticate": "Bearer"}
 
@@ -64,9 +64,11 @@ def _digest(value: str) -> bytes:
 class Authenticator:
     """Resolves requests to principals; its methods are FastAPI dependencies."""
 
-    def __init__(self, users: UsersStore, admin_key: str | None = None) -> None:
+    def __init__(self, users: UsersStore, admin_key: str | None = None,
+                 trusted_user_id: str | None = None) -> None:
         self.users = users
         self._admin_digest = _digest(admin_key) if admin_key else None
+        self._trusted_user_id = trusted_user_id.strip() if trusted_user_id else None
 
     def _is_admin_key(self, credential: str) -> bool:
         if self._admin_digest is None:
@@ -85,10 +87,19 @@ class Authenticator:
         return Principal(user.id, user.role, "user_token") if user else None
 
     async def _principal(self, request: Request, allow_query: bool) -> Principal:
-        credential = _bearer(request.headers.get("authorization"))
+        authorization = request.headers.get("authorization")
+        credential = _bearer(authorization)
         if credential is None and allow_query:
             credential = request.query_params.get("access_token") or None
         if credential is None:
+            # A malformed/presented credential must never fall through to trusted mode.
+            if authorization is not None:
+                raise HTTPException(401, "Invalid credentials", headers=_BEARER)
+            if self._trusted_user_id:
+                user = await self.users.get_user(self._trusted_user_id)
+                if user is None or user.disabled:
+                    raise HTTPException(503, "Trusted user is unknown or disabled")
+                return Principal(user.id, user.role, "trusted_network")
             raise HTTPException(401, "Authentication required", headers=_BEARER)
         act_as = request.headers.get(ACT_AS_HEADER)
         if act_as is None and allow_query:

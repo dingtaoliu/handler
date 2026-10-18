@@ -268,6 +268,7 @@ def _parse_args(argv: list[str] | None, env: Mapping[str, str] | None = None) ->
 _PRIVATE_ENV = {
     "HANDLER_ADMIN_KEY", "HANDLER_WEBHOOK_SECRET", "HANDLER_EMAIL_SECRET",
     "HANDLER_SECRET_KEY", "HANDLER_PUBLIC_URL", "HANDLER_RETURN_TO_ORIGINS",
+    "HANDLER_TRUSTED_USER",
     "HANDLER_HARNESS_ENV_FILE", "HANDLER_RT_CODEX_AUTH", "HANDLER_RT_USERS",
     "HANDLER_RT_LOG_FILE", "CRONTAL_URL", "CRONTAL_AGENT_TOKEN",
 }
@@ -481,7 +482,10 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                            Lane.BACKGROUND: int(limits_cfg["background_capacity"])},
         )
 
-        auth = Authenticator(store, args.admin_key)
+        trusted_user = env.get("HANDLER_TRUSTED_USER", "").strip() or None
+        auth = Authenticator(store, args.admin_key, trusted_user_id=trusted_user)
+        if trusted_user:
+            logger.warning("trusted network authentication on", extra={"user": trusted_user})
         if not args.admin_key:
             logger.warning("no admin key set; only user tokens can authenticate")
         uploads = UploadStore(data_dir / "uploads")

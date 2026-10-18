@@ -23,6 +23,7 @@ def config(tmp_path):
         'HANDLER_SECRET_KEY': 'main-encryption',
         'GOOGLE_OAUTH_CLIENT_ID': 'main-client',
         'GOOGLE_OAUTH_CLIENT_SECRET': 'main-secret',
+        'HANDLER_TRUSTED_USER': 'alice',
         'HANDLER_PUBLIC_URL': 'https://handler.example',
         'HANDLER_I_BSS__HANDLER_ADMIN_KEY': 'bss-admin',
         'HANDLER_I_BSS__HANDLER_WEBHOOK_SECRET': 'bss-hook',
@@ -43,6 +44,7 @@ def test_configuration_isolated_without_process_mutation(tmp_path):
     for key in ('HANDLER_EMAIL_SECRET', 'HANDLER_SECRET_KEY', 'HANDLER_PUBLIC_URL',
                 'GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET'):
         assert key not in bss[2]
+    assert 'HANDLER_TRUSTED_USER' not in bss[2]
     assert not any(k.startswith('HANDLER_I_') for k in bss[2])
     assert dict(os.environ) == before
 

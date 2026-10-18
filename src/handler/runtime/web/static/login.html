@@ -23,11 +23,13 @@ const handlerKey = (key) => handlerInstance ? "handler.instance." + handlerInsta
 
 async function enter(token, actAs) {
   try {
-    const headers = {Authorization: "Bearer " + token};
+    const headers = {};
+    if (token) headers.Authorization = "Bearer " + token;
     if (actAs) headers["X-Handler-User"] = actAs;
     const response = await fetch(handlerPath("/api/me"), {headers, cache: "no-store"});
     if (!response.ok) throw new Error("Sign in failed. Check your token and user.");
-    sessionStorage.setItem(handlerKey("handler.token"), token);
+    if (token) sessionStorage.setItem(handlerKey("handler.token"), token);
+    else sessionStorage.removeItem(handlerKey("handler.token"));
     if (actAs) sessionStorage.setItem(handlerKey("handler.actAs"), actAs);
     else sessionStorage.removeItem(handlerKey("handler.actAs"));
     location.replace(handlerPath("/"));
@@ -42,7 +44,7 @@ document.getElementById("login").onsubmit = (event) => {
 };
 try {
   const token = sessionStorage.getItem(handlerKey("handler.token"));
-  if (token) enter(token, sessionStorage.getItem(handlerKey("handler.actAs")) || "");
+  enter(token || "", token ? sessionStorage.getItem(handlerKey("handler.actAs")) || "" : "");
 } catch {}
 </script>
 </html>

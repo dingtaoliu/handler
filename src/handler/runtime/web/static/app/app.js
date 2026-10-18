@@ -83,7 +83,9 @@ function uuid() {
 }
 
 function authHeaders(extra) {
-    const h = {...(extra || {}), Authorization: "Bearer " + (store.get("handler.token") || "")};
+    const h = {...(extra || {})};
+    const token = store.get("handler.token");
+    if (token) h.Authorization = "Bearer " + token;
     const actAs = store.get("handler.actAs");
     if (actAs) h["X-Handler-User"] = actAs;
     return h;
@@ -1451,9 +1453,9 @@ $("logout-btn").addEventListener("click", logout);
 applyTheme(preferredTheme());
 
 async function start() {
-    if (!store.get("handler.token")) { goLogin(); return; }
     try { me = await api(API.me); } catch { return; }
     $("sidebar-user").textContent = (me.display_name || me.user_id || "admin key") + " (" + me.role + ")";
+    if (me.via === "trusted_network") $("logout-btn").hidden = true;
     if (isAdmin()) document.querySelectorAll("[data-admin]").forEach((n) => { n.hidden = false; });
     refreshBadges().catch(() => {});
     setInterval(() => refreshBadges().catch(() => {}), 30000);

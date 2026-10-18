@@ -137,6 +137,32 @@ async def test_wrong_admin_key_and_no_admin_key_configured(store, bus, world):
         assert await auth.authenticate(presented, None) is None
 
 
+async def test_trusted_network_maps_missing_credentials_to_configured_user(store, world):
+    auth = Authenticator(store, ADMIN_KEY, trusted_user_id="root")
+    principal = await auth.require_principal(_request("/api/me"))
+    assert principal == Principal("root", "admin", "trusted_network")
+    assert await auth.require_sse_principal(_request("/api/stream")) == principal
+
+    # Presented credentials remain authoritative and invalid ones never fall through.
+    assert (await auth.require_principal(_request(
+        "/api/me", headers={"Authorization": f"Bearer {world.tokens['alice']}"})
+    )).user_id == "alice"
+    with pytest.raises(Exception) as excinfo:
+        await auth.require_principal(_request(
+            "/api/me", headers={"Authorization": "Bearer wrong"}))
+    assert excinfo.value.status_code == 401
+
+
+async def test_trusted_network_rejects_unknown_or_disabled_user(store, world):
+    for user_id in ("missing", "alice"):
+        if user_id == "alice":
+            await store.update_user("alice", disabled=True)
+        auth = Authenticator(store, trusted_user_id=user_id)
+        with pytest.raises(Exception) as excinfo:
+            await auth.require_principal(_request("/api/me"))
+        assert excinfo.value.status_code == 503
+
+
 async def test_admin_key_compared_in_constant_time(store, monkeypatch):
     import handler.runtime.auth as auth_module
 

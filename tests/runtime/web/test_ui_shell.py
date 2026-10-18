@@ -48,3 +48,11 @@ async def test_login_redirects_to_shell_and_timeline_stays_protected(client):
 
 async def test_data_apis_still_require_auth(client):
     assert (await client.get("/api/me")).status_code == 401
+
+
+async def test_ui_can_boot_without_a_stored_token_in_trusted_mode(client):
+    script = (await client.get("/app/static/app.js")).text
+    assert 'if (token) h.Authorization = "Bearer " + token' in script
+    assert 'if (!store.get("handler.token")) { goLogin(); return; }' not in script
+    login = (await client.get("/login")).text
+    assert 'enter(token || ""' in login
