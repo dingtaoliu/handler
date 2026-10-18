@@ -216,3 +216,28 @@ Owner approved both deployments. This supersedes the pending status in §8.
 - The Crontal deployment skill now covers Handler and coordinated releases;
   existing user authorization persists through releases and migrations.
 - Full evidence: hephaestus `docs/handler-instances-rollout-2026-10-18.md`.
+
+## 10. Chat activity visibility fixed and released (2026-10-18)
+
+User reported automations completed but their work was not visible in Chat.
+Handler **v31**, image `36f4a50bfe80`, deploys `accf30e` + `0bdb6e7`:
+
+- Chat keeps one instance-wide, permission-filtered SSE subscription even when
+  a thread is selected. Background work marks its thread with new activity and
+  a badge/toast without moving the user's selected thread.
+- Active thread run steps show assistant text and tool progress before the
+  final transcript commits. Reconnect, focus and five-second visible-page
+  refresh recover durable activity; final transcript replaces previews.
+- Automations use their names, include scheduled prompts, and show successful
+  notify message text directly in the transcript. Own-user notification events
+  produce a toast; another recipient's event does not.
+- Chat initially opens the most recent/active listed thread once. New still
+  explicitly starts a blank conversation.
+- Transcript API serves the newest 200 messages chronologically, fixing threads
+  freezing on their first 200 entries. Store defaults remain oldest-first for
+  harness recap/replay; no schema migration.
+- Validation: **666 passed, 2 skipped**, JS syntax/behavior tests, and headless
+  Chrome rendering with isolated mock APIs (named automation, visible reminder,
+  running assistant/tool activity, global SSE request). No test model calls.
+- Live app.js matches tested source byte-for-byte. Root/main/BSS health and
+  cross-instance auth checks passed; main Gmail and BSS isolation preserved.
