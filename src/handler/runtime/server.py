@@ -22,6 +22,8 @@ from .files import LocalFileStore, S3FileStore
 from .gateway.api import approvals_router
 from .gateway.crontal import crontal_connector
 from .gateway.gateway import Gateway
+from .gateway.gmail import GmailTools
+from .gateway.google_oauth import google_oauth_from_env
 from .gateway.mcp_server import create_mcp_app
 from .gateway.policy import GrantPolicy
 from .gateway.tokens import RunTokens
@@ -42,6 +44,7 @@ from .types import Event, Lane, ThreadSpec
 from .uploads import UploadStore
 from .web.admin_api import admin_router
 from .web.app import create_app
+from .web.google_api import google_router
 from .web.ingest import crontal_ingest_router
 from .web.settings_api import settings_router
 from .workspaces import WorkspaceSync
@@ -252,6 +255,11 @@ async def serve(args: argparse.Namespace) -> None:
     app.include_router(settings_router(settings, auth, memory_tools))
     app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
                                     uploads=uploads, log_file=_log_file(args)))
+    google_oauth = google_oauth_from_env(store)  # None unless GOOGLE_OAUTH_* are set
+    app.include_router(google_router(google_oauth, auth))
+    if google_oauth is not None:
+        gateway.register(GmailTools(
+            google_oauth, workspace_for=lambda key: config.workspaces_dir / thread_slug(key)))
     webhook_secret = os.environ.get("HANDLER_WEBHOOK_SECRET")
     if webhook_secret:
         app.include_router(crontal_ingest_router(store, webhook_secret,
