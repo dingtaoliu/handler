@@ -1,0 +1,82 @@
+// Exercise the actual no-build browser script, with isolated browser/API mocks.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+function browser() {
+    const elements = new Map();
+    const element = () => ({innerHTML: '', textContent: '', hidden: false, style: {}, dataset: {},
+        scrollHeight: 100, scrollTop: 0, clientHeight: 100,
+        classList: {toggle() {}, add() {}, remove() {}, contains() {return false;}},
+        remove() {}, addEventListener() {}, setAttribute() {}, appendChild() {}, querySelectorAll() {return [];}, focus() {}});
+    const document = {body: element(), visibilityState: 'visible', addEventListener() {},
+        getElementById(id) {if (!elements.has(id)) elements.set(id, element()); return elements.get(id);},
+        querySelector() {return element();}, querySelectorAll() {return [];}, createElement: element};
+    const streams = [];
+    const context = vm.createContext({document, window: {addEventListener() {}},
+        location: {replace() {}, hash: '', search: ''}, history: {replaceState() {}},
+        sessionStorage: {getItem() {return null;}}, localStorage: {getItem() {return null;}},
+        setTimeout() {return 1;}, clearTimeout() {}, setInterval() {}, clearInterval() {},
+        URL, URLSearchParams, console, EventSource: class {constructor(url) {this.url = url; streams.push(this);} close() {this.closed = true;}}});
+    vm.runInContext(source, context);
+    const run = (code) => vm.runInContext(code, context);
+    run('me = {user_id: "1", role: "admin"};');
+    return {run, elements, streams};
+}
+(async () => {
+    const {run, elements, streams} = browser();
+    run('chat.key = "chat:1:selected"; chat.threads = [{key: chat.key, type:"chat"}, {key:"automation:test", type:"automation"}]; connectStream();');
+    assert.match(streams[0].url, /^\/api\/stream\?/);
+    run('connectStream();');
+    assert.equal(streams.length, 1, 'thread navigation must keep global subscription');
+    streams[0].onmessage({data: JSON.stringify({thread_key:'automation:test', type:'run_started', at:'2026-10-18T22:00:00Z'})});
+    assert.equal(run('chat.key'), 'chat:1:selected', 'background runs must not replace the selected thread');
+    assert.equal(run('chat.unread.has("automation:test")'), true);
+    assert.match(elements.get('thread-list').innerHTML, /new activity/);
+    assert.equal(elements.get('badge-chat').textContent, 1);
+    assert.match(elements.get('toast').textContent, /Agent working/);
+    run(`let recoveryCalls = [];
+        api = async (path) => {
+            recoveryCalls.push(path);
+            if (path === API.threads) return chat.threads;
+            if (path === API.threadMessages(chat.key) || path === API.threadRuns(chat.key)) return [];
+            if (path === API.thread(chat.key)) return {thread:{},pending_events:[]};
+            return [];
+        };`);
+    streams[0].onopen();
+    await new Promise(setImmediate);
+    assert.equal(run('recoveryCalls.includes(API.threadMessages(chat.key))'), true, 'reconnect must reload durable transcript');
+    assert.equal(run('recoveryCalls.includes(API.threadRuns(chat.key))'), true, 'reconnect must recover missed run progress');
+    streams[0].onmessage({data:JSON.stringify({type:'notification',thread_key:'automation:test',data:{user_id:'2',message:'Private'}})});
+    assert.doesNotMatch(elements.get('toast').textContent, /Private/);
+    streams[0].onmessage({data:JSON.stringify({type:'notification',thread_key:'automation:test',data:{user_id:'1',message:'Your reminder'}})});
+    assert.equal(elements.get('toast').textContent, 'Your reminder');
+
+    const b = browser();
+    b.run(`chat.key = "automation:test";
+        let finished = false;
+        api = async (path) => {
+            if (path === API.threadMessages(chat.key)) return finished ? [{id:"m1",run_id:"r1",role:"assistant",blocks:[{type:"text",text:"Work complete"}]}] : [];
+            if (path === API.thread(chat.key)) return {thread:{pending_since: finished ? null : "2026-10-18"}, pending_events:[]};
+            if (path === API.threadRuns(chat.key)) return [{id:"r1",status:finished ? "completed" : "running",started_at:"2026-10-18"}];
+            if (path === API.run("r1")) return {run:{status:"running"},steps:[
+                {kind:"assistant_text",data:{text:"Checking inbox"}},
+                {kind:"tool_call",name:"gmail.search",status:"running",data:{input:"unread"}},
+                {kind:"tool_call",name:"notify",status:"ok",data:{output:"Delivered"}}]};
+            throw new Error(path);
+        };`);
+    await b.run('loadMessages(true)');
+    let html = b.elements.get('messages').innerHTML;
+    assert.match(html, /Checking inbox/); assert.match(html, /gmail.search/); assert.match(html, /Delivered/);
+    b.run('finished = true');
+    await b.run('loadMessages()');
+    html = b.elements.get('messages').innerHTML;
+    assert.equal((html.match(/Work complete/g) || []).length, 1);
+    assert.doesNotMatch(html, /Checking inbox|Agent run:|gmail.search/);
+    assert.equal(b.run('chat.thinking'), false);
+    assert.match(b.run('blockHtml({type:"event",event_type:"automation.fired",payload:{name:"Daily email",prompt:"Find unread mail"}}, "event")'), /Daily email.*Find unread mail/);
+    // Data remains escaped in run/event rendering.
+    assert.doesNotMatch(b.run('stepHtml({kind:"assistant_text",data:{text:"<script>bad()</script>"}})'), /<script>/);
+    assert.match(b.run('messageHtml({role:"tool",blocks:[{type:"tool_call",name:"notify",input:{message:"Visible reminder",to:["1"]}},{type:"tool_result",output:{}}]})'), /Notification<\/b><div><p>Visible reminder/);
+    console.log('Chat activity behavior checks passed');
+})().catch((error) => {console.error(error); process.exitCode = 1;});

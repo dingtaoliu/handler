@@ -284,13 +284,14 @@ document.addEventListener("click", (e) => {
 // ─── Chat ────────────────────────────────────────────────────────────────────
 const chat = {
     threads: [], key: null, stream: null, pending: [], sig: "", thinking: false,
-    timers: {},
+    timers: {}, activity: new Map(), unread: new Set(), names: new Map(), initialized: false, request: 0,
 };
 const ownPrefix = () => `chat:${me.user_id}:`;
 const isOwnChat = (key) => !!(me && me.user_id && key && key.startsWith(ownPrefix()));
 
 function threadTitle(t) {
     if (t.summary) return t.summary.slice(0, 60);
+    if (chat.names.has(t.key)) return chat.names.get(t.key);
     if (t.type === "chat") {
         const parts = t.key.split(":");
         return "Chat " + parts.slice(2).join(":").slice(0, 8);
@@ -300,15 +301,22 @@ function threadTitle(t) {
 
 async function loadThreads() {
     const list = await api(API.threads);
-    list.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    list.sort((a, b) => String(chat.activity.get(b.key) || b.pending_since || b.created_at)
+        .localeCompare(String(chat.activity.get(a.key) || a.pending_since || a.created_at)));
+    renderThreadList(list);
+}
+
+function renderThreadList(list = chat.threads) {
+    setBadge("chat", chat.unread.size);
     chat.threads = list;
     $("thread-list").innerHTML = list.length ? list.map((t) => {
         const own = isOwnChat(t.key);
         const kind = t.type === "chat" ? (own ? "" : badge("other chat", "gray")) : badge(t.type, t.type === "automation" ? "blue" : "green");
-        const state = t.dead ? badge("dead", "red") : t.pending_since ? badge("pending", "yellow") : "";
+        const state = t.dead ? badge("dead", "red") : t.lease_owner ? badge("running", "blue") : t.pending_since ? badge("queued", "yellow") : "";
+        const unread = chat.unread.has(t.key) ? badge("new activity", "blue") : "";
         return `<div class="file-item thread-item ${t.key === chat.key ? "active" : ""}" role="button" tabindex="0" data-action="select-thread" data-key="${esc(t.key)}">
-            <div class="file-name"><span class="t">${esc(threadTitle(t))}</span>${kind}${state}</div>
-            <div class="file-summary">${esc(fmtTime(t.created_at))}${t.last_error ? " · " + esc(t.last_error) : ""}</div></div>`;
+            <div class="file-name"><span class="t">${esc(threadTitle(t))}</span>${kind}${state}${unread}</div>
+            <div class="file-summary">${esc(fmtTime(chat.activity.get(t.key) || t.pending_since || t.created_at))}${t.last_error ? " · " + esc(t.last_error) : ""}</div></div>`;
     }).join("") : empty("No threads yet");
 }
 
@@ -321,8 +329,18 @@ function blockHtml(b, role) {
     }
     if (b.type === "tool_call") return `<div><b>${esc(b.name || "tool")}</b></div><pre>${esc(typeof b.input === "string" ? b.input : json(b.input))}</pre>`;
     if (b.type === "tool_result") return `<div class="${b.is_error ? "status-error" : "muted"}">${b.is_error ? "error" : "result"}</div><pre>${esc(typeof b.output === "string" ? b.output : json(b.output))}</pre>`;
-    if (b.type === "event") return `<span>${esc(b.event_type || "event")}</span>`;
+    if (b.type === "event") {
+        const p = b.payload || {};
+        return `<span>${esc(p.name || b.event_type || "event")}</span>` +
+            (p.prompt ? `<div>${esc(p.prompt)}</div>` : "");
+    }
     return `<pre>${esc(json(b))}</pre>`;
+}
+
+function notificationHtml(name, input, failed = false) {
+    if (failed || !/(^|[_.])notify$/.test(name || "")) return "";
+    if (typeof input === "string") { try { input = JSON.parse(input); } catch { return ""; } }
+    return input && input.message ? `<div class="msg assistant"><b>Notification</b><div>${md(input.message)}</div></div>` : "";
 }
 
 function messageHtml(m) {
@@ -331,7 +349,7 @@ function messageHtml(m) {
         const call = blocks.find((b) => b.type === "tool_call");
         const name = call ? call.name : "tool";
         const err = blocks.some((b) => b.type === "tool_result" && b.is_error);
-        return `<details class="msg tool"><summary>${esc(name)}${err ? " " + badge("error", "red") : ""}</summary>${blocks.map((b) => blockHtml(b, "tool")).join("")}</details>`;
+        return notificationHtml(name, call && call.input, err) + `<details class="msg tool"><summary>${esc(name)}${err ? " " + badge("error", "red") : ""}</summary>${blocks.map((b) => blockHtml(b, "tool")).join("")}</details>`;
     }
     if (m.role === "event") return `<div class="msg event">${blocks.map((b) => blockHtml(b, "event")).join(" ")}</div>`;
     const cls = m.role === "assistant" ? "assistant" : "user";
@@ -357,30 +375,51 @@ function renderThinking() {
     } else if (!chat.thinking && el) el.remove();
 }
 
+// Durable run steps expose work before the final transcript is committed and
+// recover progress missed while the browser or streaming connection was away.
+function stepHtml(step) {
+    const d = step.data || {};
+    if (step.kind === "assistant_text") return messageHtml({role: "assistant", blocks: [{type: "text", text: d.text}]});
+    if (step.kind === "tool_call") return notificationHtml(step.name, d.input, step.status !== "ok") + `<details class="msg tool"><summary>${esc(step.name)} ${badge(step.status, step.status === "error" ? "red" : "blue")}</summary>` +
+        blockHtml({type: "tool_call", name: step.name, input: d.input}, "tool") +
+        (d.output != null ? blockHtml({type: "tool_result", output: d.output, is_error: step.status === "error"}, "tool") : "") + "</details>";
+    if (step.kind === "error") return `<div class="msg event run-error">${esc(d.message || d.text || step.name)}</div>`;
+    return "";
+}
+
 async function loadMessages(force) {
     if (!chat.key) { $("messages").innerHTML = ""; chat.sig = ""; return; }
     const key = chat.key;
-    const [msgs, detail] = await Promise.all([
-        api(API.threadMessages(key)),
-        api(API.thread(key)).catch(() => null),
+    const request = ++chat.request;
+    const [msgs, detail, runs] = await Promise.all([
+        api(API.threadMessages(key)), api(API.thread(key)), api(API.threadRuns(key)),
     ]);
-    if (key !== chat.key) return;
-    // Turns are saved to the transcript only when their run succeeds; until
-    // then they are pending events (queued, running, retrying or dead).
-    const pending = ((detail && detail.pending_events) || []).filter((e) => e.type === "chat.message");
-    const t = (detail && detail.thread) || {};
-    const sig = msgs.map((m) => m.id).concat(pending.map((e) => e.id)).join(",") + "|" + (t.last_error || "") + (t.dead ? "!" : "");
-    if (!force && sig === chat.sig) return;
+    const latest = runs.slice().sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)))[0];
+    // Completed transcript messages are canonical; uncommitted work uses steps.
+    const live = latest && latest.status !== "completed" && !msgs.some((m) => m.run_id === latest.id)
+        ? await api(API.run(latest.id)) : null;
+    if (key !== chat.key || request !== chat.request) return;
+    const pending = (detail.pending_events || []).filter((e) => e.type === "chat.message" || e.type === "automation.fired");
+    const t = detail.thread || {};
+    chat.thinking = !!(t.pending_since && !t.dead);
+    const sig = JSON.stringify([msgs, pending, t.last_error, t.dead, live]);
+    if (!force && sig === chat.sig) { renderThinking(); return; }
     chat.sig = sig;
     const box = $("messages");
     const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
     let html = msgs.map(messageHtml).join("");
-    html += pending.map((e) => `<div class="msg user pending" title="Not yet answered">${blockHtml({type: "text", text: (e.payload || {}).text || ""}, "user")}</div>`).join("");
-    if (pending.length && t.last_error) {
-        const state = t.dead ? "Run failed and will not be retried" : "Run failed; retrying";
-        html += `<div class="msg event run-error" role="status">${esc(state)}: ${esc(t.last_error)}</div>`;
+    html += pending.map((e) => e.type === "chat.message"
+        ? `<div class="msg user pending" title="Not yet answered">${blockHtml({type: "text", text: (e.payload || {}).text || ""}, "user")}</div>`
+        : messageHtml({role: "event", blocks: [{type: "event", event_type: e.type, payload: e.payload}]})).join("");
+    if (live) {
+        html += `<div class="msg event" role="status">Agent run: ${esc(live.run.status)}</div>`;
+        html += (live.steps || []).map(stepHtml).join("");
     }
-    box.innerHTML = html;
+    if (t.last_error || (live && live.run.error)) {
+        const state = t.dead ? "Run failed and will not be retried" : t.pending_since ? "Run failed; retrying" : "Run failed";
+        html += `<div class="msg event run-error" role="status">${esc(state)}: ${esc(t.last_error || live.run.error)}</div>`;
+    }
+    box.innerHTML = html || empty("No messages yet. Agent activity will appear here.");
     hydrateBlobs(box);
     renderThinking();
     if (atBottom || force) box.scrollTop = box.scrollHeight;
@@ -403,25 +442,42 @@ function debounce(name, fn, wait = 200) {
 }
 
 function connectStream() {
-    if (chat.stream) { chat.stream.close(); chat.stream = null; }
+    if (chat.stream) return;
     const q = "?access_token=" + enc(store.get("handler.token") || "") + "&act_as=" + enc(store.get("handler.actAs") || "");
-    const es = new EventSource(handlerPath((chat.key ? API.threadStream(chat.key) : API.stream) + q));
+    const es = new EventSource(handlerPath(API.stream + q));
     chat.stream = es;
     es.onerror = () => { api(API.me).catch(() => {}); };
+    es.onopen = refreshChatActivity;
     es.onmessage = (ev) => {
         let m;
         try { m = JSON.parse(ev.data); } catch { return; }
+        if (m.type === "notification") {
+            if (!me || String((m.data || {}).user_id) !== String(me.user_id)) return;
+            toast((m.data || {}).message || "New notification", false, 8000);
+            debounce("badges", refreshBadges, 150);
+            if (activeTab === "notifications") debounce("notifications", loadNotifications, 150);
+        }
         const mine = m.thread_key === chat.key;
+        if (m.thread_key) {
+            chat.activity.set(m.thread_key, m.at || new Date().toISOString());
+            if (!mine || activeTab !== "chat") chat.unread.add(m.thread_key);
+            if (m.type === "run_started" && (!mine || activeTab !== "chat")) {
+                const thread = chat.threads.find((t) => t.key === m.thread_key);
+                toast("Agent working in " + threadTitle(thread || {key: m.thread_key}));
+            }
+            renderThreadList();
+        }
         if (mine && (m.type === "event_queued" || m.type === "run_started")) { chat.thinking = true; renderThinking(); }
         if (mine && m.type === "run_finished") { chat.thinking = false; renderThinking(); }
         if (mine) debounce("msgs", () => loadMessages(), 150);
-        if (activeTab === "chat") debounce("threads", loadThreads, 500);
+        if (m.type !== "run_event") debounce("threads", loadThreads, 500);
         if (m.type === "run_finished" || m.type === "event_queued") debounce("badges", refreshBadges, 800);
     };
 }
 
 async function selectThread(key) {
     chat.key = key; chat.sig = ""; chat.thinking = false;
+    chat.unread.delete(key);
     const t = chat.threads.find((x) => x.key === key);
     if (t && t.pending_since && !t.dead) chat.thinking = true;
     setChatMode();
@@ -569,9 +625,24 @@ async function sendMessage() {
     } finally { sending = false; $("send-btn").disabled = false; }
 }
 
+function refreshChatActivity() {
+    loadThreads().catch(() => {});
+    if (chat.key) loadMessages().catch(() => {});
+    refreshBadges().catch(() => {});
+    if (activeTab === "notifications") loadNotifications().catch(() => {});
+}
+
 loaders.chat = async () => {
     if (!chatOpts.data) await initChatOpts().catch(() => {});
+    const schedules = await apiOpt(API.automations, []).catch(() => []);
+    chat.names = new Map(schedules.filter((a) => a.thread_key).map((a) => [a.thread_key, a.name]));
     await loadThreads();
+    if (!chat.initialized) {
+        chat.initialized = true;
+        if (!chat.key && chat.threads.length) await selectThread(chat.threads[0].key);
+    }
+    if (chat.key) chat.unread.delete(chat.key);
+    renderThreadList();
     setChatMode();
     if (!chat.stream) connectStream();
     if (chat.key) loadMessages().catch(() => {});
@@ -1318,6 +1389,13 @@ async function start() {
     if (isAdmin()) document.querySelectorAll("[data-admin]").forEach((n) => { n.hidden = false; });
     refreshBadges().catch(() => {});
     setInterval(() => refreshBadges().catch(() => {}), 30000);
+    connectStream();
+    setInterval(() => {
+        if (document.visibilityState !== "hidden") refreshChatActivity();
+    }, 5000);
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") refreshChatActivity();
+    });
     switchTab((location.hash || "#chat").slice(1));
 }
 window.addEventListener("hashchange", () => { const n = location.hash.slice(1); if (n && n !== activeTab) switchTab(n); });
