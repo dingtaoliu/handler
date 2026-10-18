@@ -327,10 +327,10 @@ class SQLiteCore:
     async def list_threads(
         self, owner_user_id: str | None = None, limit: int = 100
     ) -> list[Thread]:
-        where = "" if owner_user_id is None else "WHERE owner_user_id = ? "
+        where = "" if owner_user_id is None else "WHERE (owner_user_id = ? OR type <> 'chat') "
         parameters = (limit,) if owner_user_id is None else (owner_user_id, limit)
         return await self._list(
-            Thread, f"SELECT * FROM threads {where}ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            Thread, f"SELECT * FROM threads {where}ORDER BY COALESCE((SELECT MAX(created_at) FROM messages WHERE thread_key=threads.key), threads.created_at) DESC, rowid DESC LIMIT ?",
             parameters,
         )
 
@@ -449,8 +449,12 @@ from .sqlite_schedules import ScheduleMixin  # noqa: E402
 from .sqlite_users import UsersMixin  # noqa: E402
 
 
+from .thread_metadata import SQLiteThreadMetadata  # noqa: E402
+
+
 class SQLiteStore(
-    ScheduleMixin, ApprovalMixin, AuditMixin, MemoryMixin, SettingsMixin,
+    SQLiteThreadMetadata, ScheduleMixin, ApprovalMixin, AuditMixin,
+    MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, SQLiteCore,
 ):
     """The full SQLite store: core plus every domain mixin."""

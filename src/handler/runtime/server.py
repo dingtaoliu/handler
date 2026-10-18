@@ -43,6 +43,7 @@ from .store.postgres import PostgresStore
 from .store.sqlite import SQLiteStore
 from .tools.automation import AutomationTools
 from .tools.notify import NotifyTools
+from .tools.threads import ThreadTools
 from .types import Event, Lane, ThreadSpec
 from .uploads import UploadStore
 from .web.admin_api import admin_router
@@ -335,7 +336,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         memory_tools = MemoryTools(store)
         scheduler = Scheduler(store, default_harness=settings.harness_source("automation"))
         gateway = Gateway(store, GrantPolicy(grants_cfg), emit_event=emit_event)
-        for provider in (memory_tools, AutomationTools(store, scheduler),
+        for provider in (memory_tools, AutomationTools(store, scheduler), ThreadTools(store, bus),
                          NotifyTools(store, bus, users_provider=lambda: users)):
             gateway.register(provider)
         tokens = RunTokens()

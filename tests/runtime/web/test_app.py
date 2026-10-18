@@ -56,6 +56,9 @@ class FakeStore:
         return [t for t in self.threads.values()
                 if owner_user_id in (None, t.owner_user_id)]
 
+    async def thread_metadata(self, keys, user_id):
+        return {}
+
     async def get_thread(self, key):
         return self.threads.get(key)
 

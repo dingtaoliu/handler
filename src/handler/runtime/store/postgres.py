@@ -355,11 +355,11 @@ class PostgresCore:
     async def list_threads(
         self, owner_user_id: str | None = None, limit: int = 100
     ) -> list[Thread]:
-        where = "" if owner_user_id is None else "WHERE owner_user_id = %s "
+        where = "" if owner_user_id is None else "WHERE (owner_user_id = %s OR type <> 'chat') "
         parameters = (limit,) if owner_user_id is None else (owner_user_id, limit)
         return await self._list(
             Thread, f"SELECT {_columns(Thread)} FROM threads {where}"
-            "ORDER BY created_at DESC, seq DESC LIMIT %s", parameters,
+            "ORDER BY COALESCE((SELECT MAX(created_at) FROM messages WHERE thread_key=threads.key), threads.created_at) DESC, seq DESC LIMIT %s", parameters,
         )
 
     async def set_session(self, lease: Lease, session_id: str) -> bool:
@@ -480,8 +480,12 @@ from .postgres_domains import (  # noqa: E402
 )
 
 
+from .thread_metadata import PostgresThreadMetadata  # noqa: E402
+
+
 class PostgresStore(
-    ScheduleMixin, ApprovalMixin, AuditMixin, MemoryMixin, SettingsMixin,
+    PostgresThreadMetadata, ScheduleMixin, ApprovalMixin, AuditMixin,
+    MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, PostgresCore,
 ):
     """The full Postgres store: core plus every domain mixin."""

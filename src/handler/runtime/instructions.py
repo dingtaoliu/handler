@@ -32,7 +32,9 @@ async def email_instructions(settings: SettingsService) -> str:
 
 
 _GUIDANCE = {
-    ThreadType.CHAT: "Reply to the user.",
+    ThreadType.CHAT: ("Reply to the user. On the first turn of a conversation, call thread_set_title "
+                      "to create a concise, descriptive name (about 3–7 words) based on their request. "
+                      "This tool preserves existing names and user renames."),
     ThreadType.GMAIL: "The event is an email; draft rather than send unless told otherwise.",
     ThreadType.AUTOMATION: "This is a scheduled job; use notify to report anything worth a human's attention.",
     ThreadType.CRONTAL: ("This is a Crontal notification about one entity (an RFQ, bid, ...). "

@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,14 @@ class ChatRequest(BaseModel):
     client_message_id: str | None = None
     model: ModelName | None = None  # per-message override; validated against the enum
     reasoning_effort: ReasoningEffort | None = None
+
+
+class ThreadTitleRequest(BaseModel):
+    title: str
+
+
+class ThreadReadRequest(BaseModel):
+    last_message_at: datetime | None = None
 
 
 def _json(obj: Any) -> Any:
@@ -151,10 +160,14 @@ def create_app(
     @router.get("/api/threads")
     async def list_threads(user_id: str | None = None,
                            principal: Principal = principal_dep) -> Any:
-        if principal.is_admin:
-            return _json(await store.list_threads(owner_user_id=user_id))
+        if not principal.is_admin and user_id not in (None, principal.user_id):
+            return []
         threads = await store.list_threads(owner_user_id=user_id, limit=MEMBER_SCAN_LIMIT)
-        return _json([t for t in threads if can_see_thread(principal, t.key)][:100])
+        threads = [t for t in threads if can_see_thread(principal, t.key)]
+        metadata = await store.thread_metadata([t.key for t in threads], principal.user_id)
+        rows = [{**_json(t), **_json(metadata.get(t.key, {}))} for t in threads]
+        rows.sort(key=lambda t: (t.get("last_message_at") or t["created_at"], t["key"]), reverse=True)
+        return rows[:100]
 
     @router.get("/api/events")
     async def list_events(source: str | None = None, status: str | None = None,
@@ -181,6 +194,38 @@ def create_app(
         return _sse_response(request, "*", principal)
 
     # Suffixed routes must precede the greedy bare {key:path} route.
+    @router.put("/api/threads/{key:path}/title")
+    async def rename_thread(key: str, body: ThreadTitleRequest,
+                            principal: Principal = principal_dep) -> Any:
+        visible_thread(principal, key)
+        thread = await store.get_thread(key)
+        if thread is None:
+            raise HTTPException(404, "thread not found")
+        if not principal.is_admin and (thread.type != ThreadType.CHAT or
+                                      thread.owner_user_id != principal.user_id):
+            raise HTTPException(403, "only the owner or an admin can rename this thread")
+        try:
+            await store.set_thread_title(key, body.title)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        bus.publish(BusMessage(key, None, "thread_updated", {}))
+        return {**_json(thread), **_json((await store.thread_metadata([key], principal.user_id))[key])}
+
+    @router.post("/api/threads/{key:path}/read")
+    async def mark_read(key: str, body: ThreadReadRequest,
+                        principal: Principal = principal_dep) -> Any:
+        visible_thread(principal, key)
+        if principal.user_id is None:
+            raise HTTPException(400, f"{ACT_AS_HEADER} is required to mark a thread read")
+        thread = await store.get_thread(key)
+        if thread is None:
+            raise HTTPException(404, "thread not found")
+        try:
+            await store.mark_thread_read(key, principal.user_id, body.last_message_at)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {**_json(thread), **_json((await store.thread_metadata([key], principal.user_id))[key])}
+
     @router.get("/api/threads/{key:path}/stream")
     async def stream_thread(key: str, request: Request,
                             principal: Principal = sse_dep) -> StreamingResponse:
