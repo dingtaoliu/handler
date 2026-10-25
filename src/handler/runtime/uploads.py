@@ -33,11 +33,25 @@ class UploadedFile:
                 "content_type": self.content_type}
 
 
-def sanitize_filename(name: str | None) -> str:
-    """A bare, filesystem-safe file name (never a path, never hidden or empty)."""
+_UNSAFE_NAME = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
+MAX_NAME_BYTES = 200  # filesystems allow 255 bytes; CJK takes 3 per character
+
+
+def sanitize_filename(name: str | None, default: str = "file") -> str:
+    """A bare, filesystem-safe file name (never a path, never hidden or empty).
+
+    Unicode is kept (合同统计表-2026年7月31日.xls stays readable); only path
+    separators, control and shell-hostile characters are replaced. Long names
+    are cut to MAX_NAME_BYTES of UTF-8, keeping the extension.
+    """
     base = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
-    base = re.sub(r"[^A-Za-z0-9._ -]+", "_", base).strip(" .")
-    return (base or "file")[:120]
+    base = _UNSAFE_NAME.sub("_", base).strip(" .") or default
+    stem, dot, suffix = base.rpartition(".")
+    if not dot or not stem or len(suffix) > 10:
+        stem, suffix = base, ""
+    suffix = f".{suffix}" if suffix else ""
+    stem = stem.encode()[:MAX_NAME_BYTES - len(suffix.encode())].decode(errors="ignore")
+    return stem + suffix
 
 
 def _safe_part(value: str) -> str:

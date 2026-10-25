@@ -128,7 +128,9 @@ async def test_argv_and_environment(fake_codex, request_for, tmp_path, monkeypat
     copied = req.home / "auth.json"
     assert copied.read_bytes() == auth.read_bytes()
     assert stat.S_IMODE(copied.stat().st_mode) == 0o600
-    assert (req.workspace / "AGENTS.md").read_text() == req.instructions
+    agents_md = (req.workspace / "AGENTS.md").read_text()
+    assert agents_md.startswith(req.instructions)
+    assert "handler-read" in agents_md and "view_image" in agents_md
 
 
 async def test_existing_auth_and_instructions_preserved(fake_codex, request_for, tmp_path):

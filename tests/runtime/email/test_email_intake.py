@@ -144,8 +144,8 @@ def test_inline_gmail_forward():
     assert original.date == "Tue, Oct 13, 2026 at 4:05 PM"
     assert original.date_iso.startswith("2026-10-13T16:05")
     assert "316L flat bar 50x6mm, 2 tons" in original.body_text
-    # "../../etc/spec sheet (v2).xlsx": no path, no odd characters.
-    assert [a.filename for a in parsed.attachments] == ["spec sheet _v2_.xlsx"]
+    # "../../etc/spec sheet (v2).xlsx": no path; ordinary punctuation is kept.
+    assert [a.filename for a in parsed.attachments] == ["spec sheet (v2).xlsx"]
     assert folder_name(parsed) == "2026-10-14-rfq-316l-flat-bar-urgent-eaa3095d"
 
 
@@ -494,7 +494,7 @@ async def test_email_event_renders_as_turn(tmp_path):
     assert "  Date: Tue, Oct 13, 2026 at 4:05 PM" in turn
     folder = "inbox/2026-10-14-rfq-316l-flat-bar-urgent-eaa3095d"
     assert f"- {folder}/message.eml (raw email)" in turn
-    assert f"- {folder}/attachments/spec sheet _v2_.xlsx (application/" in turn
+    assert f"- {folder}/attachments/spec sheet (v2).xlsx (application/" in turn
     assert "Sender check: DKIM pass for client.example" in turn
     assert "Body (plain text):\nPlease quote this one." in turn
     assert "{" not in turn.split("Body (plain text):")[0]  # readable, not JSON

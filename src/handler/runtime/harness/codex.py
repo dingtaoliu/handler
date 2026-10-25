@@ -39,6 +39,23 @@ SHELL_ENV_EXCLUDE = (
 )
 
 
+def file_tools_note() -> str:
+    """How Codex reads office files and PDFs: handler's own reader, so both
+    harnesses see the same text (documents.py). Images: Codex's view_image."""
+    import sys
+
+    script = Path(sys.executable).parent / "handler-read"
+    command = str(script) if script.exists() else "handler-read"
+    return (
+        "# Reading files\n"
+        f"For Excel/CSV, Word, PDF, PowerPoint, .msg, EPUB or HTML files run `{command} FILE` "
+        "(options: --sheet NAME, --cells A1:H200, --pages 2-5, --as-images, --offset N). "
+        "Output is capped and ends with how to read the next part. Scanned PDFs (and "
+        "--as-images) save page images and print their paths. Open images with "
+        "view_image. Don't print binary files with cat."
+    )
+
+
 def codex_binary() -> str:
     binary = os.environ.get("HANDLER_CODEX_BIN") or shutil.which("codex")
     if binary:
@@ -336,7 +353,8 @@ class CodexHarness:
                         (req.home / "auth.json").unlink()
                         raise
         if req.instructions:
-            (req.workspace / "AGENTS.md").write_text(req.instructions, encoding="utf-8")
+            (req.workspace / "AGENTS.md").write_text(
+                req.instructions + "\n\n" + file_tools_note(), encoding="utf-8")
         env = {k: self.environment[k] for k in (*self.env_allowlist, *CODEX_CREDENTIAL_ENV)
                if k in self.environment}
         env.update({"CODEX_HOME": str(req.home), "HOME": str(req.home)})
