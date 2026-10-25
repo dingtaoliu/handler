@@ -21,6 +21,10 @@ async def build_instructions(
     else:
         sections.append(_GUIDANCE[thread_type])
     sections.append("Durable facts go to memory_save, not files.")
+    sections.append("If you have crontal_api_* tools: find endpoints with crontal_api_routes, "
+                    "and call crontal_api_describe before a write you haven't made in this "
+                    "thread, so the body matches its schema. A 400/422 result includes the "
+                    "spec as `expected`: fix the call from it once, then report.")
     sections.append("If you have gmail_* tools: you can search, read and draft email. Drafts "
                     "wait in the mailbox for a human to review and send. Send (gmail_send, "
                     "gmail_send_draft) only when the user asked for it: every send waits for "
