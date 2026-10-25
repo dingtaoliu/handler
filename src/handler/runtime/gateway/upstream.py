@@ -114,6 +114,7 @@ class UpstreamConnector:
             description=cfg.get("description") or tool.description or public,
             input_schema=tool.inputSchema or {"type": "object", "properties": {}},
             handler=handler,
+            outward=cfg.get("outward"),
         )
 
     def tools(self) -> list[ToolSpec]:

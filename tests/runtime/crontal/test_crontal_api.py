@@ -113,12 +113,46 @@ async def test_expired_token_is_refreshed_once(setup):
     assert result.content["status"] == 200 and fake.minted == 2
 
 
-@pytest.mark.parametrize("path", ["/admin", "rfq", "/api/v1/../x", "/api/v1/agent-access/token",
-                                  "/api/v1/handler/chat", "/api/v1/agent-mcp"])
+@pytest.mark.parametrize("path", [
+    "/admin", "rfq", "/api/v1/../x", "/api/v1/agent-access/token",
+    "/api/v1/handler/chat", "/api/v1/agent-mcp",
+    # Site-admin tools, and ways to spell them that the server would resolve.
+    "/api/v1/admin/users", "/api/v1/admin", "/api/v1/marketplace/query/RFQ",
+    "/api/v1/files/stats", "/api/v1/files/stats?x=1", "/api/v1/ADMIN/users",
+    "/api/v1/%61dmin/users", "/api/v1//admin/users", "/api/v1/./admin/users",
+    "/api/v1/rfq/../admin", "/api/v1/rfq/..%2fadmin", "/api/v1\\admin",
+])
 async def test_paths_are_restricted(setup, path):
     fake, tools, ctx, _ = setup
     result = await tools["crontal_api_get"].handler(ctx, {"path": path})
     assert result.is_error and fake.requests == []
+    called = await tools["crontal_api_call"].handler(ctx, {"method": "POST", "path": path})
+    assert called.is_error and fake.requests == []
+    described = await tools["crontal_api_describe"].handler(
+        ctx, {"method": "GET", "path": path})
+    assert described.is_error and fake.requests == []
+
+
+async def test_hidden_routes_are_not_listed(tmp_path):
+    fake = FakeCrontal()
+
+    def with_admin(request: httpx.Request) -> httpx.Response:
+        response = fake(request)
+        if request.url.path == "/api/v1/agent-access/routes":
+            return httpx.Response(200, json={"routes": response.json()["routes"] + [
+                {"methods": ["GET"], "path": "/api/v1/admin/users", "summary": "Users"},
+                {"methods": ["POST"], "path": "/api/v1/marketplace/query/<model_cls>"},
+                {"methods": ["GET"], "path": "/api/v1/files/stats", "summary": "Stats"},
+            ]})
+        return response
+
+    tools = CrontalApiTools("https://crontal.test", AGENT, workspace_for=lambda key: tmp_path,
+                            client=httpx.AsyncClient(transport=httpx.MockTransport(with_admin)))
+    routes = {s.name: s for s in tools.tools()}["crontal_api_routes"]
+    ctx = RunContext(run_id="r1", thread_key="chat:7:c1", user_id="7", acting_as="7")
+    listed = (await routes.handler(ctx, {})).content
+    assert len(listed) == 4
+    assert not any("admin" in r or "marketplace" in r or "stats" in r for r in listed)
 
 
 async def test_files_are_saved_to_the_workspace_with_text(setup):

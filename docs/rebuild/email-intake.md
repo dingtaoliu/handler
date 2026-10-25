@@ -1,6 +1,7 @@
 # Email intake (contact@crontal.ai → Crontal objects)
 
-Status: deployed to main. Updated 2026-10-18: blocklist-based sender policy.
+Status: deployed to main. Updated 2026-10-25: lockdown after the security audit (external
+senders, least privilege on email/crontal threads, sender-bound thread keys).
 
 ## Brief
 
@@ -33,9 +34,11 @@ sender → contact@crontal.ai → Cloudflare Email Worker ─┬─ message.forw
 | Idempotency | `email:<Message-ID>`. Without a Message-ID, a sha256 of the raw bytes is used. A duplicate gets 200 `duplicate: true` |
 | Size | 413 above 30 MiB (Cloudflare accepts up to 25 MiB). At most 100 attachments and 5 nested `message/rfc822` levels; anything skipped is listed in the event |
 | Parsing | Stdlib `email`, `policy=default` (`mail/parse.py`). See below |
-| Sender gate | Settings `email.blocked_senders` and `email.require_auth`. An empty blocklist accepts every authenticated sender. Failing mail becomes an `ignored` event with `ignored_reason`, shown in Activity → *Ignored email*. It never creates a thread or files, and never reaches the agent |
+| Sender gate | Anyone may write in (email is core functionality). Settings `email.blocked_senders` and `email.require_auth`: an empty blocklist accepts every DKIM-authenticated sender. Failing mail becomes an `ignored` event with `ignored_reason`, shown in Activity → *Ignored email*. It never creates a thread or files, and never reaches the agent |
+| Sender trust | Every accepted email is from an **external, untrusted party** unless its DKIM-confirmed From matches `email.trusted_senders` (marked `trusted`; it doesn't gate acceptance and grants nothing extra yet). The turn starts with a handler notice outside the `<event>` element saying so, and the default instructions tell the agent it works for the merchant, not the sender |
+| Least privilege | On `email` and `crontal` threads (and `gmail`), a call that leaves the merchant, runs code, or persists beyond the thread needs approval, whatever the instance grants say (`crontal_api.*: allow` included). See *Grants on untrusted threads* below |
 | Auth verdict | Handler verifies DKIM itself on the raw bytes (`mail/dkim.py`), because Cloudflare doesn't hand the Worker a trustworthy verdict (findings below). A pass needs a valid signature whose `d=` aligns with the sender |
-| Thread type | `email`: event `email.received`, key `email:<root id>`. The root is the first id of `References`, else `In-Reply-To`, else the message's own Message-ID. Background lane, visible to all users (it isn't a `chat:` key) |
+| Thread type | `email`: event `email.received`, key `email:<scope>:<root id>`. The root is the first id of `References`, else `In-Reply-To`, else the message's own Message-ID. Those headers are written by the sender, so the key also carries the sender's scope: its DKIM-confirmed address (or the `trusted_senders` entry it matched, so a trusted `@domain` shares threads); `via:<domain>` when only the envelope sender's domain passed; `unverified:<address>` with `require_auth` off. A stranger who knows a root Message-ID gets a thread of their own. Background lane, visible to all users (it isn't a `chat:` key) |
 | Acting user | Setting `email.act_as` (a handler user id; on the Crontal instance that's the Crontal user id). The run's `acting_as` reads the setting live, falling back to the thread owner set at ingest. `crontal_api_*` then mint that user's JWT (`POST /api/v1/agent-access/token` with `X-Crontal-User`), the same path chat uses with its owner. The user must exist and be enabled, the same rule as `X-Handler-User`. If not, mail is ignored with `act_as_not_configured` |
 | Harness/model | `threads.email` in Settings → Threads, like the other types. An instance whose saved threads settings predate `email` starts the type with its `crontal` entry (same harness), not the bare default |
 | Instructions | Setting `email.instructions` (default in `mail/instructions.py`) replaces the one-line per-type guidance in the prompt. Saving it empty restores the default. Shown in the prompt preview as type `email` |
@@ -87,13 +90,26 @@ A message is blocked if either its header or envelope identity matches
 - `@domain`, or a bare `domain`, for that exact domain.
 
 An empty list blocks nobody. Legacy saved `allowed_senders` values are discarded
-when read; they are never converted into blocked addresses. Other saved settings
-and instructions are preserved.
+when read; they are never converted into blocked or trusted addresses. Other saved
+settings and instructions are preserved.
+
+The message must have exactly one From header with exactly one address
+(`invalid_sender` otherwise): DKIM signs the bottom-most From while parsers read the
+top one, so a second From could show a forged address next to someone else's valid
+signature.
+
+`trusted_senders` (same entry syntax) marks mail `trusted` only when DKIM confirms the
+header From itself and it matches. Never trusted: an identity confirmed only through
+the envelope sender (its mailbox isn't signed), forwarded originals (plain text in the
+body), and anything accepted with `require_auth` off. The payload records
+`sender_trust` (`trusted`/`external`) and `accepted_sender`.
 
 With `require_auth`, a DKIM signature must also verify:
 - algorithm `rsa-sha256` (key ≥1024 bits) or `ed25519-sha256`;
 - From must be signed;
-- `x=` not expired.
+- `x=` not expired;
+- an `l=` body length, if present, covering the whole body (text after `l=` bytes
+  is unsigned, so anyone could append to a signed message).
 
 Its `d=` must align with the identity's domain: the same domain, or a parent with at
 least two labels that isn't a shared suffix like `com.tw`/`co.uk`. Keys are fetched
@@ -104,7 +120,7 @@ implementation: relaxed, simple and ed25519 (`tests/runtime/fixtures/email/make_
 
 Ignore reasons:
 - `sender_blocked`;
-- `invalid_sender`;
+- `invalid_sender` (no usable From, or more than one From header or address);
 - `auth_failed` (the detail says why: no signature, body hash mismatch, not aligned,
   key lookup failed, …);
 - `act_as_not_configured`.
@@ -149,13 +165,41 @@ Ignore reasons:
 | Worker var | `HANDLER_INGEST_URL` | `https://<crontal-agent web URL>/ingest/email` |
 | Worker var | `HANDLER_TIMEOUT_MS` | 60000 |
 | Handler settings `email` | `blocked_senders` | Addresses or `@domain` to ignore; empty accepts authenticated senders |
+| | `trusted_senders` | Addresses or `@domain` marked trusted when DKIM confirms the From; empty: everyone is external |
 | | `require_auth` | `true` (default) |
 | | `act_as` | Crontal admin user id (must exist as a handler user, as for chat) |
 | | `instructions` | Default prompt; editable |
 | Handler settings `threads.email` | `harness`/`model`/`reasoning_effort` | As for other types (inherits `crontal`'s on existing instances) |
 
-Grants: the agent's writes go through `crontal_api_call` (`write_external`), which
-is already `allow` on the Heroku instance.
+### Grants on untrusted threads
+
+Email and Crontal-notification threads carry text written outside the merchant, so
+`GrantPolicy` (`gateway/policy.py`) puts a floor on them: an `allow` becomes `ask` for
+- a call that sends the merchant's data outside it. `crontal_api_call` is classified
+  per call (`outward_call` in `gateway/crontal_api.py`): writes count as inside only
+  under `/rfq`, `/demand_listing`, `/bid`, `/contact`, `/files`,
+  `/operations`, `/notification`, `/inventory`, `/products`, and even there these are
+  outward: RFQ `status` other than draft (publish, close), `/rfq/<id>/share-email`,
+  `/bid/<id>/lock` (submit), `/bid/token/<t>/revisions`, `/bid/<id>/respond`, and any
+  path with share/invite/publish/submit/send/email/message/public/token. Everything
+  else (supply listings, which go live on the marketplace when created; chat, message,
+  merchant incl. invites, card, auth, agent, new areas) is
+  outward. The curated `crontal_*` tools: `publish_rfq`, a non-draft status, and
+  `define_shape` are outward;
+- `gmail_send`/`gmail_send_draft` and any other `write_external` tool without a
+  classifier, and every `exec` tool;
+- `write_internal` tools that persist beyond the thread (memory, automations, and any
+  future one), except `thread_set_title`, `notify` and Gmail drafts.
+
+Reads, and writes that stay inside the merchant (draft RFQs and their listings, draft
+bids, contacts, uploads), keep the instance rules, so with
+`crontal_api.*: allow` they run unasked. `deny` stays `deny`. Chat threads are
+unchanged.
+
+Hidden Crontal routes (`_HIDDEN`, refused by every `crontal_api_*` tool and left out of
+`crontal_api_routes`): `/api/v1/agent-access`, `/agent-mcp`, `/handler`, `/admin`,
+`/marketplace/query`, `/files/stats`. Paths must be plain (no `%`-escapes, `//`, `.`
+or `..` segments, or backslashes), so no spelling of them reaches the server.
 
 ## Runbook
 
@@ -164,8 +208,11 @@ is already `allow` on the Heroku instance.
 2. **Settings** (Handler UI → Settings → `email`, or
    `PUT /api/settings/email` with the admin key):
    - `blocked_senders`: unwanted addresses or domains (empty initially);
-   - `act_as`: the admin's user id;
-   - `require_auth`: true.
+   - `trusted_senders`: optional (empty: every sender is external);
+   - `act_as`: the merchant user the agent acts as;
+   - `require_auth`: true;
+   - `instructions`: `""` to use the current default (a saved copy of an older
+     default stays in force otherwise).
 
    Check Settings → Threads → *Email intake* for the harness (`openai_agents` on
    Heroku).
@@ -173,13 +220,14 @@ is already `allow` on the Heroku instance.
    `HANDLER_INGEST_URL`, `wrangler secret put HANDLER_EMAIL_SECRET`,
    `wrangler deploy`, then switch the `contact@crontal.ai` routing rule to *Send to
    a Worker*.
-4. **Smoke test.** Forward a test RFQ from a non-blocked, DKIM-authenticated address. Expect:
+4. **Smoke test.** Send a test RFQ from a non-blocked, DKIM-authenticated address. Expect:
    - `wrangler tail` shows `handler accepted the email` 202;
    - Handler Activity shows an `email:<id>` run;
    - the Gmail copy arrives as before.
 
    From a blocked address, expect a 200 `ignored` row in Activity → *Ignored
-   email*.
+   email*. Ask the email to publish the RFQ: the publish call must show up in
+   Approvals instead of running.
 5. **Rollback.** Switch the routing rule back to *Send to an email →
    crontal.contacts@gmail.com*.
 
@@ -195,7 +243,8 @@ Operational notes:
 | `src/handler/runtime/web/email_ingest.py` | `/ingest/email`, signature, gate, durable write, event |
 | `src/handler/runtime/mail/parse.py` | MIME walk, inline and attachment forwards, folder name |
 | `src/handler/runtime/mail/dkim.py` | DKIM verifier and DNS-over-HTTPS TXT resolver |
-| `src/handler/runtime/mail/intake.py` | Allowlist, alignment, act_as, file saving, payload, turn rendering |
+| `src/handler/runtime/mail/intake.py` | Sender gate and trust, alignment, thread scope, act_as, file saving, payload, turn rendering |
+| `src/handler/runtime/gateway/policy.py`, `gateway/crontal_api.py` | Floor on untrusted threads; outward classification and hidden routes |
 | `src/handler/runtime/mail/instructions.py` | Default email instructions |
 | `settings.py`, `instructions.py`, `types.py`, `run.py` | `email` settings section, thread type, prompt, live act_as, turn |
 | `workspaces.py` | `WorkspaceSync.put_file` (durable write without a local copy) |
