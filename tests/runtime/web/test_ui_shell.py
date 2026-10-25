@@ -28,6 +28,15 @@ async def test_shell_is_served_without_auth(client, path):
     assert r.headers["cache-control"] == "no-store"
 
 
+async def test_shell_has_workspace_navigation_and_accessible_chat_controls(client):
+    page = (await client.get("/app")).text
+    assert 'placeholder="Search chats"' in page
+    assert 'aria-label="Open navigation"' in page
+    assert 'aria-label="Show conversations"' in page
+    assert 'aria-label="Send message"' in page
+    assert "Agent workspace" in page
+
+
 @pytest.mark.parametrize("name,kind", [("app.js", "javascript"), ("style.css", "css"),
                                        ("logo.svg", "svg")])
 async def test_assets_are_served(client, name, kind):

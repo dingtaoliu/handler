@@ -269,6 +269,11 @@ function preferredTheme() {
     if (saved === "light" || saved === "dark") return saved;
     return window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
+function setSidebarCollapsed(collapsed) {
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
+    $("sidebar-toggle").textContent = collapsed ? ">" : "\u2039";
+    $("sidebar-toggle").setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
+}
 
 // ─── Tabs ────────────────────────────────────────────────────────────────────
 const loaders = {};   // tab name -> function
@@ -280,6 +285,7 @@ function switchTab(name) {
     if (!nav || nav.hidden) name = "chat";
     if (staleUi) { history.replaceState(null, "", "#" + name); location.reload(); return; }
     activeTab = name;
+    document.body.classList.remove("sidebar-open", "thread-open");
     document.querySelectorAll(".tab-pane").forEach((p) => p.classList.remove("active"));
     document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("active", n.dataset.tab === name));
     $("tab-" + name).classList.add("active");
@@ -325,7 +331,9 @@ async function loadThreads() {
 function renderThreadList(list = chat.threads) {
     setBadge("chat", chat.unread.size);
     chat.threads = list;
-    $("thread-list").innerHTML = list.length ? list.map((t) => {
+    const q = ($("thread-search").value || "").trim().toLowerCase();
+    const shown = q ? list.filter((t) => `${threadTitle(t)} ${t.key}`.toLowerCase().includes(q)) : list;
+    $("thread-list").innerHTML = shown.length ? shown.map((t) => {
         const own = isOwnChat(t.key);
         const kind = t.type === "chat" ? (own ? "" : badge("other chat", "gray")) : badge(t.type, t.type === "automation" ? "blue" : "green");
         const state = t.dead ? badge("dead", "red") : t.lease_owner ? badge("running", "blue") : t.pending_since ? badge("queued", "yellow") : "";
@@ -333,7 +341,21 @@ function renderThreadList(list = chat.threads) {
         return `<div class="file-item thread-item ${t.key === chat.key ? "active" : ""}" role="button" tabindex="0" data-action="select-thread" data-key="${esc(t.key)}">
             <div class="file-name"><span class="t">${esc(threadTitle(t))}</span>${kind}${state}${unread}</div>
             <div class="file-summary">${esc(fmtTime(chat.activity.get(t.key) || t.pending_since || t.created_at))}${t.last_error ? " · " + esc(t.last_error) : ""}</div></div>`;
-    }).join("") : empty("No threads yet");
+    }).join("") : empty(q ? "No matching conversations" : "No conversations yet");
+}
+
+function renderChatEmpty() {
+    const name = me && me.display_name ? `, ${esc(me.display_name.split(/\s+/)[0])}` : "";
+    $("messages").innerHTML = `<div class="chat-empty">
+        <div class="empty-mark" aria-hidden="true">&#9671;</div>
+        <h1>How can I help${name}?</h1>
+        <p>Ask Handler to work across your files, connected services, and recurring tasks.</p>
+        <div class="starter-grid">
+          <button class="starter" type="button" data-prompt="Summarize my recent activity and flag anything that needs attention."><span>&#10022;</span>Catch me up</button>
+          <button class="starter" type="button" data-prompt="Review the files in my workspace and tell me what is most important."><span>&#9633;</span>Review my files</button>
+          <button class="starter" type="button" data-prompt="Help me create an automation for a recurring task."><span>&#8635;</span>Create an automation</button>
+        </div>
+      </div>`;
 }
 
 function blockHtml(b, role) {
@@ -404,7 +426,7 @@ function stepHtml(step) {
 }
 
 async function loadMessages(force) {
-    if (!chat.key) { $("messages").innerHTML = ""; chat.sig = ""; return; }
+    if (!chat.key) { renderChatEmpty(); chat.sig = ""; return; }
     const key = chat.key;
     const request = ++chat.request;
     const [msgs, detail, runs] = await Promise.all([
@@ -495,6 +517,7 @@ function connectStream() {
 async function selectThread(key) {
     chat.key = key; chat.sig = ""; chat.thinking = false;
     chat.unread.delete(key);
+    document.body.classList.remove("thread-open");
     const t = chat.threads.find((x) => x.key === key);
     if (t && t.pending_since && !t.dead) chat.thinking = true;
     setChatMode();
@@ -514,12 +537,20 @@ actions["download-upload"] = async (el) => download(await fetchBlob(API.upload(e
 
 function newConversation() {
     chat.key = null; chat.sig = ""; chat.thinking = false;
-    $("messages").innerHTML = ""; setChatMode(); loadThreads().catch(() => {});
+    renderChatEmpty(); setChatMode(); loadThreads().catch(() => {});
     renderChatOpts(); refreshChatOpts().catch(() => {});
     connectStream();
     $("input").focus();
 }
 $("new-chat").addEventListener("click", newConversation);
+$("thread-search").addEventListener("input", () => renderThreadList());
+$("messages").addEventListener("click", (e) => {
+    const starter = e.target.closest("[data-prompt]");
+    if (!starter) return;
+    $("input").value = starter.dataset.prompt;
+    $("input").dispatchEvent(new Event("input"));
+    $("input").focus();
+});
 
 function renderPending() {
     const box = $("pending-files");
@@ -1449,12 +1480,26 @@ $("theme-toggle").addEventListener("click", () => {
     const next = document.body.classList.contains("light") ? "dark" : "light";
     pref.set("theme", next); applyTheme(next);
 });
+$("sidebar-toggle").addEventListener("click", () => {
+    if (window.matchMedia && matchMedia("(max-width: 900px)").matches) {
+        document.body.classList.remove("sidebar-open");
+        return;
+    }
+    const collapsed = !document.body.classList.contains("sidebar-collapsed");
+    pref.set("sidebarCollapsed", collapsed ? "1" : "0");
+    setSidebarCollapsed(collapsed);
+});
+$("mobile-nav-toggle").addEventListener("click", () => document.body.classList.toggle("sidebar-open"));
+$("sidebar-scrim").addEventListener("click", () => document.body.classList.remove("sidebar-open", "thread-open"));
+$("thread-toggle").addEventListener("click", () => document.body.classList.toggle("thread-open"));
 $("logout-btn").addEventListener("click", logout);
 applyTheme(preferredTheme());
+setSidebarCollapsed(pref.get("sidebarCollapsed") === "1");
 
 async function start() {
     try { me = await api(API.me); } catch { return; }
     $("sidebar-user").textContent = (me.display_name || me.user_id || "admin key") + " (" + me.role + ")";
+    $("user-avatar").textContent = String(me.display_name || me.user_id || "H").trim().charAt(0).toUpperCase() || "H";
     if (me.via === "trusted_network") $("logout-btn").hidden = true;
     if (isAdmin()) document.querySelectorAll("[data-admin]").forEach((n) => { n.hidden = false; });
     refreshBadges().catch(() => {});
