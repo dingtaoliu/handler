@@ -139,6 +139,8 @@ Working mode: the main session acts as architect and hands implementation to bac
 - **Decisions the driver made while the owner was away (2026-10-25), for review:** (2b) API schemas are pulled on demand: a compact catalog, a per-route describe tool, the schema returned automatically on 4xx validation errors, and a short usage note in the prompt; they are not injected into every context and not cached in memory (it would go stale). (2c) Writing non-text formats is on hold until the owner picks an approach. The scroll fix is committed on hephaestus `main` but not deployed.
 - **(3) Token and cost tracking.** In Crontal's own AI agent (not Handler), the admin view lists messages but tokens in and out are all 0. Fix that, then surface Handler's usage and cost (from `/api/usage` per instance) in Crontal's admin portal so all AI spend is visible in one place. `prices.yaml` rates are still null.
 
+**Deployed 2026-10-25:** Crontal v112 (`main` @ 09879dc: scroll fix, merchant invites, AI spend, console sign-in) with migration `t5p6q7r8s9u0` applied after backup b020. Handler v39 (`rebuild` @ c888f02: sign-in tickets and the document reader). Rollback targets: Crontal v111, Handler v37. Still in progress: run reliability fixes and the Crontal API schemas; the two dead threads get revived after those deploy.
+
 **Waiting on the owner:**
 - Rotate the OpenAI key (`OPENAI_API_KEY` on Crontal, `CODEX_API_KEY` on `crontal-agent`) and the Bucketeer keys.
 - Send a test email to `contact@crontal.ai` to confirm the Gmail copy still arrives.
