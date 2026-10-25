@@ -9,6 +9,7 @@ run is cancelled if the lease is lost.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -305,6 +306,11 @@ class RunExecutor:
             await self.store.complete(lease, run_id="", event_ids=[])
             return
 
+        # We hold the lease now, so any run of this thread still marked running
+        # was left behind by a worker that died or lost its lease.
+        await self.store.sweep_abandoned_runs(thread.key)
+        previous = await self.store.list_runs(thread.key, limit=1)
+        repair = bool(previous) and previous[0].status == RunStatus.ABANDONED
         run = Run(
             id=new_id("run"),
             thread_key=thread.key,
@@ -326,23 +332,55 @@ class RunExecutor:
         await self._publish_task(thread, run.id)
         logger.info("run started", extra={"harness": run.harness, "events": len(events)})
         try:
-            await self._run_with_heartbeat(lease, thread, run, events)
+            await self._run_with_heartbeat(lease, thread, run, events, repair=repair)
         finally:
             reset_current_run(token)
 
+    async def _renew(self, lease: Lease) -> Lease | None:
+        """Extend the lease, retrying store errors while it is still valid."""
+        delay = min(5.0, self.config.heartbeat_seconds)
+        while True:
+            try:
+                return await self.store.heartbeat(lease, self.config.lease_seconds)
+            except Exception:  # noqa: BLE001 - a DB blip must not kill the heartbeat
+                left = (lease.until - utcnow()).total_seconds()
+                logger.warning("heartbeat failed; retrying", exc_info=True,
+                               extra={"lease_left_seconds": left})
+                if left <= delay:
+                    return None
+                await asyncio.sleep(delay)
+
+    async def _abandon(self, thread: Thread, run: Run, reason: str) -> None:
+        """Stop the harness and mark the run row, best effort."""
+        harness = self.harnesses.get(thread.harness)
+        try:
+            async with asyncio.timeout(5):
+                if harness is not None:
+                    await harness.interrupt(run.id)
+                await self.store.abandon_run(run.id, reason)
+        except Exception:  # noqa: BLE001 - the startup sweep catches what this misses
+            logger.warning("could not mark run %s abandoned", run.id, exc_info=True)
+
     async def _run_with_heartbeat(
-        self, lease: Lease, thread: Thread, run: Run, events: list[Event]
+        self, lease: Lease, thread: Thread, run: Run, events: list[Event], *,
+        repair: bool = False,
     ) -> None:
-        work = asyncio.create_task(self._run(lease, thread, run, events))
+        work = asyncio.create_task(self._run(lease, thread, run, events, repair=repair))
         lost = asyncio.Event()
 
         async def heartbeat() -> None:
             current = lease
             while True:
                 await asyncio.sleep(self.config.heartbeat_seconds)
-                renewed = await self.store.heartbeat(current, self.config.lease_seconds)
+                renewed = await self._renew(current)
                 if renewed is None:
                     lost.set()
+                    harness = self.harnesses.get(thread.harness)
+                    if harness is not None:
+                        # Stop the harness first: an SDK run left going would
+                        # keep writing to the session after we hand it over.
+                        with contextlib.suppress(Exception):
+                            await harness.interrupt(run.id)
                     work.cancel()
                     return
                 current = renewed
@@ -352,18 +390,34 @@ class RunExecutor:
             await work
         except asyncio.CancelledError:
             if not lost.is_set():
-                raise  # shutdown or user cancellation
+                # Shutdown or user cancellation: the run cannot finish.
+                await self._abandon(thread, run, "abandoned: the runtime stopped mid-run")
+                raise
             logger.warning("lease lost mid-run, abandoning: %s", thread.key)
+            await self._abandon(thread, run, "abandoned: lease lost mid-run")
             self._publish(thread.key, run.id, "run_finished", {"status": "abandoned"})
         finally:
             hb.cancel()
 
-    async def _run(self, lease: Lease, thread: Thread, run: Run, events: list[Event]) -> None:
+    async def _unsaved(self, thread_key: str, messages: list[Message]) -> list[Message]:
+        """Drop event messages already saved by an earlier failed attempt."""
+        if not messages:
+            return messages
+        # Saved ones sit at the tail: nothing else is saved while events are pending.
+        recent = await self.store.list_messages(thread_key, limit=len(messages) + 20,
+                                                newest=True)
+        saved = {(m.raw or {}).get("event_id") for m in recent} - {None}
+        return [m for m in messages if (m.raw or {}).get("event_id") not in saved]
+
+    async def _run(self, lease: Lease, thread: Thread, run: Run, events: list[Event], *,
+                   repair: bool = False) -> None:
         harness = self.harnesses.get(thread.harness)
         plan = await self._plan(thread, events)
         recorder = _RunRecorder(self.store, run.id, model=run.model, prices=self.prices,
                                 raw_sink=self.raw_sink)
-        transcript = event_messages(thread.key, run.id, events, self.uploads)
+        transcript = await self._unsaved(
+            thread.key, event_messages(thread.key, run.id, events, self.uploads))
+        inputs = list(transcript)  # the turn's own messages, kept even if the run fails
         slug = thread_slug(thread.key)
         mcp_token: str | None = None
         try:
@@ -406,6 +460,7 @@ class RunExecutor:
                 mcp_servers=mcp_servers,
                 env=dict(self.config.harness_env),
                 limits=RunLimits(timeout_seconds=plan.timeout_seconds),
+                repair_session=repair,
             )
             try:
                 final_text = await self._stream(
@@ -441,8 +496,10 @@ class RunExecutor:
             raise
         except LeaseLost:
             logger.warning("lease lost while committing run %s", run.id)
+            await self._abandon(thread, run, "abandoned: lease lost mid-run")
         except Exception as exc:  # harness errors and unexpected failures
-            await self._fail(lease, thread, run, recorder, exc, plan.max_attempts)
+            await self._fail(lease, thread, run, recorder, exc, plan.max_attempts,
+                             inputs=inputs)
         finally:
             if mcp_token is not None and self.tokens is not None:
                 self.tokens.revoke(mcp_token)
@@ -495,13 +552,16 @@ class RunExecutor:
         req: RunRequest, recorder: _RunRecorder, transcript: list[Message],
     ) -> str:
         input_count = len(transcript)
+        # This turn's own messages may already be saved by a failed attempt.
+        current = set(run.trigger_event_ids)
         if not req.session_id and await self.store.list_messages(thread.key, limit=1):
             # History without a harness session (e.g. imported from another
             # system): give the fresh session the thread's record as context.
             recap = await self._recap(
                 thread.key, header="Earlier conversation in this thread (from handler's "
-                "record; you have no session memory of it):")
-            req = replace(req, prompt=recap + "\n\nCurrent turn:\n" + req.prompt)
+                "record; you have no session memory of it):", exclude_events=current)
+            if recap:
+                req = replace(req, prompt=recap + "\n\nCurrent turn:\n" + req.prompt)
         for attempt in range(2):
             final_text = ""
             progressed = False
@@ -537,15 +597,21 @@ class RunExecutor:
                     raise LeaseLost(thread.key)
                 thread.session_id = None
                 await recorder.session_retry(str(exc))
-                req = replace(req, session_id=None,
-                              prompt=await self._recap(thread.key) + "\n\nCurrent turn:\n" + req.prompt)
+                recap = await self._recap(thread.key, exclude_events=current)
+                req = replace(req, session_id=None, repair_session=False,
+                              prompt=(recap + "\n\nCurrent turn:\n" if recap else "") + req.prompt)
                 del transcript[input_count:]
         raise AssertionError("unreachable")
 
     async def _recap(
         self, thread_key: str,
         header: str = "Recent official transcript (context for the recovered session):",
+        exclude_events: set[str] | None = None,
     ) -> str:
+        """The last 20 messages as text, or "" when there are none.
+
+        Messages of `exclude_events` (the current turn) are left out.
+        """
         # Store pages start with the oldest messages, so grow the window until
         # it includes the tail rather than mistaking the first 20 for the last.
         limit = 200
@@ -554,6 +620,11 @@ class RunExecutor:
             if len(messages) < limit:
                 break
             limit *= 2
+        if exclude_events:
+            messages = [m for m in messages
+                        if (m.raw or {}).get("event_id") not in exclude_events]
+        if not messages:
+            return ""
         lines = [header]
         for message in messages[-20:]:
             content = json.dumps(message.blocks, ensure_ascii=False, default=str)
@@ -602,7 +673,8 @@ class RunExecutor:
         return plan
 
     async def _fail(self, lease: Lease, thread: Thread, run: Run, recorder: StepRecorder,
-                    exc: Exception, max_attempts: int) -> None:
+                    exc: Exception, max_attempts: int, *,
+                    inputs: list[Message] | None = None) -> None:
         retryable = isinstance(exc, HarnessError) and exc.retryable
         if not isinstance(exc, HarnessError):
             logger.exception("run crashed")
@@ -615,6 +687,13 @@ class RunExecutor:
         run.status, run.usage, run.cost_usd = RunStatus.FAILED, usage, cost
         run.error, run.finished_at = f"{type(exc).__name__}: {exc}"[:2000], utcnow()
         await self.store.finish_run(lease, run)
+        if inputs:
+            # Keep what the user said in the record even though nobody answered;
+            # a later attempt of the same events won't save it again (_unsaved).
+            try:
+                await self.store.add_messages(lease, inputs)
+            except Exception:  # noqa: BLE001 - must not stop the thread being failed
+                logger.exception("could not save the failed run's input messages")
         failed = await self.store.fail(lease, run.error, retry_in)
         logger.warning("run failed", extra={"error": run.error, "retry_in": retry_in})
         self._publish(thread.key, run.id, "run_finished",

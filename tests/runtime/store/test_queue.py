@@ -189,10 +189,16 @@ async def test_fail_backoff_reset_and_dead_letter(store, clock, spec, event):
     assert await store.fail(lease, "fatal", None)
     thread = await store.get_thread(spec.key)
     assert thread.dead is True and thread.attempts == 1 and thread.last_error == "fatal"
-    await store.put(event("after-dead"), spec)
+    await store.put(event("after-dead", type="crontal.rfq.updated"), spec)
     clock.advance(1000)
     assert await store.claim("worker", Lane.INTERACTIVE, 1, 60) == []
     assert len(await store.pending_events(spec.key)) == 2
+    # A new chat message revives the dead thread with its pending events.
+    await store.put(event("user-again"), spec)
+    thread = await store.get_thread(spec.key)
+    assert thread.dead is False and thread.attempts == 0
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    assert len(await store.pending_events(spec.key)) == 3
 
 
 async def test_repeated_failures_increment_attempts_and_preserve_events(store, spec, event):

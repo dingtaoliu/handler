@@ -445,6 +445,11 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
              if args.database_url
              else SQLiteStore(data_dir / "handler.db"))
     try:
+        # Runs a dead worker left at 'running' (e.g. the dyno restarted mid-run).
+        swept = await store.sweep_abandoned_runs()
+        if swept:
+            logger.warning("marked runs abandoned at startup",
+                           extra={"instance": instance_name or "main", "runs": swept})
         bus = RunEventBus()
 
         settings = SettingsService(

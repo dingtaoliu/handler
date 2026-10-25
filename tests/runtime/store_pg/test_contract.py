@@ -172,10 +172,16 @@ async def test_fail_backoff_reset_and_dead_letter(store, clock, spec, event):
     assert await store.fail(lease, "fatal", None)
     thread = await store.get_thread(spec.key)
     assert thread.dead is True and thread.attempts == 1 and thread.last_error == "fatal"
-    await store.put(event("after-dead"), spec)
+    await store.put(event("after-dead", type="crontal.rfq.updated"), spec)
     clock.advance(1000)
     assert await store.claim("worker", Lane.INTERACTIVE, 1, 60) == []
     assert len(await store.pending_events(spec.key)) == 2
+    # A new chat message revives the dead thread with its pending events.
+    await store.put(event("user-again"), spec)
+    thread = await store.get_thread(spec.key)
+    assert thread.dead is False and thread.attempts == 0
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    assert len(await store.pending_events(spec.key)) == 3
 
 
 @pytest.mark.parametrize("signal", ["put", "complete", "fail"])
@@ -330,3 +336,63 @@ async def test_list_events_filters_and_orders_newest_first(store, clock, spec, e
     assert [e.id for e, _ in await store.list_events(status="ignored")] == [ignored.id]
     assert await store.list_events(source="nowhere") == []
     assert len(await store.list_events(limit=1)) == 1
+
+
+async def test_nul_characters_do_not_break_writes(store, clock, running):
+    # Postgres rejects "\u0000" in text and jsonb; a binary file read as text has them.
+    lease, run = running
+    step = RunStep(run.id, 1, StepKind.TOOL_CALL, "read_file", "stream", started_at=clock(),
+                   status="running", data={"input": "a\x00b"})
+    await store.add_step(step)
+    await store.update_step(replace(step, status="ok", data={"output": "PK\x00\x00xls",
+                                                             "k\x00": ["\x00"]}))
+    message = Message(run.thread_key, Role.TOOL, [{"type": "tool_result", "output": "x\x00y"}],
+                      run_id=run.id)
+    assert await store.add_messages(lease, [message])
+    assert await store.finish_run(lease, replace(run, status=RunStatus.FAILED,
+                                                 error="bad \x00 byte", finished_at=clock()))
+    (saved,) = await store.list_steps(run.id)
+    assert saved.data["output"].replace("\x00", "") == "PKxls"
+    (stored,) = await store.list_messages(run.thread_key)
+    assert stored.blocks[0]["output"].replace("\x00", "") == "xy"
+    assert (await store.get_run(run.id)).error.replace("\x00", "") == "bad  byte"
+
+
+async def test_sweep_marks_runs_without_a_live_lease_abandoned(store, clock, running):
+    lease, run = running
+    assert await store.sweep_abandoned_runs() == []  # its lease is live
+    clock.advance(61)
+    assert await store.sweep_abandoned_runs(run.thread_key) == [run.id]
+    swept = await store.get_run(run.id)
+    assert swept.status is RunStatus.ABANDONED and swept.finished_at is not None
+    assert "abandoned" in swept.error
+    assert await store.sweep_abandoned_runs() == []
+    assert not await store.abandon_run(run.id, "again")  # only 'running' rows change
+
+
+async def test_abandon_run_marks_a_running_row(store, running):
+    _, run = running
+    assert await store.abandon_run(run.id, "abandoned: lease lost mid-run")
+    abandoned = await store.get_run(run.id)
+    assert abandoned.status is RunStatus.ABANDONED and abandoned.error.startswith("abandoned")
+
+
+async def test_revive_thread_clears_dead_and_optionally_session(store, spec, running):
+    lease, _ = running
+    assert await store.set_session(lease, "conv_1")
+    assert await store.fail(lease, "fatal", None)
+    assert (await store.get_thread(spec.key)).dead
+    assert await store.revive_thread(spec.key, reset_session=True)
+    thread = await store.get_thread(spec.key)
+    assert not thread.dead and thread.attempts == 0 and thread.last_error is None
+    assert not thread.session_id
+    assert len(await store.claim("worker", spec.lane, 1, 60)) == 1
+    assert not await store.revive_thread("missing")
+
+
+async def test_revive_thread_can_discard_pending_events(store, spec, running):
+    lease, _ = running
+    assert await store.fail(lease, "fatal", None)
+    assert await store.revive_thread(spec.key, discard_pending=True)
+    assert await store.pending_events(spec.key) == []
+    assert await store.claim("worker", spec.lane, 1, 60) == []

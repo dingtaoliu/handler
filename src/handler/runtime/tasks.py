@@ -118,7 +118,7 @@ def _run_item(row: dict, events: list[dict], titles: dict[str, dict], pending: l
               now: datetime) -> dict:
     status = row["task_status"]
     error = row.get("error")
-    if status == "failed" and row["run_status"] == "running":
+    if status in ("failed", "dead") and row["run_status"] in ("running", "abandoned"):
         error = error or "Run was interrupted: its worker stopped before finishing"
     finished = row.get("finished_at")
     return {

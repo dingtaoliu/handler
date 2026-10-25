@@ -120,6 +120,26 @@ class Store(EventQueue, Protocol):
         """Update status, finished_at, error, usage, cost_usd. Fenced."""
         ...
 
+    async def abandon_run(self, run_id: str, error: str) -> bool:
+        """Mark a still-running run abandoned (its worker gave up or lost the
+        lease). Not fenced: it only changes a row that is still 'running'."""
+        ...
+
+    async def sweep_abandoned_runs(self, thread_key: str | None = None) -> list[str]:
+        """Mark abandoned every 'running' run (of one thread, or all) whose
+        lease is no longer live. Returns their ids."""
+        ...
+
+    async def revive_thread(self, key: str, *, reset_session: bool = False,
+                            discard_pending: bool = False) -> bool:
+        """Clear dead/attempts/backoff so the thread is claimable again.
+
+        reset_session clears session_id (the next turn starts a fresh harness
+        session from a transcript recap); discard_pending marks unconsumed
+        events consumed so they are not run again. False if no such thread.
+        """
+        ...
+
     async def get_run(self, run_id: str) -> Run | None: ...
 
     async def list_runs(self, thread_key: str, limit: int = 50) -> list[Run]: ...

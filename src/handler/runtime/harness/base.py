@@ -71,6 +71,9 @@ class RunRequest:
     env: dict[str, str] = field(default_factory=dict)  # extra env for the process
     images: list[Path] = field(default_factory=list)  # image attachments for this turn
     limits: RunLimits = field(default_factory=RunLimits)
+    # The thread's previous run never finished (worker died or lost its lease):
+    # the harness should repair its session before sending this turn.
+    repair_session: bool = False
 
 
 class HarnessError(Exception):

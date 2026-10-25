@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import mimetypes
+import os
+import re
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -51,6 +54,19 @@ _RETRYABLE = (openai.RateLimitError, openai.APIConnectionError, openai.APITimeou
               openai.InternalServerError)
 
 _HOSTED_TOOLS = {"web_search_call", "file_search_call", "code_interpreter_call"}
+
+# Server-side compaction: once a request's rendered context passes this many
+# tokens, the Responses API replaces older items with one compaction item, so
+# long threads stop resending their whole history. 0 turns it off.
+DEFAULT_COMPACT_THRESHOLD = int(os.environ.get("HANDLER_COMPACT_THRESHOLD", "200000"))
+
+# A Conversation holding a tool call without its output (a run killed
+# mid-tool) rejects every later request with this 400.
+_MISSING_OUTPUT = re.compile(r"no tool output found for (?:function |custom tool )?call", re.I)
+# Call item type -> the output item type that answers it.
+_CALL_OUTPUTS = {"function_call": "function_call_output",
+                 "custom_tool_call": "custom_tool_call_output"}
+INTERRUPTED_OUTPUT = "interrupted — no result"
 
 # Handler records runs itself; don't also upload SDK traces to OpenAI.
 set_tracing_disabled(True)
@@ -200,6 +216,53 @@ def _usage_events(usage: Any, model: str, created: bool) -> list[RunEvent]:
     ]
 
 
+def _failed_usage(result: Any, model: str, created: bool) -> list[RunEvent]:
+    """Usage of a run that raised; empty when it made no model request."""
+    usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
+    if usage is None or not (getattr(usage, "requests", 0)
+                             or getattr(usage, "request_usage_entries", None)):
+        return []
+    return _usage_events(usage, model, created)
+
+
+def missing_tool_output(exc: BaseException) -> bool:
+    return isinstance(exc, openai.BadRequestError) and bool(_MISSING_OUTPUT.search(str(exc)))
+
+
+def _compaction_rejected(exc: BaseException) -> bool:
+    """A 400 refusing the compaction setting (e.g. a model without it)."""
+    message = str(exc).lower()
+    return (isinstance(exc, openai.BadRequestError)
+            and ("context_management" in message or "compaction" in message))
+
+
+async def repair_conversation(client: Any, conversation_id: str) -> int:
+    """Answer every tool call in the Conversation that has no output.
+
+    Each gets a placeholder output so the next request is accepted. Returns
+    how many outputs were added.
+    """
+    calls: dict[str, str] = {}
+    answered: set[str] = set()
+    async for item in client.conversations.items.list(conversation_id, limit=100, order="asc"):
+        kind, call_id = getattr(item, "type", None), getattr(item, "call_id", None)
+        if not call_id:
+            continue
+        if kind in _CALL_OUTPUTS:
+            calls.setdefault(call_id, _CALL_OUTPUTS[kind])
+        elif kind in _CALL_OUTPUTS.values():
+            answered.add(call_id)
+    missing = [{"type": kind, "call_id": call_id, "output": INTERRUPTED_OUTPUT}
+               for call_id, kind in calls.items() if call_id not in answered]
+    for start in range(0, len(missing), 20):  # the API takes at most 20 items per call
+        await client.conversations.items.create(conversation_id,
+                                                items=missing[start:start + 20])
+    if missing:
+        logger.warning("repaired conversation", extra={"conversation_id": conversation_id,
+                                                       "outputs_added": len(missing)})
+    return len(missing)
+
+
 def _error(exc: BaseException, session_id: str | None) -> HarnessError:
     if isinstance(exc, HarnessError):
         return exc
@@ -221,10 +284,14 @@ class OpenAIAgentsHarness:
 
     def __init__(self, api_key: str, *, default_model: str | None = None,
                  default_reasoning_effort: str | None = None,
-                 client: openai.AsyncOpenAI | None = None) -> None:
+                 client: openai.AsyncOpenAI | None = None,
+                 compact_threshold: int | None = None) -> None:
         self.client = client or openai.AsyncOpenAI(api_key=api_key)
         self.default_model = default_model or DEFAULT_MODEL
         self.default_reasoning_effort = default_reasoning_effort
+        threshold = DEFAULT_COMPACT_THRESHOLD if compact_threshold is None else compact_threshold
+        # None when off; a model that refuses compaction turns it off for the process.
+        self.compact_threshold: int | None = threshold if threshold > 0 else None
         self._runs: dict[str, Any] = {}
 
     async def defaults(self) -> dict[str, str | None]:
@@ -251,6 +318,11 @@ class OpenAIAgentsHarness:
             model_settings=ModelSettings(
                 reasoning=Reasoning(effort=effort, summary="auto") if effort else None,
                 include_usage=True,
+                # Past the model's context window, drop the oldest items instead of failing.
+                truncation="auto",
+                context_management=([{"type": "compaction",
+                                      "compact_threshold": self.compact_threshold}]
+                                    if self.compact_threshold else None),
             ),
             tools=[WebSearchTool(), *workspace_tools(req.workspace)],
             mcp_servers=mcp_servers,
@@ -267,64 +339,59 @@ class OpenAIAgentsHarness:
         ]
         connected: list = []
         session_id: str | None = None
+        created = False
         text = ""
+        result: Any = None
+        reported = True  # whether `result`'s usage has been emitted
+        finished = False
         try:
             async with asyncio.timeout(req.limits.timeout_seconds):
                 session_id, created = await self._session(req)
                 yield RunEvent(RunEventKind.SESSION, {"session_id": session_id})
+                if req.repair_session and not created:
+                    # The thread's previous run died mid-turn and may have left
+                    # tool calls without outputs in the Conversation.
+                    await repair_conversation(self.client, session_id)
                 for server in servers:
                     await server.connect()
                     connected.append(server)
                 yield RunEvent(RunEventKind.TURN_STARTED)
-                result = Runner.run_streamed(
-                    self._agent(req, connected), _input(req),
-                    max_turns=req.limits.max_turns or DEFAULT_MAX_TURNS,
-                    conversation_id=session_id,
-                    run_config=RunConfig(tracing_disabled=True,
-                                         workflow_name=f"handler:{req.thread_key}"),
-                )
-                self._runs[req.run_id] = result
-                # Calls by id, so each output is reported with its call's name and arguments.
-                calls: dict[str, tuple[str, Any]] = {}
-                async for event in result.stream_events():
-                    if event.type != "run_item_stream_event":
+                for attempt in range(3):
+                    result = Runner.run_streamed(
+                        self._agent(req, connected), _input(req),
+                        max_turns=req.limits.max_turns or DEFAULT_MAX_TURNS,
+                        conversation_id=session_id,
+                        run_config=RunConfig(tracing_disabled=True,
+                                             workflow_name=f"handler:{req.thread_key}"),
+                    )
+                    reported = False
+                    self._runs[req.run_id] = result
+                    progressed = False
+                    try:
+                        async for event in self._events(result):
+                            progressed = True
+                            if event.kind is RunEventKind.ASSISTANT_TEXT:
+                                text = event.data["text"]
+                            yield event
+                    except openai.BadRequestError as exc:
+                        # Retry in place only when the request was refused before
+                        # anything happened (so the input was not stored either).
+                        if attempt == 2 or progressed or not self._recover(exc, created):
+                            raise
+                        if not await self._recover_conversation(exc, session_id):
+                            raise
+                        reported = True
+                        for usage_event in _failed_usage(result, model, created):
+                            yield usage_event
                         continue
-                    item, raw = event.item, _raw(event.item)
-                    if event.name == "tool_called":
-                        call_id = raw.get("call_id") or raw.get("id")
-                        tool = raw.get("name") or raw.get("type", "tool")
-                        args = raw.get("action") if "arguments" not in raw else _arguments(raw)
-                        calls[str(call_id)] = (tool, args)
-                        yield RunEvent(RunEventKind.TOOL_STARTED, {
-                            "id": call_id, "tool": tool, "kind": raw.get("type", "function_call"),
-                            "input": args}, raw=raw)
-                        if raw.get("type") in _HOSTED_TOOLS:
-                            # Hosted tools run inside the model call; no output item follows.
-                            yield RunEvent(RunEventKind.TOOL_FINISHED, {
-                                "id": call_id, "tool": tool, "kind": raw["type"], "input": args,
-                                "output": raw.get("action"), "status": raw.get("status")}, raw=raw)
-                    elif event.name == "tool_output":
-                        call_id = raw.get("call_id") or raw.get("id")
-                        tool, args = calls.pop(str(call_id), ("tool", None))
-                        yield RunEvent(RunEventKind.TOOL_FINISHED, {
-                            "id": call_id, "tool": tool, "kind": "function_call_output",
-                            "input": args,
-                            "output": _without_inline_data(getattr(item, "output", None)),
-                            "status": "completed"}, raw=raw)
-                    elif event.name == "message_output_created":
-                        message = ItemHelpers.text_message_output(item)
-                        if message:
-                            text = message
-                            yield RunEvent(RunEventKind.ASSISTANT_TEXT, {"text": message}, raw=raw)
-                    elif event.name == "reasoning_item_created":
-                        summary = " ".join(s.get("text", "") for s in raw.get("summary", [])
-                                           if isinstance(s, dict))
-                        yield RunEvent(RunEventKind.REASONING, {"text": summary}, raw=raw)
+                    break
+                reported = True
                 for usage_event in _usage_events(result.context_wrapper.usage, model, created):
                     yield usage_event
                 final = result.final_output
                 if isinstance(final, str) and final:
                     text = final
+                finished = True
         except asyncio.CancelledError:
             raise
         except BaseException as exc:  # noqa: BLE001 - normalised into HarnessError
@@ -335,10 +402,26 @@ class OpenAIAgentsHarness:
                 error = _error(exc, req.session_id)
             else:
                 raise
+            if result is not None and not reported:
+                # Failed runs still made (and paid for) their model calls.
+                reported = True
+                for usage_event in _failed_usage(result, model, created):
+                    yield usage_event
+            if missing_tool_output(exc) and session_id and not created:
+                # Leave the Conversation usable for the next turn.
+                try:
+                    await repair_conversation(self.client, session_id)
+                except Exception:  # noqa: BLE001
+                    logger.warning("conversation repair failed", exc_info=True)
             logger.warning("openai_agents run failed", extra={"error": str(error)})
             yield RunEvent(RunEventKind.ERROR, {"message": str(error), "retryable": error.retryable})
             raise error from exc
         finally:
+            if result is not None and not finished:
+                # Stop the SDK's background task: left running, it keeps calling
+                # tools and writing to the Conversation after handler gave up.
+                with contextlib.suppress(Exception):
+                    result.cancel()
             self._runs.pop(req.run_id, None)
             for server in connected:
                 try:
@@ -346,6 +429,57 @@ class OpenAIAgentsHarness:
                 except Exception:  # noqa: BLE001
                     logger.debug("MCP cleanup failed", exc_info=True)
         yield RunEvent(RunEventKind.FINAL, {"text": text, "session_id": session_id})
+
+    def _recover(self, exc: BaseException, created: bool) -> bool:
+        """Whether a refused request can be fixed and sent again."""
+        if self.compact_threshold and _compaction_rejected(exc):
+            return True
+        return missing_tool_output(exc) and not created
+
+    async def _recover_conversation(self, exc: BaseException, session_id: str) -> bool:
+        if self.compact_threshold and _compaction_rejected(exc):
+            logger.warning("compaction refused; turning it off", extra={"error": str(exc)[:300]})
+            self.compact_threshold = None
+            return True
+        return await repair_conversation(self.client, session_id) > 0
+
+    async def _events(self, result: Any) -> AsyncIterator[RunEvent]:
+        """The SDK run's stream as handler RunEvents."""
+        # Calls by id, so each output is reported with its call's name and arguments.
+        calls: dict[str, tuple[str, Any]] = {}
+        async for event in result.stream_events():
+            if event.type != "run_item_stream_event":
+                continue
+            item, raw = event.item, _raw(event.item)
+            if event.name == "tool_called":
+                call_id = raw.get("call_id") or raw.get("id")
+                tool = raw.get("name") or raw.get("type", "tool")
+                args = raw.get("action") if "arguments" not in raw else _arguments(raw)
+                calls[str(call_id)] = (tool, args)
+                yield RunEvent(RunEventKind.TOOL_STARTED, {
+                    "id": call_id, "tool": tool, "kind": raw.get("type", "function_call"),
+                    "input": args}, raw=raw)
+                if raw.get("type") in _HOSTED_TOOLS:
+                    # Hosted tools run inside the model call; no output item follows.
+                    yield RunEvent(RunEventKind.TOOL_FINISHED, {
+                        "id": call_id, "tool": tool, "kind": raw["type"], "input": args,
+                        "output": raw.get("action"), "status": raw.get("status")}, raw=raw)
+            elif event.name == "tool_output":
+                call_id = raw.get("call_id") or raw.get("id")
+                tool, args = calls.pop(str(call_id), ("tool", None))
+                yield RunEvent(RunEventKind.TOOL_FINISHED, {
+                    "id": call_id, "tool": tool, "kind": "function_call_output",
+                    "input": args,
+                    "output": _without_inline_data(getattr(item, "output", None)),
+                    "status": "completed"}, raw=raw)
+            elif event.name == "message_output_created":
+                message = ItemHelpers.text_message_output(item)
+                if message:
+                    yield RunEvent(RunEventKind.ASSISTANT_TEXT, {"text": message}, raw=raw)
+            elif event.name == "reasoning_item_created":
+                summary = " ".join(s.get("text", "") for s in raw.get("summary", [])
+                                   if isinstance(s, dict))
+                yield RunEvent(RunEventKind.REASONING, {"text": summary}, raw=raw)
 
     async def interrupt(self, run_id: str) -> None:
         if result := self._runs.get(run_id):
