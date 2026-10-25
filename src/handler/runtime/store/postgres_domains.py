@@ -7,7 +7,7 @@ self._wake and PostgresCore's event routing from postgres.py.
 from __future__ import annotations
 
 from dataclasses import fields, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, TypeVar
 
@@ -410,23 +410,33 @@ class UsersMixin(_Rows):
             row = await cursor.fetchone()
         return _from_row(User, row) if row else None
 
-    async def create_token(self, user_id: str, label: str = "") -> tuple[str, str]:
-        token, token_id = new_token(), new_id("tok")
+    async def create_token(
+        self, user_id: str, label: str = "", *, ttl_seconds: float | None = None,
+    ) -> tuple[str, str]:
+        token, token_id, now = new_token(), new_id("tok"), self._clock()
         async with self._conn() as conn:
             await _insert(conn, "user_tokens", {
                 "id": token_id, "user_id": user_id, "token_hash": hash_token(token),
-                "label": label, "created_at": self._clock(),
+                "label": label, "created_at": now,
             })
+            if ttl_seconds is not None:
+                await _insert(conn, "user_token_expiry", {
+                    "token_id": token_id,
+                    "expires_at": now + timedelta(seconds=ttl_seconds),
+                })
         return token_id, token
 
     async def resolve_token(self, token: str) -> User | None:
+        now = self._clock()
         async with self._conn() as conn:
             cursor = await conn.execute(
-                "UPDATE user_tokens t SET last_used_at = %s FROM users u "
-                "WHERE u.id = t.user_id AND t.token_hash = %s AND t.revoked_at IS NULL "
-                "AND NOT u.disabled RETURNING "
+                "UPDATE user_tokens t SET last_used_at = %(now)s FROM users u "
+                "WHERE u.id = t.user_id AND t.token_hash = %(hash)s "
+                "AND t.revoked_at IS NULL AND NOT u.disabled "
+                "AND NOT EXISTS (SELECT 1 FROM user_token_expiry e "
+                "WHERE e.token_id = t.id AND e.expires_at <= %(now)s) RETURNING "
                 + ", ".join(f"u.{name}" for name in User.__dataclass_fields__),
-                (self._clock(), hash_token(token)),
+                {"now": now, "hash": hash_token(token)},
             )
             row = await cursor.fetchone()
         return _from_row(User, row) if row else None
@@ -444,3 +454,27 @@ class UsersMixin(_Rows):
             UserToken, f"SELECT {_columns(UserToken)} FROM user_tokens "
             "WHERE user_id = %s ORDER BY created_at, seq", (user_id,),
         )
+
+    async def create_sign_in_ticket(
+        self, user_id: str, ticket_hash: str, ttl_seconds: float,
+    ) -> datetime:
+        now = self._clock()
+        expires_at = now + timedelta(seconds=ttl_seconds)
+        async with self._conn() as conn:
+            await conn.execute("DELETE FROM sign_in_tickets WHERE expires_at <= %s", (now,))
+            await _insert(conn, "sign_in_tickets", {
+                "ticket_hash": ticket_hash, "user_id": user_id,
+                "created_at": now, "expires_at": expires_at,
+            })
+        return expires_at
+
+    async def redeem_sign_in_ticket(self, ticket_hash: str) -> str | None:
+        now = self._clock()
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "UPDATE sign_in_tickets SET used_at = %(now)s WHERE ticket_hash = %(hash)s "
+                "AND used_at IS NULL AND expires_at > %(now)s RETURNING user_id",
+                {"now": now, "hash": ticket_hash},
+            )
+            row = await cursor.fetchone()
+        return row["user_id"] if row else None
