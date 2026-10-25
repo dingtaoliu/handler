@@ -35,11 +35,12 @@ from urllib.parse import quote
 
 import httpx
 
+from .. import documents
 from ..context import RunContext
 from ..types import Risk
 from .base import ToolResult, ToolSpec
 from .credentials import NeedsReauth, UpstreamAccess
-from .crontal_api import _safe_name, _to_text
+from .crontal_api import _safe_name
 from .google_oauth import (
     CONNECTOR,
     DRAFT_SCOPES,
@@ -364,7 +365,8 @@ class GmailTools:
             data = _b64decode(body.get("data", ""))
         saved = self._save(ctx, message_id, filename, data)
         workspace = self._workspace_for(ctx.thread_key)
-        text = await asyncio.to_thread(_to_text, workspace / saved)
+        text = await asyncio.to_thread(documents.to_text, workspace / saved,
+                                       max_chars=MAX_TEXT_CHARS + 1)
         result: dict[str, Any] = {"filename": filename, "mime_type": mime, "size": len(data),
                                   "saved_to": saved}
         if text:

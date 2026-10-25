@@ -8,24 +8,27 @@ Crontal applies that user's normal permissions. `crontal_api_routes` lists
 the available endpoints.
 
 File responses are saved into the thread's workspace (`downloads/`), and
-documents are converted to text so the agent can read them.
+documents are converted to text (`documents.to_text`) so the agent can read them.
 """
 
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
+from .. import documents
 from ..context import RunContext
 from ..types import Risk
+from ..uploads import sanitize_filename
 from .base import ToolResult, ToolSpec
 
 API_PREFIX = "/api/v1/"
@@ -33,8 +36,6 @@ _HIDDEN = ("/api/v1/agent-access", "/api/v1/agent-mcp", "/api/v1/handler")
 MAX_JSON_CHARS = 60_000
 MAX_TEXT_CHARS = 20_000
 ROUTES_TTL_SECONDS = 600
-_DOC_SUFFIXES = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".csv", ".txt",
-                 ".md", ".html", ".htm", ".json", ".xml"}
 
 
 def crontal_base_url(url: str) -> str:
@@ -44,25 +45,24 @@ def crontal_base_url(url: str) -> str:
 
 
 def _safe_name(name: str) -> str:
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name).name).strip("._") or "download"
-    return name[:120]
+    """A bare file name; Unicode kept (see uploads.sanitize_filename)."""
+    return sanitize_filename(name, default="download")
 
 
 def _filename(response: httpx.Response, path: str) -> str:
     disposition = response.headers.get("content-disposition", "")
-    match = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", disposition)
-    return _safe_name(match.group(1) if match else path.rstrip("/").split("/")[-1])
-
-
-def _to_text(path: Path) -> str | None:
-    if path.suffix.lower() not in _DOC_SUFFIXES:
-        return None
-    try:
-        from markitdown import MarkItDown
-
-        return MarkItDown().convert(str(path)).text_content
-    except Exception:  # noqa: BLE001 - conversion is best effort
-        return None
+    # Prefer RFC 5987 filename*= (UTF-8, percent-encoded): Flask's plain filename=
+    # is an ASCII fallback with every non-ASCII character dropped.
+    if match := re.search(r"filename\*\s*=\s*([\w-]+)'[^']*'([^;]+)", disposition):
+        try:
+            codecs.lookup(match.group(1))
+            encoding = match.group(1)
+        except LookupError:
+            encoding = "utf-8"
+        return _safe_name(unquote(match.group(2).strip().strip('"'), encoding=encoding,
+                                  errors="replace"))
+    match = re.search(r"filename\s*=\s*\"?([^\";]+)", disposition)
+    return _safe_name(match.group(1) if match else unquote(path.rstrip("/").split("/")[-1]))
 
 
 class CrontalApiTools:
@@ -167,7 +167,8 @@ class CrontalApiTools:
             return ToolResult({"status": status, "body": response.text[:2000]}, is_error=True)
         # A file or other non-JSON payload: keep it where the agent can work on it.
         saved = self._save(workspace, _filename(response, path), response.content, path)
-        text = await asyncio.to_thread(_to_text, workspace / saved)
+        text = await asyncio.to_thread(documents.to_text, workspace / saved,
+                                       max_chars=MAX_TEXT_CHARS + 1)
         result: dict[str, Any] = {"status": status, "content_type": ctype,
                                   "size": len(response.content), "saved_to": saved}
         if text:

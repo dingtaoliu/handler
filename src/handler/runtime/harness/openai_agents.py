@@ -5,7 +5,8 @@ API key. A thread's session is an OpenAI Conversation: the conversation id is
 the session id, so a turn sends only the new input and resumes server-side
 history. Tools are handler's MCP gateway (memory, automations, connectors)
 plus OpenAI's hosted web search and file tools confined to the workspace.
-There is deliberately no shell.
+read_file goes through `documents`, so it reads office files, PDFs and images
+(returned to the model as image input). There is deliberately no shell.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from agents import (
     OpenAIResponsesModel,
     RunConfig,
     Runner,
+    ToolOutputImage,
+    ToolOutputText,
     WebSearchTool,
     function_tool,
     set_tracing_disabled,
@@ -34,8 +37,9 @@ from agents.exceptions import AgentsException, MaxTurnsExceeded
 from agents.mcp import MCPServerStreamableHttp
 from openai.types.shared import Reasoning
 
-from ..settings import HARNESS_DEFAULT_MODELS
+from .. import documents
 from ..images import sniff_file
+from ..settings import HARNESS_DEFAULT_MODELS
 from ..types import TokenUsage
 from .base import HarnessError, RunEvent, RunEventKind, RunRequest
 
@@ -43,7 +47,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TURNS = 40
 DEFAULT_MODEL = HARNESS_DEFAULT_MODELS["openai_agents"]
-MAX_READ_BYTES = 200_000
 _RETRYABLE = (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError,
               openai.InternalServerError)
 
@@ -75,14 +78,40 @@ def workspace_tools(workspace: Path) -> list:
         return "\n".join(files[:500]) or "(empty)"
 
     @function_tool
-    def read_file(path: str) -> str:
-        """Read a UTF-8 text file from the workspace."""
-        target = _confined(workspace, path)
-        data = target.read_bytes()[:MAX_READ_BYTES]
-        text = data.decode("utf-8", errors="replace")
-        if target.stat().st_size > MAX_READ_BYTES:
-            text += f"\n… [truncated at {MAX_READ_BYTES} bytes]"
-        return text
+    def read_file(path: str, offset: int = 0, sheet: str | None = None,
+                  cells: str | None = None, pages: str | None = None,
+                  as_images: bool = False) -> Any:
+        """Read any workspace file: text, Excel/CSV, Word, PDF, PowerPoint, HTML,
+        EPUB, Outlook .msg, ZIP, JSON/XML, and images (which you see as images).
+
+        Output is capped; when more remains, a note at the end says exactly how
+        to call read_file for the next part. Spreadsheets list every sheet and
+        show cells as Markdown tables with Excel column letters and row numbers.
+        A scanned PDF (no text layer) comes back as page images.
+
+        Args:
+            path: File path relative to the workspace, e.g. downloads/quote.xlsx.
+            offset: Character offset to continue a long text document from.
+            sheet: Spreadsheets only: read just this sheet (by name).
+            cells: Spreadsheets only: an A1 range such as "A1:H200", "500:900"
+                (rows) or "C:F" (columns).
+            pages: PDFs only: pages to read, such as "3", "2-5" or "1,4,7-9".
+            as_images: PDFs only: show the pages as images (drawings, stamps,
+                signatures, layout) instead of their text.
+        """
+        try:
+            target = _confined(workspace, path)
+            reading = documents.read(target, display=path, offset=offset, sheet=sheet,
+                                     cells=cells, pages=pages, as_images=as_images)
+        except (documents.ReadError, ValueError, OSError) as exc:
+            return f"error: {exc}"
+        if not reading.images:
+            return reading.text
+        parts: list[Any] = [ToolOutputText(text=reading.text)]
+        for image in reading.images:
+            data = base64.b64encode(image.data).decode()
+            parts.append(ToolOutputImage(image_url=f"data:{image.mime};base64,{data}"))
+        return parts
 
     @function_tool
     def write_file(path: str, content: str) -> str:
@@ -110,8 +139,24 @@ def _input(req: RunRequest) -> str | list[dict[str, Any]]:
 def _raw(item: Any) -> dict[str, Any]:
     raw = getattr(item, "raw_item", item)
     if hasattr(raw, "model_dump"):
-        return raw.model_dump(mode="json", exclude_none=True)
-    return raw if isinstance(raw, dict) else {"value": str(raw)}
+        return _without_inline_data(raw.model_dump(mode="json", exclude_none=True))
+    return _without_inline_data(raw) if isinstance(raw, dict) else {"value": str(raw)}
+
+
+def _without_inline_data(value: Any) -> Any:
+    """Replace base64 data URLs (images read_file showed the model) with a stub,
+    so transcripts and run events don't store megabytes of image data."""
+    if isinstance(value, str):
+        if value.startswith("data:") and len(value) > 256:
+            return f"{value.split(',', 1)[0]},… ({len(value):,} chars omitted)"
+        return value
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, dict):
+        return {k: _without_inline_data(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_without_inline_data(v) for v in value]
+    return value
 
 
 def _arguments(raw: dict[str, Any]) -> Any:
@@ -263,7 +308,8 @@ class OpenAIAgentsHarness:
                         tool, args = calls.pop(str(call_id), ("tool", None))
                         yield RunEvent(RunEventKind.TOOL_FINISHED, {
                             "id": call_id, "tool": tool, "kind": "function_call_output",
-                            "input": args, "output": getattr(item, "output", None),
+                            "input": args,
+                            "output": _without_inline_data(getattr(item, "output", None)),
                             "status": "completed"}, raw=raw)
                     elif event.name == "message_output_created":
                         message = ItemHelpers.text_message_output(item)

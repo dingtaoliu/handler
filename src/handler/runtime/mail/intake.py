@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .. import documents
 from .dkim import DkimResult, TxtResolver, verify_message
 from .parse import Address, ParsedEmail, folder_name
 
@@ -19,8 +20,6 @@ MAX_BODY_CHARS = 40_000  # in the event payload; the full text is saved as body.
 MAX_EXTRACT_BYTES = 15 * 1024 * 1024
 EXTRACT_TIMEOUT_SECONDS = 20.0
 EXTRACT_BUDGET_SECONDS = 60.0
-_EXTRACTABLE = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".csv", ".txt",
-                ".md", ".html", ".htm", ".json", ".xml"}
 # Two-label public suffixes that must never count as an aligned signing domain.
 _SHARED_SUFFIXES = {
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "ne.jp",
@@ -190,23 +189,12 @@ async def resolve_act_as(users: Any, value: str | None) -> str | None:
 WriteFile = Callable[[str, bytes], Awaitable[None]]  # workspace-relative path, data
 
 
-def _extract_text(path: Path) -> str | None:
-    if path.suffix.lower() not in _EXTRACTABLE:
-        return None
-    try:
-        from markitdown import MarkItDown
-
-        return MarkItDown().convert(str(path)).text_content
-    except Exception:  # noqa: BLE001 - extraction is best effort
-        return None
-
-
 async def save_files(parsed: ParsedEmail, raw: bytes, write: WriteFile, *,
                      scratch: Path) -> dict[str, Any]:
     """Write the .eml, body and attachments under inbox/<date>-<slug>/.
 
-    Documents also get a text rendering under extracted/ (markitdown, the same
-    converter crontal_api uses for downloads), within a time budget.
+    Documents also get a text rendering under extracted/ (`documents.to_text`,
+    the converter crontal_api and Gmail use for downloads), within a time budget.
     """
     folder = f"inbox/{folder_name(parsed)}"
     await write(f"{folder}/message.eml", raw)
@@ -226,11 +214,11 @@ async def save_files(parsed: ParsedEmail, raw: bytes, write: WriteFile, *,
         }
         remaining = deadline - loop.time()
         if (attachment.size <= MAX_EXTRACT_BYTES and remaining > 1
-                and Path(attachment.filename).suffix.lower() in _EXTRACTABLE):
+                and Path(attachment.filename).suffix.lower() in documents.DOCUMENT_SUFFIXES):
             local = scratch / attachment.filename
             local.write_bytes(attachment.data)
             try:
-                text = await asyncio.wait_for(asyncio.to_thread(_extract_text, local),
+                text = await asyncio.wait_for(asyncio.to_thread(documents.to_text, local),
                                               timeout=min(EXTRACT_TIMEOUT_SECONDS, remaining))
             except TimeoutError:
                 text = None
