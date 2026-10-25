@@ -62,7 +62,9 @@ def _hidden(path: str) -> bool:
 # Default deny: a write is "inside" only under _INSIDE_WRITES and not matched
 # by _OUTWARD_WRITES, so new Crontal areas start out as outward.
 _INSIDE_WRITES = (
-    "/api/v1/rfq", "/api/v1/demand_listing", "/api/v1/bid", "/api/v1/supply_listing",
+    # Not /api/v1/supply_listing: listings are active (on the public marketplace)
+    # as soon as they are created, so writes there are outward.
+    "/api/v1/rfq", "/api/v1/demand_listing", "/api/v1/bid",
     "/api/v1/contact", "/api/v1/files", "/api/v1/operations", "/api/v1/notification",
     "/api/v1/inventory", "/api/v1/products",
 )

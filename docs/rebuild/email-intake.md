@@ -177,12 +177,13 @@ Email and Crontal-notification threads carry text written outside the merchant, 
 `GrantPolicy` (`gateway/policy.py`) puts a floor on them: an `allow` becomes `ask` for
 - a call that sends the merchant's data outside it. `crontal_api_call` is classified
   per call (`outward_call` in `gateway/crontal_api.py`): writes count as inside only
-  under `/rfq`, `/demand_listing`, `/bid`, `/supply_listing`, `/contact`, `/files`,
+  under `/rfq`, `/demand_listing`, `/bid`, `/contact`, `/files`,
   `/operations`, `/notification`, `/inventory`, `/products`, and even there these are
   outward: RFQ `status` other than draft (publish, close), `/rfq/<id>/share-email`,
   `/bid/<id>/lock` (submit), `/bid/token/<t>/revisions`, `/bid/<id>/respond`, and any
   path with share/invite/publish/submit/send/email/message/public/token. Everything
-  else (chat, message, merchant incl. invites, card, auth, agent, new areas) is
+  else (supply listings, which go live on the marketplace when created; chat, message,
+  merchant incl. invites, card, auth, agent, new areas) is
   outward. The curated `crontal_*` tools: `publish_rfq`, a non-draft status, and
   `define_shape` are outward;
 - `gmail_send`/`gmail_send_draft` and any other `write_external` tool without a
@@ -191,7 +192,7 @@ Email and Crontal-notification threads carry text written outside the merchant, 
   future one), except `thread_set_title`, `notify` and Gmail drafts.
 
 Reads, and writes that stay inside the merchant (draft RFQs and their listings, draft
-bids, supply listings, contacts, uploads), keep the instance rules, so with
+bids, contacts, uploads), keep the instance rules, so with
 `crontal_api.*: allow` they run unasked. `deny` stays `deny`. Chat threads are
 unchanged.
 

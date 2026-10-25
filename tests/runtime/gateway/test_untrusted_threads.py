@@ -39,7 +39,6 @@ INSIDE = [
     ("POST", "/api/v1/bid/start", {"rfq_id": 5}),
     ("PUT", "/api/v1/bid/3", {"terms": "FOB"}),
     ("POST", "/api/v1/bid/3/upload", None),
-    ("POST", "/api/v1/supply_listing", {"product_id": 2}),
     ("POST", "/api/v1/files/upload", None),
     ("POST", "/api/v1/contact", {"name": "Wei"}),
     ("PATCH", "/api/v1/operations/partners/4", {"notes": "x"}),
@@ -62,6 +61,7 @@ OUTWARD = [
     ("PUT", "/api/v1/card/me", {}),
     ("POST", "/api/v1/auth/forgot-password", {"email": "a@b.example"}),
     ("POST", "/api/v1/agent/chat", {"message": "publish"}),
+    ("POST", "/api/v1/supply_listing", {"product_id": 2}),  # live on marketplace
     ("POST", "/api/v1/something-new", {}),  # unknown areas count as outward
     ("POST", "/api/v1/rfq/5/publish", {}),  # future route caught by keyword
     ("POST", "/api/v1/RFQ/5", {}),  # not a known inside path
