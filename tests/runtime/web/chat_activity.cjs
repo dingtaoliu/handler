@@ -25,6 +25,8 @@ function browser() {
 }
 (async () => {
     const {run, elements, streams} = browser();
+    assert.equal(run('threadTitle({key:"chat:1:abc", type:"chat", title:"Supplier quote review", summary:"old summary"})'),
+        'Supplier quote review', 'API conversation titles must win over legacy summaries and id fallbacks');
     run('chat.key = "chat:1:selected"; chat.threads = [{key: chat.key, type:"chat"}, {key:"automation:test", type:"automation"}]; connectStream();');
     assert.match(streams[0].url, /^\/api\/stream\?/);
     run('connectStream();');

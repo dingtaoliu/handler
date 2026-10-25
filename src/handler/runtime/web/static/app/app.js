@@ -312,6 +312,7 @@ const ownPrefix = () => `chat:${me.user_id}:`;
 const isOwnChat = (key) => !!(me && me.user_id && key && key.startsWith(ownPrefix()));
 
 function threadTitle(t) {
+    if (t.title) return t.title.slice(0, 120);
     if (t.summary) return t.summary.slice(0, 60);
     if (chat.names.has(t.key)) return chat.names.get(t.key);
     if (t.type === "chat") {
