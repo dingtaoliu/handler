@@ -34,13 +34,71 @@ from ..uploads import sanitize_filename
 from .base import ToolResult, ToolSpec
 
 API_PREFIX = "/api/v1/"
-_HIDDEN = ("/api/v1/agent-access", "/api/v1/agent-mcp", "/api/v1/handler")
+# Never reachable by the agent (refused, and left out of crontal_api_routes):
+# its own plumbing and site-admin tools.
+_HIDDEN = ("/api/v1/agent-access", "/api/v1/agent-mcp", "/api/v1/handler",
+           "/api/v1/admin", "/api/v1/marketplace/query", "/api/v1/files/stats")
 MAX_JSON_CHARS = 60_000
 MAX_TEXT_CHARS = 20_000
 ROUTES_TTL_SECONDS = 600
 SPEC_TTL_SECONDS = 600
 SPEC_ON_STATUS = (400, 422)
 _WORD = re.compile(r"[a-z0-9]+")
+
+
+def _under(path: str, prefixes: tuple[str, ...]) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in prefixes)
+
+
+def _hidden(path: str) -> bool:
+    # A plain prefix test (not per segment): over-hiding is the safe side.
+    return path.startswith(_HIDDEN)
+
+
+# ── outward calls ─────────────────────────────────────────────────────────
+# Writes that put the acting merchant's data in front of someone outside it.
+# On threads fed by outside input (email, crontal notifications) these always
+# need approval (gateway/policy.py); writes that stay inside the merchant don't.
+# Default deny: a write is "inside" only under _INSIDE_WRITES and not matched
+# by _OUTWARD_WRITES, so new Crontal areas start out as outward.
+_INSIDE_WRITES = (
+    "/api/v1/rfq", "/api/v1/demand_listing", "/api/v1/bid", "/api/v1/supply_listing",
+    "/api/v1/contact", "/api/v1/files", "/api/v1/operations", "/api/v1/notification",
+    "/api/v1/inventory", "/api/v1/products",
+)
+_OUTWARD_WRITES = [
+    (re.compile(r"^/api/v1/rfq/[^/]+/share"), "emails or shares an RFQ"),
+    (re.compile(r"^/api/v1/bid/[^/]+/lock$"), "submits a bid to the buyer"),
+    (re.compile(r"^/api/v1/bid/token/[^/]+/revisions$"), "revises a submitted bid"),
+    (re.compile(r"^/api/v1/bid/[^/]+/respond$"), "answers a supplier's bid"),
+    # Belt and braces for future routes inside the areas above.
+    (re.compile(r"(share|invite|publish|submit|send|email|message|public|token)", re.I),
+     "shares, sends or publishes"),
+]
+# Writes whose `status` in the body decides: anything but draft is visible
+# to other merchants (publishing generates the share link; closing notifies).
+_STATUS_WRITES = re.compile(r"^/api/v1/rfq(/[^/]+)?$")
+
+
+def outward_call(args: dict[str, Any]) -> str | None:
+    """Why this crontal_api_call leaves the merchant, or None if it stays inside."""
+    method = str(args.get("method", "")).upper()
+    path = str(args.get("path", "")).split("?", 1)[0]
+    if CrontalApiTools._check_path(path) is not None:
+        return "has an invalid path"
+    if method == "GET":
+        return None
+    if not _under(path, _INSIDE_WRITES):
+        return f"writes to {path}, which reaches people outside the merchant"
+    for pattern, why in _OUTWARD_WRITES:
+        if pattern.search(path):
+            return why
+    if _STATUS_WRITES.match(path):
+        for source in (args.get("json"), args.get("form")):
+            status = source.get("status") if isinstance(source, dict) else None
+            if status is not None and str(status).strip().lower() != "draft":
+                return f"sets an RFQ's status to {status!r} (visible to suppliers)"
+    return None
 
 
 def crontal_base_url(url: str) -> str:
@@ -131,9 +189,15 @@ class CrontalApiTools:
 
     @staticmethod
     def _check_path(path: str) -> str | None:
-        if not isinstance(path, str) or not path.startswith(API_PREFIX) or ".." in path:
+        if not isinstance(path, str) or not path.startswith(API_PREFIX):
             return f"path must start with {API_PREFIX}"
-        if path.startswith(_HIDDEN):
+        route = path.split("?", 1)[0]
+        # Only plain paths: no encoded characters, dot segments, empty segments
+        # or backslashes that the server could resolve to a hidden route.
+        if ("%" in route or "\\" in route or "//" in route
+                or any(seg in (".", "..") for seg in route.split("/"))):
+            return "path must be a plain path (no %-escapes, //, . or .. segments)"
+        if _hidden(route.lower()):
             return "that endpoint is not available to the agent"
         return None
 
@@ -236,6 +300,7 @@ class CrontalApiTools:
             routes = await self._catalog()
         except httpx.HTTPError as exc:
             return ToolResult(f"Could not list Crontal routes: {exc}", is_error=True)
+        routes = [r for r in routes if not _hidden(str(r.get("path", "")).lower())]
         if words := set(_WORD.findall((args.get("search") or "").lower())):
             routes = _rank(routes, words)
         return ToolResult([f"{','.join(r['methods'])} {r['path']}"
@@ -342,5 +407,5 @@ class CrontalApiTools:
                     "form": {"type": "object", "additionalProperties": True,
                              "description": "Extra multipart form fields for upload_file."}},
                  "required": ["method", "path"]},
-                self._call),
+                self._call, outward=outward_call),
         ]

@@ -119,6 +119,11 @@ class EmailSettings(Section):
         default_factory=list, title="Blocked senders",
         description="Addresses (name@example.com) or domains (@example.com) to ignore. "
                     "Empty: accept all senders that pass authentication.")
+    trusted_senders: list[str] = Field(
+        default_factory=list, title="Trusted senders",
+        description="Addresses (name@example.com) or domains (@example.com) whose mail "
+                    "is marked trusted for the agent, when DKIM confirms the From. "
+                    "Everyone else is marked external. This doesn't gate acceptance.")
 
     @model_validator(mode="before")
     @classmethod

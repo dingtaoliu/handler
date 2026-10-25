@@ -29,6 +29,10 @@ ApprovalPreview = Callable[
     [RunContext, dict[str, Any]],
     Awaitable["tuple[str, dict[str, Any]] | ToolResult"],
 ]
+# Whether one call sends the acting merchant's data outside it (publishes,
+# submits, messages, shares, invites...): a short reason, or None when the
+# call stays inside. See ToolSpec.outward.
+OutwardCheck = Callable[[dict[str, Any]], "str | None"]
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,9 @@ class ToolSpec:
         call without approval; risk defaults and glob rules that say `allow`
         become `ask` (globs and defaults can still deny).
     approval_preview: see ApprovalPreview.
+    outward: see OutwardCheck. On threads fed by outside input (email,
+        crontal) an outward call always needs approval. A write_external or
+        exec tool without it counts every call as outward.
     """
 
     name: str
@@ -52,6 +59,7 @@ class ToolSpec:
     handler: ToolHandler = field(compare=False, repr=False)
     explicit_allow_only: bool = False
     approval_preview: ApprovalPreview | None = field(default=None, compare=False, repr=False)
+    outward: OutwardCheck | None = field(default=None, compare=False, repr=False)
 
 
 class Policy(Protocol):
