@@ -2,18 +2,23 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>Handler sign in</title>
 <style>
 body { font: 16px system-ui; max-width: 320px; margin: 15vh auto; padding: 20px; }
 form { display: grid; gap: 12px; } input, button { padding: 10px; }
 #error { color: #c22; }
+#hint { color: #666; }
 </style>
 <h1>Sign in to Handler</h1>
+<p id="ticket-status" role="status" hidden>Signing you in…</p>
 <form id="login">
 <input id="token" type="password" placeholder="Access token" autocomplete="off" required>
 <input id="act-as" placeholder="Act as user (admin key only)" autocomplete="off">
 <button>Sign in</button>
 <p id="error" role="alert"></p>
+<p id="hint"><small>Crontal site admins: use <b>Open Handler console</b> in Crontal's
+Handler settings to sign in with one click. The admin key works here as a fallback.</small></p>
 </form>
 <script>
 const handlerBase = (window.HANDLER_CONFIG || {}).base || "";
@@ -42,9 +47,44 @@ document.getElementById("login").onsubmit = (event) => {
   enter(document.getElementById("token").value.trim(),
         document.getElementById("act-as").value.trim());
 };
-try {
-  const token = sessionStorage.getItem(handlerKey("handler.token"));
-  enter(token || "", token ? sessionStorage.getItem(handlerKey("handler.actAs")) || "" : "");
-} catch {}
+
+// One-click sign-in: Crontal sends the browser to /login#ticket=<ticket>.
+// The fragment never reaches a server; drop it from the address bar and
+// history first, then exchange the single-use ticket for a session token.
+function takeTicket() {
+  const ticket = new URLSearchParams(location.hash.slice(1)).get("ticket");
+  if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+  return ticket;
+}
+async function redeem(ticket) {
+  const status = document.getElementById("ticket-status");
+  status.hidden = false;
+  try {
+    const response = await fetch(handlerPath("/login/ticket"), {
+      method: "POST", cache: "no-store", credentials: "omit",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ticket}),
+    });
+    if (!response.ok) {
+      throw new Error("This sign-in link is invalid, used or expired. Open the console from Crontal again.");
+    }
+    const session = await response.json();
+    sessionStorage.removeItem(handlerKey("handler.actAs"));
+    sessionStorage.setItem(handlerKey("handler.token"), session.token);
+    location.replace(handlerPath("/app"));
+  } catch (error) {
+    status.hidden = true;
+    document.getElementById("error").textContent = error.message;
+  }
+}
+const ticket = takeTicket();
+if (ticket) {
+  redeem(ticket);
+} else {
+  try {
+    const token = sessionStorage.getItem(handlerKey("handler.token"));
+    enter(token || "", token ? sessionStorage.getItem(handlerKey("handler.actAs")) || "" : "");
+  } catch {}
+}
 </script>
 </html>

@@ -348,5 +348,5 @@ def create_app(
         return html(TIMELINE_HTML, request)
 
     app.include_router(router)
-    app.include_router(auth_router(auth))
+    app.include_router(auth_router(auth, instance_name))
     return app

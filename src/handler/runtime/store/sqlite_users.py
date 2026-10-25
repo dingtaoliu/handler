@@ -1,6 +1,11 @@
 """Users and API tokens (mixin for SQLiteStore).
 
-Tokens are random, shown once and stored only as SHA-256 hashes.
+Tokens are random, shown once and stored only as SHA-256 hashes. A token may
+carry an expiry (``user_token_expiry``); sign-in sessions use that.
+
+Sign-in tickets are single-use, short-lived credentials that a trusted caller
+(Crontal) mints with the admin key and a browser exchanges once for an
+expiring session token. Only their hashes are stored.
 """
 
 from __future__ import annotations
@@ -10,7 +15,7 @@ import re
 import secrets
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from ..types import new_id, utcnow
@@ -58,12 +63,27 @@ class UsersStore(Protocol):
         """Change the given fields; None if the user doesn't exist."""
         ...
 
-    async def create_token(self, user_id: str, label: str = "") -> tuple[str, str]:
-        """Return (token_id, token). The token is only available here."""
+    async def create_token(
+        self, user_id: str, label: str = "", *, ttl_seconds: float | None = None,
+    ) -> tuple[str, str]:
+        """Return (token_id, token). The token is only available here.
+
+        With ttl_seconds the token stops resolving after that long."""
         ...
 
     async def resolve_token(self, token: str) -> User | None:
-        """The enabled user owning a live token; records last_used_at."""
+        """The enabled user owning a live, unexpired token; records last_used_at."""
+        ...
+
+    async def create_sign_in_ticket(
+        self, user_id: str, ticket_hash: str, ttl_seconds: float,
+    ) -> datetime:
+        """Store a ticket hash for user_id; returns its expiry. Also drops
+        tickets that have expired."""
+        ...
+
+    async def redeem_sign_in_ticket(self, ticket_hash: str) -> str | None:
+        """Atomically consume an unused, unexpired ticket; its user id or None."""
         ...
 
     async def revoke_token(self, token_id: str) -> bool: ...
@@ -150,7 +170,9 @@ class UsersMixin:
 
         return await self._call(write)
 
-    async def create_token(self, user_id: str, label: str = "") -> tuple[str, str]:
+    async def create_token(
+        self, user_id: str, label: str = "", *, ttl_seconds: float | None = None,
+    ) -> tuple[str, str]:
         token, token_id, now = new_token(), new_id("tok"), self._clock()
 
         def write(db: sqlite3.Connection) -> None:
@@ -159,6 +181,11 @@ class UsersMixin:
                     "id": token_id, "user_id": user_id, "token_hash": hash_token(token),
                     "label": label, "created_at": _timestamp(now),
                 })
+                if ttl_seconds is not None:
+                    _insert(db, "user_token_expiry", {
+                        "token_id": token_id,
+                        "expires_at": _timestamp(now + timedelta(seconds=ttl_seconds)),
+                    })
 
         await self._call(write)
         return token_id, token
@@ -170,7 +197,9 @@ class UsersMixin:
             with _transaction(db):
                 row = db.execute(
                     "SELECT u.* FROM user_tokens t JOIN users u ON u.id = t.user_id "
-                    "WHERE t.token_hash = ? AND t.revoked_at IS NULL", (digest,),
+                    "LEFT JOIN user_token_expiry e ON e.token_id = t.id "
+                    "WHERE t.token_hash = ? AND t.revoked_at IS NULL "
+                    "AND (e.expires_at IS NULL OR e.expires_at > ?)", (digest, now),
                 ).fetchone()
                 if row is None or row["disabled"]:
                     return None
@@ -192,3 +221,38 @@ class UsersMixin:
             "SELECT * FROM user_tokens WHERE user_id = ? ORDER BY created_at, rowid",
             (user_id,),
         )])
+
+    async def create_sign_in_ticket(
+        self, user_id: str, ticket_hash: str, ttl_seconds: float,
+    ) -> datetime:
+        now = self._clock()
+        expires_at = now + timedelta(seconds=ttl_seconds)
+
+        def write(db: sqlite3.Connection) -> None:
+            with _transaction(db):
+                db.execute("DELETE FROM sign_in_tickets WHERE expires_at <= ?",
+                           (_timestamp(now),))
+                _insert(db, "sign_in_tickets", {
+                    "ticket_hash": ticket_hash, "user_id": user_id,
+                    "created_at": _timestamp(now), "expires_at": _timestamp(expires_at),
+                })
+
+        await self._call(write)
+        return expires_at
+
+    async def redeem_sign_in_ticket(self, ticket_hash: str) -> str | None:
+        now = _timestamp(self._clock())
+
+        def redeem(db: sqlite3.Connection) -> str | None:
+            with _transaction(db):
+                row = db.execute(
+                    "SELECT user_id FROM sign_in_tickets WHERE ticket_hash = ? "
+                    "AND used_at IS NULL AND expires_at > ?", (ticket_hash, now),
+                ).fetchone()
+                if row is None:
+                    return None
+                db.execute("UPDATE sign_in_tickets SET used_at = ? WHERE ticket_hash = ?",
+                           (now, ticket_hash))
+                return row["user_id"]
+
+        return await self._call(redeem)
