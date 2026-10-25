@@ -20,10 +20,10 @@ RUN_STATUSES = TASK_STATUSES[1:]  # every status a run row can derive
 # pending approval is waiting on a human; a "running" row whose lease is gone
 # was abandoned by its worker and counts as failed.
 _STATUS = """CASE
-  WHEN r.status IN ('failed','cancelled') AND t.dead AND r.id = (
+  WHEN r.status IN ('failed','cancelled','abandoned') AND t.dead AND r.id = (
        SELECT x.id FROM runs x WHERE x.thread_key = r.thread_key
        ORDER BY x.started_at DESC, x.id DESC LIMIT 1) THEN 'dead'
-  WHEN r.status IN ('failed','cancelled') THEN 'failed'
+  WHEN r.status IN ('failed','cancelled','abandoned') THEN 'failed'
   WHEN r.status = 'running' AND t.lease_version = r.lease_version
        AND t.lease_until IS NOT NULL AND t.lease_until > ? THEN 'running'
   WHEN EXISTS (SELECT 1 FROM approvals a WHERE a.status = 'pending'

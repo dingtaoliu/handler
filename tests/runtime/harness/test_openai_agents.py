@@ -319,3 +319,163 @@ async def test_defaults_report_what_a_bare_request_uses():
     assert await harness.defaults() == {"model": "gpt-6.1-sol", "reasoning_effort": "low"}
     harness = oa.OpenAIAgentsHarness("k", default_model="gpt-6-luna")
     assert await harness.defaults() == {"model": "gpt-6-luna", "reasoning_effort": None}
+
+
+# --- conversation repair, usage on failure, cancellation, truncation ------------------
+
+class FakeItems:
+    def __init__(self, items: list[dict]) -> None:
+        self.items = [SimpleNamespace(**item) for item in items]
+        self.created: list[list[dict]] = []
+
+    def list(self, conversation_id: str, **kwargs: Any):
+        async def pages():
+            for item in list(self.items):
+                yield item
+        return pages()
+
+    async def create(self, conversation_id: str, *, items: list[dict]) -> None:
+        self.created.append(items)
+        self.items += [SimpleNamespace(**item) for item in items]
+
+
+def _client_with(items: list[dict]) -> FakeClient:
+    client = FakeClient()
+    client.conversations.items = FakeItems(items)
+    return client
+
+
+BROKEN_ITEMS = [
+    {"type": "message", "id": "m1"},
+    {"type": "function_call", "call_id": "call_ok", "name": "x"},
+    {"type": "function_call_output", "call_id": "call_ok"},
+    {"type": "function_call", "call_id": "call_lost", "name": "crontal_api_get"},
+]
+
+
+def _missing_output_error():
+    return _api_error(openai.BadRequestError,
+                      "No tool output found for function call call_lost.", 400)
+
+
+def _sequence(runner, monkeypatch, streams: list) -> None:
+    def run_streamed(agent, input, **kwargs):
+        runner.calls.append({"agent": agent, "input": input, **kwargs})
+        runner.state["stream"] = streams.pop(0)
+        return runner.state["stream"]
+
+    monkeypatch.setattr(oa.Runner, "run_streamed", staticmethod(run_streamed))
+
+
+async def test_repair_adds_placeholder_outputs_for_unanswered_calls():
+    client = _client_with(BROKEN_ITEMS + [{"type": "custom_tool_call", "call_id": "c2"}])
+    assert await oa.repair_conversation(client, "conv_9") == 2
+    (added,) = client.conversations.items.created
+    assert added == [
+        {"type": "function_call_output", "call_id": "call_lost", "output": oa.INTERRUPTED_OUTPUT},
+        {"type": "custom_tool_call_output", "call_id": "c2", "output": oa.INTERRUPTED_OUTPUT},
+    ]
+    assert await oa.repair_conversation(client, "conv_9") == 0  # idempotent
+
+
+async def test_missing_tool_output_is_repaired_and_retried_once(tmp_path, runner, monkeypatch):
+    client = _client_with(BROKEN_ITEMS)
+    _sequence(runner, monkeypatch,
+              [FakeStream([], error=_missing_output_error()), FakeStream(_events())])
+    harness = oa.OpenAIAgentsHarness("k", client=client)
+    events = await _collect(harness, _req(tmp_path, session_id="conv_9"))
+    assert len(runner.calls) == 2
+    assert client.conversations.items.created[0][0]["call_id"] == "call_lost"
+    assert events[-1].kind is RunEventKind.FINAL
+    assert not any(e.kind is RunEventKind.ERROR for e in events)
+
+
+async def test_unrepairable_missing_output_fails_without_looping(tmp_path, runner):
+    # Every call already has its output: the 400 is raised, not retried.
+    client = _client_with(BROKEN_ITEMS[:3])
+    runner.state["next"] = FakeStream([], error=_missing_output_error())
+    harness = oa.OpenAIAgentsHarness("k", client=client)
+    with pytest.raises(HarnessError):
+        await _collect(harness, _req(tmp_path, session_id="conv_9"))
+    assert len(runner.calls) == 1
+
+
+async def test_missing_output_after_progress_repairs_but_does_not_replay(tmp_path, runner):
+    client = _client_with(BROKEN_ITEMS)
+    runner.state["next"] = FakeStream(_events()[:2], error=_missing_output_error())
+    harness = oa.OpenAIAgentsHarness("k", client=client)
+    with pytest.raises(HarnessError):
+        await _collect(harness, _req(tmp_path, session_id="conv_9"))
+    assert len(runner.calls) == 1  # the turn already ran tools; it is not sent twice
+    assert client.conversations.items.created  # but the next turn will be accepted
+
+
+async def test_repair_session_flag_repairs_before_the_turn(tmp_path, runner):
+    client = _client_with(BROKEN_ITEMS)
+    harness = oa.OpenAIAgentsHarness("k", client=client)
+    await _collect(harness, _req(tmp_path, session_id="conv_9", repair_session=True))
+    assert client.conversations.items.created[0][0]["call_id"] == "call_lost"
+    assert len(runner.calls) == 1
+
+
+async def test_failed_run_still_reports_usage(tmp_path, runner):
+    runner.state["next"] = FakeStream(_events()[:2],
+                                      error=_api_error(openai.BadRequestError, "bad", 400))
+    harness = oa.OpenAIAgentsHarness("k", default_model="gpt-6.1-sol", client=FakeClient())
+    events: list = []
+    with pytest.raises(HarnessError):
+        async for ev in harness.run(_req(tmp_path)):
+            events.append(ev)
+    assert [e.kind for e in events][-2:] == [RunEventKind.USAGE, RunEventKind.ERROR]
+    assert events[-2].usage.input_tokens == 120 and events[-2].usage.output_tokens == 30
+
+
+async def test_cancelled_run_cancels_the_sdk_run(tmp_path, runner):
+    import asyncio
+
+    class Hanging(FakeStream):
+        async def stream_events(self):
+            yield _events()[1]
+            await asyncio.Event().wait()
+
+    runner.state["next"] = stream = Hanging([])
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
+
+    async def consume():
+        async for _ in harness.run(_req(tmp_path)):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert stream.cancelled
+
+
+async def test_completed_run_is_not_cancelled(tmp_path, runner):
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
+    await _collect(harness, _req(tmp_path))
+    assert runner.state["stream"].cancelled is False
+
+
+async def test_truncation_and_compaction_are_on(tmp_path, runner):
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient(), compact_threshold=150_000)
+    await _collect(harness, _req(tmp_path))
+    settings = runner.calls[0]["agent"].model_settings
+    assert settings.truncation == "auto"
+    assert settings.context_management == [{"type": "compaction", "compact_threshold": 150_000}]
+    off = oa.OpenAIAgentsHarness("k", client=FakeClient(), compact_threshold=0)
+    assert off._agent(_req(tmp_path), []).model_settings.context_management is None
+
+
+async def test_refused_compaction_is_turned_off_and_retried(tmp_path, runner, monkeypatch):
+    _sequence(runner, monkeypatch, [
+        FakeStream([], error=_api_error(
+            openai.BadRequestError, "Unknown parameter: 'context_management'.", 400)),
+        FakeStream(_events())])
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient(), compact_threshold=150_000)
+    events = await _collect(harness, _req(tmp_path, session_id="conv_9"))
+    assert events[-1].kind is RunEventKind.FINAL
+    assert harness.compact_threshold is None
+    assert runner.calls[1]["agent"].model_settings.context_management is None

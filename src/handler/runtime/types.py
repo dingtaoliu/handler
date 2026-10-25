@@ -71,6 +71,11 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    # Its worker stopped (lease lost, shutdown, crash) before the run finished.
+    ABANDONED = "abandoned"
+
+
+ABANDONED_ERROR = "abandoned: its worker stopped before the run finished"
 
 
 class Role(StrEnum):

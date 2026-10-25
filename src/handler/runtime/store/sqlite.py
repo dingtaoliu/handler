@@ -16,6 +16,7 @@ from typing import Any, TypeVar
 
 from .tasks import announce_routed
 from ..types import (
+    ABANDONED_ERROR,
     Event,
     EventStatus,
     Lane,
@@ -182,15 +183,19 @@ class SQLiteCore:
                     return False
                 if thread is not None:
                     now = _timestamp(self._clock())
+                    # A new chat message revives a dead thread: the person is asking again.
+                    revive = event.type == "chat.message"
                     db.execute(
                         "INSERT INTO threads "
                         "(key, type, lane, owner_user_id, harness, model, priority, "
                         "created_at, pending_since) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                         "ON CONFLICT(key) DO UPDATE SET "
-                        "pending_since = COALESCE(threads.pending_since, excluded.pending_since)",
+                        "pending_since = COALESCE(threads.pending_since, excluded.pending_since), "
+                        "dead = CASE WHEN ? THEN 0 ELSE threads.dead END, "
+                        "attempts = CASE WHEN ? THEN 0 ELSE threads.attempts END",
                         (thread.key, thread.type.value, thread.lane.value,
                          thread.owner_user_id, thread.harness, thread.model,
-                         thread.priority, now, now),
+                         thread.priority, now, now, revive, revive),
                     )
                 return True
 
@@ -368,6 +373,62 @@ class SQLiteCore:
             ).rowcount)
 
         return await self._fenced(lease, write)
+
+    async def abandon_run(self, run_id: str, error: str) -> bool:
+        def write(db: sqlite3.Connection) -> bool:
+            return bool(db.execute(
+                "UPDATE runs SET status = ?, finished_at = ?, error = COALESCE(error, ?) "
+                "WHERE id = ? AND status = ?",
+                (RunStatus.ABANDONED.value, _timestamp(self._clock()), error[:2000], run_id,
+                 RunStatus.RUNNING.value),
+            ).rowcount)
+
+        return await self._call(write)
+
+    async def sweep_abandoned_runs(self, thread_key: str | None = None) -> list[str]:
+        def write(db: sqlite3.Connection) -> list[str]:
+            now = _timestamp(self._clock())
+            where = "" if thread_key is None else "AND r.thread_key = ? "
+            with _transaction(db):
+                ids = [row["id"] for row in db.execute(
+                    "SELECT r.id FROM runs r JOIN threads t ON t.key = r.thread_key "
+                    "WHERE r.status = ? " + where +
+                    "AND NOT (t.lease_version = r.lease_version AND t.lease_until IS NOT NULL "
+                    "AND t.lease_until > ?)",
+                    (RunStatus.RUNNING.value,
+                     *((thread_key,) if thread_key is not None else ()), now),
+                )]
+                db.executemany(
+                    "UPDATE runs SET status = ?, finished_at = ?, error = COALESCE(error, ?) "
+                    "WHERE id = ? AND status = ?",
+                    [(RunStatus.ABANDONED.value, now, ABANDONED_ERROR, run_id,
+                      RunStatus.RUNNING.value) for run_id in ids],
+                )
+            return ids
+
+        return await self._call(write)
+
+    async def revive_thread(self, key: str, *, reset_session: bool = False,
+                            discard_pending: bool = False) -> bool:
+        def write(db: sqlite3.Connection) -> bool:
+            session = ", session_id = NULL" if reset_session else ""
+            with _transaction(db):
+                if not db.execute(
+                    "UPDATE threads SET dead = 0, attempts = 0, last_error = NULL, "
+                    f"available_at = NULL{session} WHERE key = ?", (key,),
+                ).rowcount:
+                    return False
+                if discard_pending:
+                    db.execute(
+                        "UPDATE events SET consumed_by_run = 'revive' WHERE thread_key = ? "
+                        "AND status = 'routed' AND consumed_by_run IS NULL", (key,))
+                    db.execute("UPDATE threads SET pending_since = NULL WHERE key = ?", (key,))
+            return True
+
+        revived = await self._call(write)
+        if revived:
+            self._wake.set()
+        return revived
 
     async def get_run(self, run_id: str) -> Run | None:
         rows = await self._list(Run, "SELECT * FROM runs WHERE id = ?", (run_id,))

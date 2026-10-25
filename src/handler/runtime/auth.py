@@ -159,6 +159,18 @@ def add_cli_commands(subparsers: argparse._SubParsersAction) -> None:
     create.add_argument("--label", default="")
     storage(create)
 
+    thread = subparsers.add_parser("thread", help="repair threads")
+    actions = thread.add_subparsers(dest="action", required=True)
+    revive = actions.add_parser(
+        "revive", help="make a dead thread claimable again (clears dead and attempts)")
+    revive.add_argument("thread_key")
+    revive.add_argument("--reset-session", action="store_true",
+                        help="drop the harness session: the next turn starts a fresh one "
+                             "from a recap of the thread's transcript")
+    revive.add_argument("--discard-pending", action="store_true",
+                        help="drop the unanswered events instead of running them again")
+    storage(revive)
+
 
 def open_store(args: argparse.Namespace):
     from pathlib import Path
@@ -177,6 +189,8 @@ def open_store(args: argparse.Namespace):
 async def _run_cli(args: argparse.Namespace, store=None) -> int:
     store = store or open_store(args)
     try:
+        if args.command == "thread":
+            return await _revive_thread(store, args)
         if args.command == "user":
             if not USER_ID.fullmatch(args.user_id):
                 print(f"error: invalid user id (use {USER_ID.pattern})", file=sys.stderr)
@@ -198,6 +212,23 @@ async def _run_cli(args: argparse.Namespace, store=None) -> int:
         return 0
     finally:
         await store.close()
+
+
+async def _revive_thread(store, args: argparse.Namespace) -> int:
+    before = await store.get_thread(args.thread_key)
+    if before is None:
+        print(f"error: unknown thread {args.thread_key}", file=sys.stderr)
+        return 1
+    swept = await store.sweep_abandoned_runs(args.thread_key)
+    await store.revive_thread(args.thread_key, reset_session=args.reset_session,
+                              discard_pending=args.discard_pending)
+    after = await store.get_thread(args.thread_key)
+    pending = len(await store.pending_events(args.thread_key))
+    print(f"revived {args.thread_key}: dead {before.dead} -> {after.dead}, "
+          f"attempts {before.attempts} -> {after.attempts}, "
+          f"session {before.session_id or '-'} -> {after.session_id or '-'}, "
+          f"pending events {pending}, runs marked abandoned {len(swept)}")
+    return 0
 
 
 def run_cli(args: argparse.Namespace) -> int:

@@ -154,7 +154,9 @@ async def test_fresh_session_failure_is_not_retried_again_and_session_is_cleared
     run, = await store.list_runs(KEY)
     assert run.status is RunStatus.FAILED
     assert sum(s.kind is StepKind.RETRY for s in await store.list_steps(run.id)) == 1
-    assert await store.list_messages(KEY) == []
+    # The user's message is kept even though the run failed.
+    message, = await store.list_messages(KEY)
+    assert message.role is Role.USER and message.blocks[0]["text"] == "new question"
 
 
 async def test_new_session_error_does_not_trigger_recovery(store, tmp_path):
@@ -309,3 +311,101 @@ async def test_lease_loss_does_not_persist_stale_workspace(store, tmp_path, monk
                       workspace_sync=TrackingSync(None, tmp_path / "data"))
     await runner.execute(lease)
     assert persisted == [] and not runner.workspace_sync.dirty
+
+
+# --- failed and abandoned runs ----------------------------------------------------
+
+async def test_failed_run_keeps_user_message_once_across_retries(store, tmp_path):
+    harness = FakeHarness(fresh_error=HarnessError("outage", retryable=True))
+    runner = executor(store, harness, tmp_path)
+    await runner.execute(await claimed(store, session=None))
+    assert [m.role for m in await store.list_messages(KEY)] == [Role.USER]
+    # The retry succeeds: the message is not saved a second time, and the
+    # fresh session's recap doesn't repeat the current turn.
+    harness.fresh_error = None
+    thread = await store.get_thread(KEY)
+    await store.revive_thread(KEY)  # skip the backoff
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    assert thread.attempts == 1
+    await runner.execute(lease)
+    assert harness.requests[-1].prompt == "new question"
+    assert [m.role for m in await store.list_messages(KEY)] == [Role.USER, Role.ASSISTANT]
+
+
+class BlockingHarness(FakeHarness):
+    def __init__(self):
+        super().__init__()
+        self.release = asyncio.Event()
+        self.interrupted: list[str] = []
+        self.cancelled = False
+
+    async def run(self, req):
+        self.requests.append(req)
+        yield RunEvent(RunEventKind.SESSION, {"session_id": "s1"})
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        yield RunEvent(RunEventKind.ASSISTANT_TEXT, {"text": "done"})
+        yield RunEvent(RunEventKind.FINAL, {"text": "done"})
+
+    async def interrupt(self, run_id):
+        self.interrupted.append(run_id)
+
+
+async def test_heartbeat_survives_store_errors(store, tmp_path, monkeypatch):
+    harness = BlockingHarness()
+    real = store.heartbeat
+    calls = {"n": 0}
+
+    async def flaky(lease, seconds):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise ConnectionError("db blip")
+        if calls["n"] >= 4:
+            harness.release.set()
+        return await real(lease, seconds)
+
+    monkeypatch.setattr(store, "heartbeat", flaky)
+    await executor(store, harness, tmp_path).execute(await claimed(store))
+    run, = await store.list_runs(KEY)
+    assert run.status is RunStatus.COMPLETED and calls["n"] >= 4
+
+
+async def test_lease_loss_interrupts_harness_and_marks_run_abandoned(store, tmp_path,
+                                                                     monkeypatch):
+    harness = BlockingHarness()
+
+    async def lost(lease, seconds):
+        return None
+
+    monkeypatch.setattr(store, "heartbeat", lost)
+    await executor(store, harness, tmp_path).execute(await claimed(store))
+    run, = await store.list_runs(KEY)
+    assert run.status is RunStatus.ABANDONED and "lease lost" in run.error
+    assert run.id in harness.interrupted
+    assert harness.cancelled
+
+
+async def test_run_after_an_abandoned_one_asks_for_session_repair(store, tmp_path):
+    # A worker died mid-run: its row is still 'running' and its lease expired.
+    lease = await claimed(store)
+    from handler.runtime.types import Run
+    stale = Run(id="run_stale", thread_key=KEY, lease_version=lease.version,
+                trigger_event_ids=[], status=RunStatus.RUNNING, harness="fake", model=None)
+    assert await store.create_run(lease, stale)
+    assert await store.fail(lease, "worker gone", 0)  # releases the lease, row untouched
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    harness = FakeHarness()
+    await executor(store, harness, tmp_path).execute(lease)
+    assert (await store.get_run("run_stale")).status is RunStatus.ABANDONED
+    assert harness.requests[0].repair_session is True
+    # and the next run does not repair again
+    await store.put(Event("chat.message", "test", {"text": "again"}, "again",
+                          thread_key=KEY, user_id="user"),
+                    ThreadSpec(KEY, ThreadType.CHAT, Lane.INTERACTIVE, owner_user_id="user",
+                               harness="fake"))
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    await executor(store, harness, tmp_path).execute(lease)
+    assert harness.requests[-1].repair_session is False

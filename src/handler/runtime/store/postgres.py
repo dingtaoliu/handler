@@ -19,6 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from .tasks import announce_routed
 from ..types import (
+    ABANDONED_ERROR,
     Event,
     EventStatus,
     Lane,
@@ -43,15 +44,31 @@ _SCHEMA_LOCK = 7_283_001
 _SCHEMA_NAME = re.compile(r"[a-z_][a-z0-9_]{0,39}")
 
 
+def strip_nul(value: Any) -> Any:
+    """Drop NUL characters, which Postgres text and jsonb both reject.
+
+    ("\\u0000 cannot be converted to text": e.g. a binary file read as text.)
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "") if "\x00" in value else value
+    if isinstance(value, dict):
+        return {strip_nul(k): strip_nul(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [strip_nul(v) for v in value]
+    return value
+
+
 def _values(record: Any) -> dict[str, Any]:
     result = asdict(record)
     for name, value in result.items():
         if value is None:
             continue
         if name in _JSON_FIELDS:
-            result[name] = Jsonb(value)
+            result[name] = Jsonb(strip_nul(value))
         elif isinstance(value, Enum):
             result[name] = value.value
+        elif isinstance(value, str):
+            result[name] = strip_nul(value)
     return result
 
 
@@ -102,16 +119,20 @@ async def _put_event(
     if not cursor.rowcount:
         return False
     if thread is not None:
+        # A new chat message revives a dead thread: the person is asking again.
+        revive = event.type == "chat.message"
         await conn.execute(
             "INSERT INTO threads (key, type, lane, owner_user_id, harness, "
             "model, priority, created_at, pending_since) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (key) DO UPDATE SET "
             "pending_since = COALESCE(threads.pending_since, "
-            "excluded.pending_since)",
+            "excluded.pending_since), "
+            "dead = CASE WHEN %s THEN FALSE ELSE threads.dead END, "
+            "attempts = CASE WHEN %s THEN 0 ELSE threads.attempts END",
             (thread.key, thread.type.value, thread.lane.value,
              thread.owner_user_id, thread.harness, thread.model,
-             thread.priority, now, now),
+             thread.priority, now, now, revive, revive),
         )
     return True
 
@@ -326,7 +347,7 @@ class PostgresCore:
                 "UPDATE threads SET attempts = attempts + 1, last_error = %s, "
                 "dead = %s, available_at = %s, lease_owner = NULL, "
                 "lease_until = NULL WHERE key = %s",
-                (error, retry_in_seconds is None, available_at, lease.thread_key),
+                (strip_nul(error), retry_in_seconds is None, available_at, lease.thread_key),
             )
             await _notify(conn)
             return True
@@ -397,6 +418,50 @@ class PostgresCore:
             return bool(cursor.rowcount)
 
         return await self._fenced(lease, write)
+
+    async def abandon_run(self, run_id: str, error: str) -> bool:
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "UPDATE runs SET status = %s, finished_at = %s, "
+                "error = COALESCE(error, %s) WHERE id = %s AND status = %s",
+                (RunStatus.ABANDONED.value, self._clock(), strip_nul(error)[:2000], run_id,
+                 RunStatus.RUNNING.value),
+            )
+            return bool(cursor.rowcount)
+
+    async def sweep_abandoned_runs(self, thread_key: str | None = None) -> list[str]:
+        now = self._clock()
+        where = "" if thread_key is None else "AND r.thread_key = %s "
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "UPDATE runs r SET status = %s, finished_at = %s, "
+                "error = COALESCE(r.error, %s) FROM threads t "
+                "WHERE t.key = r.thread_key AND r.status = %s " + where +
+                "AND NOT (t.lease_version = r.lease_version AND t.lease_until IS NOT NULL "
+                "AND t.lease_until > %s) RETURNING r.id",
+                (RunStatus.ABANDONED.value, now, ABANDONED_ERROR, RunStatus.RUNNING.value,
+                 *((thread_key,) if thread_key is not None else ()), now),
+            )
+            return [row["id"] for row in await cursor.fetchall()]
+
+    async def revive_thread(self, key: str, *, reset_session: bool = False,
+                            discard_pending: bool = False) -> bool:
+        async with self._conn() as conn:
+            session = ", session_id = NULL" if reset_session else ""
+            cursor = await conn.execute(
+                "UPDATE threads SET dead = FALSE, attempts = 0, last_error = NULL, "
+                f"available_at = NULL{session} WHERE key = %s", (key,))
+            if not cursor.rowcount:
+                return False
+            if discard_pending:
+                await conn.execute(
+                    "UPDATE events SET consumed_by_run = 'revive' WHERE thread_key = %s "
+                    "AND status = 'routed' AND consumed_by_run IS NULL", (key,))
+                await conn.execute("UPDATE threads SET pending_since = NULL WHERE key = %s",
+                                   (key,))
+            await _notify(conn)
+        self._wake.set()
+        return True
 
     async def get_run(self, run_id: str) -> Run | None:
         rows = await self._list(

@@ -26,6 +26,10 @@ async def build_instructions(
                     "gmail_send_draft) only when the user asked for it: every send waits for "
                     "a human's approval, so never say an email was sent until a result says "
                     "status 'sent'.")
+    sections.append("If you have crontal_api_* tools: when the user refers to \"the document\", "
+                    "\"my file\" or a file they uploaded, check their Crontal files first "
+                    "(crontal_api_get /api/v1/files/merchant, newest first) before answering "
+                    "from memory or searching the web.")
     return "\n\n".join(sections)
 
 
