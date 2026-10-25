@@ -18,6 +18,7 @@ class FakeCrontal:
         self.minted = 0
         self.requests: list[httpx.Request] = []
         self.expire_next = False
+        self.described = 0
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -33,7 +34,19 @@ class FakeCrontal:
             return httpx.Response(200, json={"routes": [
                 {"methods": ["GET", "POST"], "path": "/api/v1/rfq", "summary": "RFQs"},
                 {"methods": ["GET"], "path": "/api/v1/files/merchant", "summary": "Files"},
+                {"methods": ["POST"], "path": "/api/v1/files/upload",
+                 "summary": "Upload a file document"},
+                {"methods": ["GET"], "path": "/api/v1/auth/profile", "summary": "Me"},
             ]})
+        if path == "/api/v1/agent-access/routes/describe":
+            assert auth == f"Bearer {AGENT}"
+            self.described += 1
+            q = dict(request.url.params)
+            if q["path"].startswith("/api/v1/rfq"):
+                return httpx.Response(200, json={
+                    "method": q["method"], "path": "/api/v1/rfq", "has_schema": True,
+                    "body": {"type": "object", "required": ["name"]}})
+            return httpx.Response(404, json={"error": "no route"})
         if not auth.startswith("Bearer jwt-"):
             return httpx.Response(401, json={"error": "unauthorized"})
         if self.expire_next:
@@ -48,6 +61,10 @@ class FakeCrontal:
         if path == "/api/v1/files/upload":
             return httpx.Response(201, json={"ok": True, "body": request.content.decode(
                 "latin-1")[:2000]})
+        if path == "/api/v1/rfq" and request.method == "POST":
+            return httpx.Response(400, json={"error": "name: Field required"})
+        if path == "/api/v1/message/chat/3":
+            return httpx.Response(400, json={"error": "message is required"})
         if path == "/api/v1/rfq/1" and request.method == "PATCH":
             return httpx.Response(200, json={"updated": json.loads(request.content)})
         return httpx.Response(404, json={"error": "not found"})
@@ -72,8 +89,8 @@ def test_base_url_is_the_origin():
 def test_specs_and_risks(setup):
     _, tools, _, _ = setup
     assert {n: str(s.risk) for n, s in tools.items()} == {
-        "crontal_api_routes": "read", "crontal_api_get": "read",
-        "crontal_api_call": "write_external"}
+        "crontal_api_routes": "read", "crontal_api_describe": "read",
+        "crontal_api_get": "read", "crontal_api_call": "write_external"}
 
 
 async def test_get_uses_a_minted_user_token_and_caches_it(setup):
@@ -144,10 +161,64 @@ async def test_http_errors_are_tool_errors(setup):
 async def test_routes_are_listed_and_searchable(setup):
     _, tools, ctx, _ = setup
     everything = await tools["crontal_api_routes"].handler(ctx, {})
-    assert everything.content == ["GET,POST /api/v1/rfq — RFQs",
-                                  "GET /api/v1/files/merchant — Files"]
+    assert len(everything.content) == 4
+    assert everything.content[0] == "GET,POST /api/v1/rfq — RFQs"
+    assert (await tools["crontal_api_routes"].handler(ctx, {"search": "  "})).content \
+        == everything.content
     files = await tools["crontal_api_routes"].handler(ctx, {"search": "file"})
-    assert files.content == ["GET /api/v1/files/merchant — Files"]
+    assert files.content == ["GET /api/v1/files/merchant — Files",
+                             "POST /api/v1/files/upload — Upload a file document"]
+    # Any word matches; routes matching more words rank first.
+    ranked = await tools["crontal_api_routes"].handler(
+        ctx, {"search": "files list uploaded documents"})
+    assert ranked.content[0].startswith("POST /api/v1/files/upload")
+    assert len(ranked.content) == 2
+    assert (await tools["crontal_api_routes"].handler(ctx, {"search": "spreadsheet"})
+            ).content == []
+
+
+async def test_describe_returns_the_spec_and_caches_it(setup):
+    fake, tools, ctx, _ = setup
+    first = await tools["crontal_api_describe"].handler(
+        ctx, {"method": "post", "path": "/api/v1/rfq"})
+    again = await tools["crontal_api_describe"].handler(
+        ctx, {"method": "POST", "path": "/api/v1/rfq"})
+    assert not first.is_error and first.content["body"]["required"] == ["name"]
+    assert again.content == first.content and fake.described == 1
+    missing = await tools["crontal_api_describe"].handler(
+        ctx, {"method": "GET", "path": "/api/v1/nope"})
+    assert missing.is_error and "crontal_api_routes" in missing.content
+    for bad in ({"method": "HEAD", "path": "/api/v1/rfq"},
+                {"method": "GET", "path": "/api/v1/handler/x"}):
+        assert (await tools["crontal_api_describe"].handler(ctx, bad)).is_error
+    assert fake.described == 2
+
+
+async def test_validation_errors_carry_the_spec(setup):
+    fake, tools, ctx, _ = setup
+    result = await tools["crontal_api_call"].handler(
+        ctx, {"method": "POST", "path": "/api/v1/rfq", "json": {"title": "x"}})
+    assert result.is_error and result.content["status"] == 400
+    assert result.content["expected"]["body"]["required"] == ["name"]
+    assert "expected" in result.content["hint"]
+    # No spec available: the plain error is kept.
+    other = await tools["crontal_api_call"].handler(
+        ctx, {"method": "POST", "path": "/api/v1/message/chat/3", "json": {"content": "x"}})
+    assert other.is_error and "expected" not in other.content
+    # Other errors do not fetch a spec.
+    before = fake.described
+    await tools["crontal_api_get"].handler(ctx, {"path": "/api/v1/nope"})
+    assert fake.described == before
+
+
+async def test_upload_field_names_the_multipart_part(setup):
+    _, tools, ctx, workspace = setup
+    (workspace / "a").mkdir(parents=True)
+    (workspace / "a" / "cert.pdf").write_bytes(b"%PDF")
+    result = await tools["crontal_api_call"].handler(
+        ctx, {"method": "POST", "path": "/api/v1/files/upload", "upload_file": "a/cert.pdf",
+              "upload_field": "document"})
+    assert 'name="document"; filename="cert.pdf"' in result.content["body"]["body"]
 
 
 async def test_instance_runs_without_a_user_are_refused(setup):

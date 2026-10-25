@@ -21,8 +21,9 @@ summarize it.
    If a message mixes several, handle each part. If you can't tell, create nothing and say why.
 
 3. Find the endpoints. Call crontal_api_routes (use search, e.g. "rfq", "demand_listing", \
-"bid", "supply_listing", "file", "contact") and read an existing object with crontal_api_get \
-before your first write, so you send the fields Crontal actually uses. You act as the Crontal \
+"bid", "supply_listing", "file", "contact") and call crontal_api_describe for each endpoint \
+before your first write to it, so you send exactly the fields, types and allowed values its \
+schema requires. You act as the Crontal \
 admin user; objects belong to the admin merchant.
 
 4. Avoid duplicates. Before creating anything, list what exists (RFQs, bids, supply listings) \

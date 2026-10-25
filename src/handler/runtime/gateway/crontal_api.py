@@ -5,7 +5,9 @@ Instead of one hand-written tool per feature, two tools reach every endpoint:
 Requests carry a short-lived user JWT that Crontal mints for the user the
 agent acts for (`POST /api/v1/agent-access/token`, agent token required), so
 Crontal applies that user's normal permissions. `crontal_api_routes` lists
-the available endpoints.
+the available endpoints and `crontal_api_describe` returns one endpoint's spec
+(params, JSON body schema with enums, multipart fields, response shape), which
+is also appended to 400/422 results so the agent can correct its call.
 
 File responses are saved into the thread's workspace (`downloads/`), and
 documents are converted to text (`documents.to_text`) so the agent can read them.
@@ -36,6 +38,9 @@ _HIDDEN = ("/api/v1/agent-access", "/api/v1/agent-mcp", "/api/v1/handler")
 MAX_JSON_CHARS = 60_000
 MAX_TEXT_CHARS = 20_000
 ROUTES_TTL_SECONDS = 600
+SPEC_TTL_SECONDS = 600
+SPEC_ON_STATUS = (400, 422)
+_WORD = re.compile(r"[a-z0-9]+")
 
 
 def crontal_base_url(url: str) -> str:
@@ -65,6 +70,27 @@ def _filename(response: httpx.Response, path: str) -> str:
     return _safe_name(match.group(1) if match else unquote(path.rstrip("/").split("/")[-1]))
 
 
+def _rank(routes: list[dict[str, Any]], words: set[str]) -> list[dict[str, Any]]:
+    """Routes matching any search word, most matched words first.
+
+    A search word matches a path/summary word sharing its start, either way
+    ("file" matches "files", "uploaded" matches "upload", but "file" does not
+    match "profile"), so multi-word queries still find routes.
+    """
+    def matches(word: str, token: str) -> bool:
+        return token.startswith(word) or (len(token) >= 4 and word.startswith(token))
+
+    scored = []
+    for index, route in enumerate(routes):
+        text = f"{route['path']} {route.get('summary', '')}".lower()
+        tokens = set(_WORD.findall(text))
+        hits = sum(1 for word in words if any(matches(word, t) for t in tokens))
+        if hits:
+            scored.append((-hits, index, route))
+    scored.sort(key=lambda item: item[:2])
+    return [route for _, _, route in scored]
+
+
 class CrontalApiTools:
     def __init__(self, base_url: str, agent_token: str, *,
                  workspace_for: Callable[[str], Path],
@@ -75,6 +101,7 @@ class CrontalApiTools:
         self._client = client or httpx.AsyncClient(timeout=60)
         self._jwts: dict[str, tuple[str, float]] = {}
         self._routes: tuple[list[dict[str, Any]], float] | None = None
+        self._specs: dict[tuple[str, str], tuple[Any, float]] = {}
 
     # ── auth ────────────────────────────────────────────────────────────────
 
@@ -124,7 +151,8 @@ class CrontalApiTools:
             if workspace.resolve() not in source.parents or not source.is_file():
                 return ToolResult(f"upload_file not found in the workspace: {upload}",
                                   is_error=True)
-            kwargs["files"] = {"file": (source.name, source.read_bytes())}
+            field = str(args.get("upload_field") or "file")
+            kwargs["files"] = {field: (source.name, source.read_bytes())}
             kwargs["data"] = {k: str(v) for k, v in (args.get("form") or {}).items()}
         elif "json" in args and args["json"] is not None:
             kwargs["json"] = args["json"]
@@ -134,7 +162,14 @@ class CrontalApiTools:
             return ToolResult(str(exc), is_error=True)
         except httpx.HTTPError as exc:
             return ToolResult(f"Crontal request failed: {exc}", is_error=True)
-        return await self._result(response, path, workspace)
+        result = await self._result(response, path, workspace)
+        if response.status_code in SPEC_ON_STATUS and isinstance(result.content, dict):
+            spec = await self._spec(method, path)
+            if isinstance(spec, dict):
+                result.content["expected"] = spec
+                result.content["hint"] = ("The request did not match the endpoint; "
+                                          "fix it using `expected` and retry once.")
+        return result
 
     async def _send(self, user: str, method: str, path: str,
                     kwargs: dict[str, Any]) -> httpx.Response:
@@ -187,23 +222,59 @@ class CrontalApiTools:
         target.write_bytes(data)
         return str(target.relative_to(workspace))
 
-    async def _list_routes(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+    async def _catalog(self) -> list[dict[str, Any]]:
         if self._routes is None or time.time() - self._routes[1] > ROUTES_TTL_SECONDS:
-            try:
-                response = await self._client.get(
-                    f"{self.base_url}/api/v1/agent-access/routes",
-                    headers={"Authorization": f"Bearer {self._agent_token}"})
-                response.raise_for_status()
-            except httpx.HTTPError as exc:
-                return ToolResult(f"Could not list Crontal routes: {exc}", is_error=True)
+            response = await self._client.get(
+                f"{self.base_url}/api/v1/agent-access/routes",
+                headers={"Authorization": f"Bearer {self._agent_token}"})
+            response.raise_for_status()
             self._routes = (response.json()["routes"], time.time())
-        routes = self._routes[0]
-        if search := (args.get("search") or "").lower():
-            routes = [r for r in routes
-                      if search in r["path"].lower() or search in r.get("summary", "").lower()]
+        return self._routes[0]
+
+    async def _list_routes(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        try:
+            routes = await self._catalog()
+        except httpx.HTTPError as exc:
+            return ToolResult(f"Could not list Crontal routes: {exc}", is_error=True)
+        if words := set(_WORD.findall((args.get("search") or "").lower())):
+            routes = _rank(routes, words)
         return ToolResult([f"{','.join(r['methods'])} {r['path']}"
                            + (f" — {r['summary']}" if r.get("summary") else "")
                            for r in routes])
+
+    async def _spec(self, method: str, path: str) -> Any:
+        """One route's spec from Crontal (cached); a string when unavailable."""
+        key = (method.upper(), path.split("?", 1)[0])
+        cached = self._specs.get(key)
+        if cached and time.time() - cached[1] <= SPEC_TTL_SECONDS:
+            return cached[0]
+        try:
+            response = await self._client.get(
+                f"{self.base_url}/api/v1/agent-access/routes/describe",
+                params={"method": key[0], "path": key[1]},
+                headers={"Authorization": f"Bearer {self._agent_token}"})
+        except httpx.HTTPError as exc:
+            return f"Could not describe {key[0]} {key[1]}: {exc}"
+        if response.status_code == 404:
+            spec: Any = (f"No Crontal endpoint matches {key[0]} {key[1]}; "
+                         "see crontal_api_routes.")
+        elif response.status_code != 200:
+            return (f"Could not describe {key[0]} {key[1]} "
+                    f"(HTTP {response.status_code}): {response.text[:200]}")
+        else:
+            spec = response.json()
+        self._specs[key] = (spec, time.time())
+        return spec
+
+    async def _describe(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        method = str(args.get("method", "")).upper()
+        path = args.get("path", "")
+        if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+            return ToolResult("method must be GET, POST, PUT, PATCH or DELETE", is_error=True)
+        if problem := self._check_path(path):
+            return ToolResult(problem, is_error=True)
+        spec = await self._spec(method, path)
+        return ToolResult(spec, is_error=not isinstance(spec, dict))
 
     async def _get(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
         return await self._request(ctx, "GET", args)
@@ -223,11 +294,27 @@ class CrontalApiTools:
             ToolSpec(
                 "crontal_api_routes", "crontal_api.routes", Risk.READ,
                 "List Crontal's REST API endpoints (methods, path, summary). Use it to find "
-                "the endpoint for a task before calling crontal_api_get/crontal_api_call.",
+                "the endpoint for a task, then crontal_api_describe for its exact contract.",
                 {"type": "object", "properties": {
                     "search": {"type": "string",
-                               "description": "Optional filter on path or summary text."}}},
+                               "description": "Optional words to look for in path or "
+                               "summary (any word matches, best matches first); omit "
+                               "for the whole catalogue."}}},
                 self._list_routes),
+            ToolSpec(
+                "crontal_api_describe", "crontal_api.describe", Risk.READ,
+                "Show one Crontal endpoint's contract: path and query params, the JSON body "
+                "schema (required fields, types, allowed enum values, nested objects such "
+                "as product_info and its per-shape shape_attributes), multipart fields for "
+                "uploads, and the response shape. Call it before a write you haven't made "
+                "in this thread.",
+                {"type": "object", "properties": {
+                    "method": {"type": "string",
+                               "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+                    "path": {"type": "string", "description": "Path as listed by "
+                             "crontal_api_routes, or with ids filled in."}},
+                 "required": ["method", "path"]},
+                self._describe),
             ToolSpec(
                 "crontal_api_get", "crontal_api.get", Risk.READ,
                 "GET any Crontal API endpoint as the user you work for (same data and "
@@ -239,15 +326,19 @@ class CrontalApiTools:
             ToolSpec(
                 "crontal_api_call", "crontal_api.call", Risk.WRITE_EXTERNAL,
                 "POST/PUT/PATCH/DELETE a Crontal API endpoint as the user you work for. "
-                "Send a JSON body with `json`, or upload a workspace file as multipart "
-                "(`upload_file`, plus extra `form` fields).",
+                "Send a JSON body with `json` shaped exactly as crontal_api_describe shows "
+                "(unknown fields may be rejected), or upload a workspace file as multipart "
+                "(`upload_file`, its field name in `upload_field`, plus extra `form` "
+                "fields). A 400/422 result includes the endpoint's spec as `expected`.",
                 {"type": "object", "properties": {
                     "method": {"type": "string", "enum": ["POST", "PUT", "PATCH", "DELETE"]},
                     "path": path, "query": query,
                     "json": {"type": ["object", "array"], "description": "JSON request body."},
                     "upload_file": {"type": "string",
-                                    "description": "Workspace-relative file to upload as "
-                                    "the multipart field 'file'."},
+                                    "description": "Workspace-relative file to upload."},
+                    "upload_field": {"type": "string",
+                                     "description": "Multipart field for upload_file "
+                                     "(default 'file'; see the endpoint's multipart spec)."},
                     "form": {"type": "object", "additionalProperties": True,
                              "description": "Extra multipart form fields for upload_file."}},
                  "required": ["method", "path"]},
