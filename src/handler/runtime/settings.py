@@ -143,9 +143,11 @@ class EmailSettings(Section):
         True, title="Require DKIM",
         description="Only accept mail with a valid DKIM signature aligned with the sender.")
     act_as: str | None = Field(
-        None, title="Act as user",
-        description="Handler user id the agent acts for (its Crontal identity). Empty: "
-                    "emails are ignored.")
+        None, title="Attribute to user",
+        description="Optional handler user id that email threads are attributed to "
+                    "(approvals, failure notices). The agent always works in Crontal as "
+                    "the instance's AI user. Empty: no attribution; emails are ignored "
+                    "only when there is no Crontal AI identity either.")
     instructions: str = Field(
         DEFAULT_EMAIL_INSTRUCTIONS, title="Instructions",
         description="What the agent does with each email. Empty restores the default.")

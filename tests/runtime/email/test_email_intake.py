@@ -364,8 +364,9 @@ async def test_email_settings_defaults_and_instructions(tmp_path):
 
 class Harness:
     def __init__(self, tmp_path, *, blocked=(), act_as="17",
-                 require_auth=True):
+                 require_auth=True, identity=None):
         self.tmp_path = tmp_path
+        self.identity = identity
         self.blocked, self.act_as, self.require_auth = list(blocked), act_as, require_auth
 
     async def __aenter__(self):
@@ -381,7 +382,8 @@ class Harness:
         app = FastAPI()
         app.include_router(email_ingest_router(self.store, SECRET, self.settings, self.sync,
                                                harness="openai_agents", resolver=resolver,
-                                               max_bytes=200_000))
+                                               max_bytes=200_000,
+                                               crontal_identity=self.identity))
         self.client = TestClient(app)
         return self
 
@@ -466,6 +468,40 @@ async def test_ingest_ignores_gated_mail(tmp_path, kwargs, raw, reason):
         assert status == "ignored" and event.payload["ignored_reason"] == reason
         assert "body_text" not in event.payload and event.payload["subject"]
         assert h.post(raw).json()["duplicate"]
+
+
+class _Identity:
+    def __init__(self, error=None):
+        self.error = error
+
+    async def get(self, *, refresh=False):
+        from handler.runtime.gateway.crontal_identity import CrontalIdentity
+
+        if self.error is not None:
+            raise self.error
+        return CrontalIdentity(user_id="501", display_name="Brava AI")
+
+
+async def test_ingest_without_act_as_runs_as_the_ai_identity(tmp_path):
+    async with Harness(tmp_path, act_as=None, identity=_Identity()) as h:
+        response = h.post(INLINE)
+        assert response.status_code == 202, response.text
+        thread = await h.store.get_thread(response.json()["thread_key"])
+        assert thread.owner_user_id is None  # Crontal work runs as the AI user
+
+
+@pytest.mark.parametrize("definitive, accepted", [(True, False), (False, True)])
+async def test_ingest_without_act_as_needs_an_ai_identity(tmp_path, definitive, accepted):
+    from handler.runtime.gateway.crontal_identity import IdentityUnavailable
+
+    identity = _Identity(IdentityUnavailable("nope", definitive=definitive))
+    async with Harness(tmp_path, act_as=None, identity=identity) as h:
+        body = h.post(INLINE).json()
+        if accepted:  # Crontal unreachable: keep the mail, the run retries
+            assert body["status"] != "ignored"
+        else:
+            assert body == {**body, "status": "ignored",
+                            "reason": "act_as_not_configured"}
 
 
 async def test_ingest_without_auth_requirement(tmp_path):

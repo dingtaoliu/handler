@@ -56,15 +56,18 @@ Repo and code layout:
 
 **Crontal (`/Users/dannyliu/dev/repos/hephaestus`, `main`, deployed as `hephaestus-backend-test`):**
 - `controllers/agent_access_controller.py`:
-  - `POST /api/v1/agent-access/token` (agent token + `X-Crontal-User`) mints a 15-minute user JWT with `actor: agent`;
+  - `POST /api/v1/agent-access/token` (agent token) mints a 15-minute JWT with `actor: agent` for the instance's **AI identity** only (see below); `X-Crontal-User` naming anyone else is 403;
+  - `GET /api/v1/agent-access/identity` returns that AI user (`user_id`, `display_name`, `merchant_name`);
   - `GET /api/v1/agent-access/routes` is the API catalog.
 - `controllers/agent_mcp_controller.py`: the older curated MCP tools.
 - `services/handler_service.py`: entitlement, signed webhook outbox, and the `/api/v1/handler/*` proxy. Entitlement is `is_site_admin_user`, which needs stored role `site_admin` **and** an email in `SITE_ADMIN_EMAILS`; the feature is gated by `HANDLER_ENABLED`.
 - Frontend: Handler settings tab (`SchemaForm`, defaults, rendered prompt) and the chat panel (model/effort selects).
 
+**AI identity (2026-10-25, branch `feat/ai-identity` in both repos):** each Crontal `HandlerInstance` has one AI user (`user.kind='ai'`, "<merchant> AI", a member of the merchant, no login). The agent acts in Crontal **only** as it, on every thread type (chat, email, crontal, automation, gmail); it can no longer act as people. `gateway/crontal_identity.py` discovers the AI user (`/agent-access/identity`, cached 10 min, shared per instance) and the persona prompt names it. Chat runs send the chatting person as `X-Crontal-On-Behalf-Of` (audit only; dropped if Crontal refuses it). Handler-side identity (`acting_as`: approvals, memory/automation attribution, failure notices) is unchanged.
+
 **Handler side:**
 - The agent reaches all of Crontal through `crontal_api_routes`, `crontal_api_get` and `crontal_api_call`.
-  - Calls run with the user's own JWT, so Crontal applies that user's permissions.
+  - Calls run with the AI user's JWT, so Crontal applies that member's permissions.
   - File responses are saved to `downloads/` in the workspace, with document text extracted.
   - Uploads take a workspace file through `upload_file`.
 - `crontal_api.*` and `crontal.*` are granted `allow` on the Heroku instance, because the owner wants full access for now. A proper authorization system for users and the agent is planned; the `actor: agent` claim is the hook for it.
@@ -120,7 +123,7 @@ Working mode: the main session acts as architect and hands implementation to bac
 - **Tasks:** the `/api/tasks` API, handler's Tasks tab, and a Tasks tab in Crontal's agent panel. The debug trace (`steps`) is admin-only in the tasks API.
 - **Chat images:** paste, drop or pick images in Crontal's panel. Both harnesses get them as vision input, with copies kept in the workspace.
 - **Gmail:** read, search, attachments and drafts, plus `gmail_send` / `gmail_send_draft`. Sends always need approval (`explicit_allow_only`), and the approval pins the exact content. The `google_workspace_mcp` sidecar and Google's preview MCP were evaluated and rejected for now; see `gmail-connector.md` §4.
-- **Email intake:** `contact@crontal.ai` goes through the Cloudflare Worker to `/ingest/email`. Senders are gated by a **blocklist** (intentional, by the owner's decision) plus DKIM. It acts as user 1.
+- **Email intake:** `contact@crontal.ai` goes through the Cloudflare Worker to `/ingest/email`. Senders are gated by a **blocklist** (intentional, by the owner's decision) plus DKIM. It works in Crontal as the instance's AI user (it acted as user 1 before `feat/ai-identity`).
 - **Credentials:** the Postgres credentials were rotated on 2026-10-18.
 
 **Next:**

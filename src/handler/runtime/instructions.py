@@ -1,5 +1,9 @@
 """Render shared settings and memory for any harness."""
 
+import asyncio
+from typing import Any
+
+from .gateway.crontal_identity import identity_prompt
 from .mail.instructions import DEFAULT_EMAIL_INSTRUCTIONS
 from .memory import MemoryTools
 from .settings import SettingsService
@@ -9,9 +13,12 @@ from .types import ThreadType
 async def build_instructions(
     settings: SettingsService, memory_tools: MemoryTools, *,
     speaker: str | None, thread_type: ThreadType,
+    crontal_identity: Any = None,
 ) -> str:
     persona, _ = await settings.get("persona")
     sections = [persona[name] for name in ("system", "identity", "persona") if persona[name]]
+    if crontal_identity is not None:
+        sections.append(await crontal_identity_section(crontal_identity))
     sections.append("# Memory\n" + await memory_tools.index_text()
                     + "\nUse memory_read for details.")
     if speaker is not None:
@@ -36,6 +43,18 @@ async def build_instructions(
                     "(crontal_api_get /api/v1/files/merchant, newest first) before answering "
                     "from memory or searching the web.")
     return "\n\n".join(sections)
+
+
+async def crontal_identity_section(client: Any) -> str:
+    """Who the agent is in Crontal: its instance's AI user (never a person)."""
+    try:
+        identity = await asyncio.wait_for(client.get(), timeout=5)
+    except Exception:  # noqa: BLE001 - the prompt must not fail on Crontal
+        identity = client.cached
+    if identity is not None:
+        return identity_prompt(identity)
+    return ("In Crontal you act as your merchant's AI user (\"<merchant> AI\"), a "
+            "member of the merchant, never as a person.")
 
 
 async def email_instructions(settings: SettingsService) -> str:

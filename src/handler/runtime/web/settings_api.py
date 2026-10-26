@@ -1,5 +1,7 @@
 """Runtime settings and notifications endpoints."""
 
+from typing import Any
+
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -20,7 +22,8 @@ class RollbackRequest(BaseModel):
 
 
 def settings_router(service: SettingsService, auth: Authenticator,
-                    memory_tools: MemoryTools | None = None) -> APIRouter:
+                    memory_tools: MemoryTools | None = None, *,
+                    crontal_identity: Any = None) -> APIRouter:
     router = APIRouter()
     user = Depends(auth.require_principal)
     admin = Depends(auth.require_admin)
@@ -54,7 +57,8 @@ def settings_router(service: SettingsService, auth: Authenticator,
         speaker = principal.user_id
         text = await build_instructions(
             service, memory_tools or MemoryTools(service.store),
-            speaker=speaker if kind == ThreadType.CHAT else None, thread_type=kind)
+            speaker=speaker if kind == ThreadType.CHAT else None, thread_type=kind,
+            crontal_identity=crontal_identity)
         return {"thread_type": kind.value, "prompt": text}
 
     @router.get("/api/chat/options")

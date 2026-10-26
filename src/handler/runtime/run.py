@@ -294,8 +294,12 @@ class RunExecutor:
         memory_tools: MemoryTools | None = None,
         workspace_sync: WorkspaceSync | None = None,
         failure_notifier: Any = None,
+        crontal_identity: Any = None,
     ) -> None:
         self.store = store
+        # CrontalIdentityClient (gateway/crontal_identity.py): who the agent is
+        # in Crontal, for the prompt. None when Crontal isn't configured.
+        self.crontal_identity = crontal_identity
         # FailureNotifier (notifications.py): told about terminal background failures.
         self.failure_notifier = failure_notifier
         self.tokens = tokens
@@ -679,7 +683,8 @@ class RunExecutor:
         if self.memory_tools is not None:
             speaker = thread.owner_user_id if str(thread.type) == "chat" else None
             built = await build_instructions(self.settings, self.memory_tools,
-                                             speaker=speaker, thread_type=thread.type)
+                                             speaker=speaker, thread_type=thread.type,
+                                             crontal_identity=self.crontal_identity)
             plan.instructions = "\n\n".join(p for p in (built, self.config.instructions) if p)
         return plan
 

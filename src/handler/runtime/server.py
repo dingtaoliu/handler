@@ -16,6 +16,7 @@ import re
 import secrets
 import shlex
 from collections.abc import Mapping
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pathlib import Path
@@ -200,6 +201,24 @@ def _log_file(args: argparse.Namespace) -> Path:
     if args.log_file:
         return Path(args.log_file).expanduser()
     return Path(args.data_dir).expanduser() / "logs" / "handler-rt.jsonl"
+
+
+def _crontal_identity_client(args: Any, env: Any, integrations: Any, legacy: bool) -> Any:
+    """The instance's Crontal AI identity client (shared with the Crontal tools),
+    or None when this instance has no Crontal URL and agent token."""
+    from .gateway.crontal_identity import crontal_identity
+
+    url, token = None, None
+    if legacy:
+        url, token = args.crontal_url, env.get("CRONTAL_AGENT_TOKEN")
+    else:
+        for integration in integrations.integrations:
+            if integration.name == "crontal":
+                url = getattr(integration, "crontal_url", None)
+                token = getattr(integration, "agent_token", None)
+    if not (url and token):
+        return None
+    return crontal_identity(crontal_base_url(url), token)
 
 
 def _trusted_device_users(raw: str) -> dict[str, str]:
@@ -479,6 +498,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
 
         emit_event = thread_router(store)
 
+        crontal_id = _crontal_identity_client(args, env, integrations, legacy_crontal)
         users = [u.strip() for u in args.users.split(",") if u.strip()]
         # Output sinks: integrations register only when configured.
         outbox = Outbox(store)
@@ -538,6 +558,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             tokens=tokens, mcp_url=f"http://{local_host}:{args.port}{base_path}/mcp/",
             settings=settings, memory_tools=memory_tools,
             workspace_sync=workspace_sync, failure_notifier=FailureNotifier(notifier),
+            crontal_identity=crontal_id,
         )
         dispatcher = Dispatcher(
             store, executor, lease_seconds=config.lease_seconds,
@@ -562,13 +583,15 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         app.include_router(approvals_router(gateway, store, auth))
         app.include_router(tasks_router(store, bus, auth))
         store.on_routed = lambda event, spec: publish_queued(bus, event, spec)
-        app.include_router(settings_router(settings, auth, memory_tools))
+        app.include_router(settings_router(settings, auth, memory_tools,
+                                           crontal_identity=crontal_id))
         app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
                                         uploads=uploads, log_file=_log_file(args)))
         email_secret = env.get("HANDLER_EMAIL_SECRET")
         if email_secret:
             app.include_router(email_ingest_router(store, email_secret, settings, workspace_sync,
-                                                   harness=settings.harness_source("email")))
+                                                   harness=settings.harness_source("email"),
+                                                   crontal_identity=crontal_id))
         else:
             logger.info("email intake off: set HANDLER_EMAIL_SECRET to enable /ingest/email")
         google_oauth = google_oauth_from_env(store, env=env)  # None unless GOOGLE_OAUTH_* are set
