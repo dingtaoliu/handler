@@ -12,8 +12,18 @@ from ..context import RunContext
 from .credentials import UpstreamAccess
 from .upstream import UpstreamConnector
 
+def _status_outward(args: dict[str, Any]) -> str | None:
+    """Any status but draft makes the RFQ visible to suppliers (or notifies them)."""
+    for source in (args, *(v for v in args.values() if isinstance(v, dict))):
+        status = source.get("status")
+        if status is not None and str(status).strip().lower() != "draft":
+            return f"sets an RFQ's status to {status!r} (visible to suppliers)"
+    return None
+
+
 # Crontal tool name → handler curation. Reads are allowed by default; anything
 # that creates or changes Crontal data needs approval (write_external).
+# `outward` marks calls that leave the merchant (see ToolSpec.outward).
 CRONTAL_TOOLS: dict[str, dict[str, Any]] = {
     "app_get_rfqs": {"risk": "read", "rename": "get_rfqs"},
     "app_get_rfq": {"risk": "read", "rename": "get_rfq"},
@@ -21,11 +31,18 @@ CRONTAL_TOOLS: dict[str, dict[str, Any]] = {
     "app_get_rfq_bids": {"risk": "read", "rename": "get_rfq_bids"},
     "app_get_demand_listing": {"risk": "read", "rename": "get_demand_listing"},
     "app_get_shape_definitions": {"risk": "read", "rename": "get_shape_definitions"},
-    "app_create_rfq": {"risk": "write_external", "rename": "create_rfq"},
-    "app_update_rfq": {"risk": "write_external", "rename": "update_rfq"},
-    "app_publish_rfq": {"risk": "write_external", "rename": "publish_rfq"},
-    "app_add_demand_listings": {"risk": "write_external", "rename": "add_demand_listings"},
-    "app_delete_demand_listings": {"risk": "write_external", "rename": "delete_demand_listings"},
+    "app_create_rfq": {"risk": "write_external", "rename": "create_rfq",
+                       "outward": _status_outward},
+    "app_update_rfq": {"risk": "write_external", "rename": "update_rfq",
+                       "outward": _status_outward},
+    "app_publish_rfq": {"risk": "write_external", "rename": "publish_rfq",
+                        "outward": lambda args: "publishes an RFQ to suppliers"},
+    "app_add_demand_listings": {"risk": "write_external", "rename": "add_demand_listings",
+                                "outward": lambda args: None},
+    "app_delete_demand_listings": {"risk": "write_external",
+                                   "rename": "delete_demand_listings",
+                                   "outward": lambda args: None},
+    # Shapes are a shared catalogue: no `outward`, so it always counts as outward.
     "app_define_shape": {"risk": "write_external", "rename": "define_shape"},
 }
 

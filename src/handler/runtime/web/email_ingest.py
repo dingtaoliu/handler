@@ -11,8 +11,10 @@ Request (see deploy/cloudflare-email-worker/):
 
 Durable before acknowledged: files go to the thread's durable workspace,
 then the event is committed, then 2xx. The Message-ID is the idempotency key.
-Mail failing the sender gate is stored as an ``ignored`` event with a reason
-(visible in Activity) and never reaches the agent.
+Mail failing the sender gate (blocklist + DKIM) is stored as an ``ignored``
+event with a reason (visible in Activity) and never reaches the agent.
+Accepted mail is marked ``trusted`` or ``external`` (``email.trusted_senders``)
+and keyed by its sender as well as its root Message-ID (``thread_key``).
 """
 
 from __future__ import annotations
@@ -124,7 +126,6 @@ def email_ingest_router(
         envelope_to = unquote(request.headers.get("x-handler-envelope-to", "")) or None
         header_auth = _header_auth(request.headers.get("x-handler-auth-results"))
         forwarded = request.headers.get("x-handler-forwarded") or None
-        key = thread_key(parsed)
         idem = idempotency_key(parsed)
         config, _ = await settings.get("email")
 
@@ -133,7 +134,10 @@ def email_ingest_router(
         gate = await check_sender(
             body, parsed, envelope_from=envelope_from,
             blocked_senders=list(config.get("blocked_senders") or []),
+            trusted_senders=list(config.get("trusted_senders") or []),
             require_auth=bool(config.get("require_auth", True)), resolver=dns)
+        # Accepted mail joins only its own sender's threads (see thread_key).
+        key = thread_key(parsed, gate.scope if gate.accepted else None)
         acting = None
         reason = gate.reason
         if gate.accepted:
@@ -164,6 +168,7 @@ def email_ingest_router(
             workspace = await save_files(parsed, body, write, scratch=Path(scratch))
         payload = build_payload(parsed, workspace=workspace, **common)
         payload["accepted_sender"] = gate.sender
+        payload["sender_trust"] = "trusted" if gate.trusted else "external"
         event = Event(type="email.received", source="email", payload=payload,
                       idempotency_key=idem, thread_key=key, user_id=acting)
         spec = ThreadSpec(key=key, type=ThreadType.EMAIL, lane=Lane.BACKGROUND,

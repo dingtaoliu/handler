@@ -182,9 +182,14 @@ async def verify_signature(
     canon_body = _canon_body(body, body_relaxed)
     if "l" in tags:
         try:
-            canon_body = canon_body[: int(tags["l"])]
+            length = int(tags["l"])
         except ValueError:
             return fail("bad l= tag")
+        # Text after l= bytes is unsigned: anyone could append to a signed
+        # message, so a signature that doesn't cover the whole body fails.
+        if length < len(canon_body):
+            return fail("l= does not cover the whole body")
+        canon_body = canon_body[:length]
     body_hash = base64.b64encode(hashlib.sha256(canon_body).digest()).decode()
     if body_hash != _FWS.sub("", tags["bh"]):
         return fail("body hash mismatch")
