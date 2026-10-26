@@ -175,6 +175,8 @@ Measured on a Heroku dyno: same uid as Handler, `unprivileged_userns_clone=0` so
 - The mailbox integration is not enabled on any instance yet.
 - `feat/private-user-spaces` is still unmerged. It conflicts with `rebuild` (run.py, settings_api.py, instructions.py) and changes AI Spend usage reads, mailbox thread visibility and the console sign-in view.
 
+**2026-10-26 01:13 UTC: mailbox integration enabled** on both instances (`HANDLER_INTEGRATIONS=crontal,mailbox`, `HANDLER_I_BSS__INTEGRATIONS=crontal,mailbox`, release v44). Crontal now comes from the integration, not the legacy wiring. Email intake and Google are unaffected; main's Gmail is still active. Each instance's prompt still names its own AI user. No mailboxes are connected yet; `sales@yeup-tube.com` goes on bss.
+
 **Waiting on the owner:**
 - Rotate the OpenAI key (`OPENAI_API_KEY` on Crontal, `CODEX_API_KEY` on `crontal-agent`) and the Bucketeer keys.
 - Send a test email to `contact@crontal.ai` to confirm the Gmail copy still arrives.
