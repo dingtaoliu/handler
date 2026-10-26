@@ -168,6 +168,13 @@ Measured on a Heroku dyno: same uid as Handler, `unprivileged_userns_clone=0` so
 
 **Built 2026-10-25, not merged: IMAP/SMTP mailbox integration** (branch `feat/mailbox-integration`, `docs/rebuild/mailbox-integration.md`; Crontal side on hephaestus `feat/handler-mailboxes`). Enable per instance with `HANDLER_I_<NAME>__INTEGRATIONS=crontal,mailbox`. It supports several mailboxes per instance, connected from Crontal. First mailbox: `sales@yeup-tube.com` (chengmail.cn: IMAP 143 STARTTLS or 993 TLS, SMTP 587 STARTTLS or 465). Reachable from Heroku. The server has no IDLE, so Handler polls. Yeup is Crontal merchant 298, and the owner is choosing which instance gets it.
 
+**Deployed 2026-10-25 evening:**
+- A parallel session released Crontal v114/v115 and Handler v41/v42: the tenant-leak fix, the email-intake lockdown, AI identity (migration `u6q7r8s9t0v1`), and the mailbox code.
+- The driver then released **Handler v43** (`rebuild` @ 4637d76): `mail:` threads are now untrusted, so the lockdown floor also applies to connected mailboxes. Backup b022 was taken first. Rollback targets: Crontal v115, Handler v42.
+- Verified: each instance's prompt names its own AI user (main is "Brava Canada AI", user 331; bss is "Brava Stainless Steel AI", user 332).
+- The mailbox integration is not enabled on any instance yet.
+- `feat/private-user-spaces` is still unmerged. It conflicts with `rebuild` (run.py, settings_api.py, instructions.py) and changes AI Spend usage reads, mailbox thread visibility and the console sign-in view.
+
 **Waiting on the owner:**
 - Rotate the OpenAI key (`OPENAI_API_KEY` on Crontal, `CODEX_API_KEY` on `crontal-agent`) and the Bucketeer keys.
 - Send a test email to `contact@crontal.ai` to confirm the Gmail copy still arrives.
