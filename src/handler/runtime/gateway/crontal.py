@@ -1,7 +1,9 @@
 """Crontal connector: credentials and the curated Crontal MCP tools.
 
-The agent acts as the Crontal user it works for: every call carries the shared
-agent token plus `X-Crontal-User`, and Crontal enforces that user's permissions.
+The agent acts as the instance's Crontal AI user (`crontal_identity.py`), never
+as a person: every call carries the agent token plus `X-Crontal-User: <AI user>`,
+and Crontal enforces that member's permissions. On chat threads the chatting
+person is added as `X-Crontal-On-Behalf-Of`, for Crontal's audit only.
 """
 
 from __future__ import annotations
@@ -10,7 +12,19 @@ from typing import Any
 
 from ..context import RunContext
 from .credentials import UpstreamAccess
+from .crontal_identity import (
+    ON_BEHALF_OF_HEADER,
+    CrontalIdentityClient,
+    IdentityUnavailable,
+    crontal_identity,
+    on_behalf_of,
+)
 from .upstream import UpstreamConnector
+
+# Owner strings for the upstream connector: the AI user, optionally noting
+# the person a chat run works for ("crontal-ai" or "crontal-ai:obo:17").
+AI_OWNER = "crontal-ai"
+_OBO = ":obo:"
 
 def _status_outward(args: dict[str, Any]) -> str | None:
     """Any status but draft makes the RFQ visible to suppliers (or notifies them)."""
@@ -48,17 +62,29 @@ CRONTAL_TOOLS: dict[str, dict[str, Any]] = {
 
 
 class CrontalCredentials:
-    """Agent token + acting Crontal user. Instance-level calls get no access."""
+    """Agent token + the instance's Crontal AI user, on every thread type."""
 
-    def __init__(self, url: str, agent_token: str) -> None:
+    def __init__(self, url: str, agent_token: str,
+                 identity: CrontalIdentityClient | None = None) -> None:
         self.url = url
         self._token = agent_token
+        from .crontal_api import crontal_base_url
+
+        self.identity = identity or crontal_identity(crontal_base_url(url), agent_token)
 
     async def resolve(self, connector: str, owner: str) -> UpstreamAccess | None:
-        if not owner.startswith("user:"):
+        if owner != AI_OWNER and not owner.startswith(AI_OWNER + _OBO):
             return None
-        return UpstreamAccess(self.url, {"Authorization": f"Bearer {self._token}",
-                                         "X-Crontal-User": owner.removeprefix("user:")})
+        try:
+            identity = await self.identity.get()
+        except IdentityUnavailable as exc:
+            raise PermissionError(f"No Crontal AI identity for this instance: {exc}") from exc
+        headers = {"Authorization": f"Bearer {self._token}",
+                   "X-Crontal-User": identity.user_id}
+        obo = owner.partition(_OBO)[2]
+        if obo:
+            headers[ON_BEHALF_OF_HEADER] = obo
+        return UpstreamAccess(self.url, headers)
 
     async def discovery_access(self, connector: str) -> UpstreamAccess | None:
         # Crontal allows initialize/tools/list with the agent token alone.
@@ -66,8 +92,8 @@ class CrontalCredentials:
 
 
 def crontal_owner(ctx: RunContext) -> str:
-    user = ctx.acting_as or ctx.user_id
-    return f"user:{user}" if user else "instance"
+    obo = on_behalf_of(ctx)
+    return f"{AI_OWNER}{_OBO}{obo}" if obo else AI_OWNER
 
 
 def crontal_connector(url: str, agent_token: str) -> UpstreamConnector:

@@ -2,9 +2,11 @@
 
 Instead of one hand-written tool per feature, two tools reach every endpoint:
 `crontal_api_get` (reads) and `crontal_api_call` (writes, incl. file upload).
-Requests carry a short-lived user JWT that Crontal mints for the user the
-agent acts for (`POST /api/v1/agent-access/token`, agent token required), so
-Crontal applies that user's normal permissions. `crontal_api_routes` lists
+Requests carry a short-lived JWT that Crontal mints for the instance's AI
+user (`POST /api/v1/agent-access/token`, agent token required; see
+`crontal_identity.py`), so Crontal applies that member's normal permissions.
+On chat threads the chatting person is sent as `X-Crontal-On-Behalf-Of`, for
+Crontal's audit only. `crontal_api_routes` lists
 the available endpoints and `crontal_api_describe` returns one endpoint's spec
 (params, JSON body schema with enums, multipart fields, response shape), which
 is also appended to 400/422 results so the agent can correct its call.
@@ -32,6 +34,13 @@ from ..context import RunContext
 from ..types import Risk
 from ..uploads import sanitize_filename
 from .base import ToolResult, ToolSpec
+from .crontal_identity import (
+    ON_BEHALF_OF_HEADER,
+    CrontalIdentityClient,
+    IdentityUnavailable,
+    crontal_identity,
+    on_behalf_of,
+)
 
 API_PREFIX = "/api/v1/"
 # Never reachable by the agent (refused, and left out of crontal_api_routes):
@@ -154,37 +163,55 @@ def _rank(routes: list[dict[str, Any]], words: set[str]) -> list[dict[str, Any]]
 class CrontalApiTools:
     def __init__(self, base_url: str, agent_token: str, *,
                  workspace_for: Callable[[str], Path],
-                 client: httpx.AsyncClient | None = None) -> None:
+                 client: httpx.AsyncClient | None = None,
+                 identity: CrontalIdentityClient | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self._agent_token = agent_token
         self._workspace_for = workspace_for
         self._client = client or httpx.AsyncClient(timeout=60)
+        if identity is None:
+            # An explicit client (tests) gets its own identity client; otherwise
+            # share the instance's (also used by the prompt and email intake).
+            identity = (CrontalIdentityClient(self.base_url, agent_token, client=client)
+                        if client is not None
+                        else crontal_identity(self.base_url, agent_token))
+        self.identity = identity
+        # JWTs by on-behalf-of user ("" = none); all are the AI user's.
         self._jwts: dict[str, tuple[str, float]] = {}
         self._routes: tuple[list[dict[str, Any]], float] | None = None
         self._specs: dict[tuple[str, str], tuple[Any, float]] = {}
 
     # ── auth ────────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _user(ctx: RunContext) -> str | None:
-        return ctx.acting_as or ctx.user_id
-
-    async def _jwt(self, user: str, *, refresh: bool = False) -> str:
-        cached = self._jwts.get(user)
+    async def _jwt(self, obo: str | None, *, refresh: bool = False) -> str:
+        """A JWT of the instance's AI user (never a person's)."""
+        key = obo or ""
+        cached = self._jwts.get(key)
         if cached and not refresh and cached[1] - time.time() > 60:
             return cached[0]
+        try:
+            identity = await self.identity.get(refresh=refresh)
+        except IdentityUnavailable as exc:
+            raise PermissionError(f"No Crontal AI identity for this instance: {exc}") from exc
+        headers = {"Authorization": f"Bearer {self._agent_token}",
+                   "X-Crontal-User": identity.user_id}
+        if obo:
+            headers[ON_BEHALF_OF_HEADER] = obo
         response = await self._client.post(
-            f"{self.base_url}/api/v1/agent-access/token",
-            headers={"Authorization": f"Bearer {self._agent_token}", "X-Crontal-User": user})
+            f"{self.base_url}/api/v1/agent-access/token", headers=headers)
+        if response.status_code == 403 and obo:
+            # On-behalf-of is audit only: a person Crontal doesn't know (or who
+            # left) must not stop the AI user's work.
+            return await self._jwt(None, refresh=refresh)
         if response.status_code != 200:
-            raise PermissionError(f"Crontal refused a token for user {user} "
+            raise PermissionError(f"Crontal refused a token for its AI user "
                                   f"(HTTP {response.status_code}): {response.text[:200]}")
         body = response.json()
         try:
             expires = datetime.fromisoformat(body["expires_at"]).timestamp()
         except (KeyError, ValueError):
             expires = time.time() + 600
-        self._jwts[user] = (body["token"], expires)
+        self._jwts[key] = (body["token"], expires)
         return body["token"]
 
     # ── requests ────────────────────────────────────────────────────────────
@@ -204,9 +231,7 @@ class CrontalApiTools:
         return None
 
     async def _request(self, ctx: RunContext, method: str, args: dict[str, Any]) -> ToolResult:
-        user = self._user(ctx)
-        if not user:
-            return ToolResult("No Crontal user for this run", is_error=True)
+        obo = on_behalf_of(ctx)
         path = args.get("path", "")
         if problem := self._check_path(path):
             return ToolResult(problem, is_error=True)
@@ -223,7 +248,7 @@ class CrontalApiTools:
         elif "json" in args and args["json"] is not None:
             kwargs["json"] = args["json"]
         try:
-            response = await self._send(user, method, path, kwargs)
+            response = await self._send(obo, method, path, kwargs)
         except PermissionError as exc:
             return ToolResult(str(exc), is_error=True)
         except httpx.HTTPError as exc:
@@ -237,10 +262,10 @@ class CrontalApiTools:
                                           "fix it using `expected` and retry once.")
         return result
 
-    async def _send(self, user: str, method: str, path: str,
+    async def _send(self, obo: str | None, method: str, path: str,
                     kwargs: dict[str, Any]) -> httpx.Response:
         for refresh in (False, True):
-            token = await self._jwt(user, refresh=refresh)
+            token = await self._jwt(obo, refresh=refresh)
             response = await self._client.request(
                 method, f"{self.base_url}{path}",
                 headers={"Authorization": f"Bearer {token}"}, **kwargs)

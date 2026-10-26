@@ -89,6 +89,23 @@ def _header_auth(value: str | None) -> dict | None:
     return decoded if isinstance(decoded, dict) else None
 
 
+async def ai_identity_available(client: Any) -> bool:
+    """Whether the agent has a Crontal AI identity to work as. A Crontal that
+    can't be reached counts as available (the run retries); only a definitive
+    refusal, or no Crontal configured, means none."""
+    if client is None:
+        return False
+    from ..gateway.crontal_identity import IdentityUnavailable
+
+    try:
+        await client.get()
+    except IdentityUnavailable as exc:
+        return not exc.definitive
+    except Exception:  # noqa: BLE001
+        return True
+    return True
+
+
 def email_ingest_router(
     store: Store,
     secret: str,
@@ -98,6 +115,7 @@ def email_ingest_router(
     harness: HarnessSource = "codex",
     resolver: TxtResolver | None = None,
     max_bytes: int = MAX_EMAIL_BYTES,
+    crontal_identity: Any = None,
 ) -> APIRouter:
     router = APIRouter()
     dns = resolver
@@ -141,8 +159,11 @@ def email_ingest_router(
         acting = None
         reason = gate.reason
         if gate.accepted:
+            # `act_as` is optional: Crontal work always runs as the instance's
+            # AI identity; act_as only names a handler user to attribute the
+            # thread to (approvals, failure notices).
             acting = await resolve_act_as(store, config.get("act_as"))
-            if acting is None:
+            if acting is None and not await ai_identity_available(crontal_identity):
                 reason = "act_as_not_configured"
 
         common: dict[str, Any] = {"envelope_from": envelope_from, "envelope_to": envelope_to,

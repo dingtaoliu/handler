@@ -13,7 +13,12 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.responses import JSONResponse
 
 from handler.runtime.context import RunContext
-from handler.runtime.gateway.crontal import CRONTAL_TOOLS, CrontalCredentials, crontal_connector
+from handler.runtime.gateway.crontal import (
+    CRONTAL_TOOLS,
+    CrontalCredentials,
+    crontal_connector,
+    crontal_owner,
+)
 from handler.runtime.gateway.gateway import Gateway
 from handler.runtime.gateway.policy import GrantPolicy
 from handler.runtime.store.sqlite import SQLiteStore
@@ -70,12 +75,33 @@ async def test_ingest_routes_notifications_to_entity_threads(tmp_path, caplog):
     await store.close()
 
 
-async def test_credentials_act_as_the_user():
-    creds = CrontalCredentials("https://crontal.test/api/v1/agent-mcp", "agent-tok")
-    access = await creds.resolve("crontal", "user:17")
-    assert access.headers == {"Authorization": "Bearer agent-tok", "X-Crontal-User": "17"}
+class _Identity:
+    async def get(self, *, refresh=False):
+        from handler.runtime.gateway.crontal_identity import CrontalIdentity
+
+        return CrontalIdentity(user_id="501", display_name="Brava AI")
+
+
+async def test_credentials_act_as_the_ai_identity():
+    creds = CrontalCredentials("https://crontal.test/api/v1/agent-mcp", "agent-tok",
+                               identity=_Identity())
+    access = await creds.resolve("crontal", "crontal-ai")
+    assert access.headers == {"Authorization": "Bearer agent-tok", "X-Crontal-User": "501"}
+    access = await creds.resolve("crontal", "crontal-ai:obo:17")
+    assert access.headers == {"Authorization": "Bearer agent-tok", "X-Crontal-User": "501",
+                              "X-Crontal-On-Behalf-Of": "17"}
+    # Never a person, whatever owner string reaches it.
+    assert await creds.resolve("crontal", "user:17") is None
     assert await creds.resolve("crontal", "instance") is None
     assert "X-Crontal-User" not in (await creds.discovery_access("crontal")).headers
+
+
+def test_owner_is_always_the_ai_identity():
+    assert crontal_owner(RunContext(run_id="r", thread_key="chat:17:a", user_id="17",
+                                    acting_as="17")) == "crontal-ai:obo:17"
+    assert crontal_owner(RunContext(run_id="r", thread_key="email:x", user_id="1",
+                                    acting_as="1")) == "crontal-ai"
+    assert crontal_owner(RunContext(run_id="r", thread_key="automation:x")) == "crontal-ai"
 
 
 class FakeCrontal:
@@ -83,6 +109,7 @@ class FakeCrontal:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict, str | None]] = []
+        self.obo: list[str | None] = []
         self.manager = StreamableHTTPSessionManager(self._server(), json_response=True,
                                                     stateless=True)
 
@@ -98,8 +125,10 @@ class FakeCrontal:
 
         @server.call_tool(validate_input=False)
         async def call_tool(name, arguments):
-            user = request_ctx.get().request.headers.get("x-crontal-user")
+            headers = request_ctx.get().request.headers
+            user = headers.get("x-crontal-user")
             self.calls.append((name, arguments, user))
+            self.obo.append(headers.get("x-crontal-on-behalf-of"))
             return mt.CallToolResult(content=[mt.TextContent(
                 type="text", text=json.dumps({"user": user, "tool": name}))])
 
@@ -116,6 +145,10 @@ class FakeCrontal:
         headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
         if headers.get("authorization") != "Bearer agent-tok":
             await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+            return
+        if scope["path"] == "/api/v1/agent-access/identity":
+            await JSONResponse({"user_id": 501, "display_name": "Brava AI"})(
+                scope, receive, send)
             return
         await self.manager.handle_request(scope, receive, send)
 
@@ -139,14 +172,20 @@ async def test_connector_curates_tools_and_acts_as_user(tmp_path):
         gateway.register(connector)
         ctx = RunContext(run_id="r1", thread_key="crontal:rfq:981", user_id="17", acting_as="17")
         read = await gateway.call(ctx, "crontal_get_rfq", {"rfq_id": 981})
-        assert not read.is_error and fake.calls[-1] == ("app_get_rfq", {"rfq_id": 981}, "17")
+        assert not read.is_error and fake.calls[-1] == ("app_get_rfq", {"rfq_id": 981}, "501")
+        assert fake.obo[-1] is None  # background thread: no on-behalf-of
 
         write = await gateway.call(ctx, "crontal_publish_rfq", {"rfq_id": 981})
         assert write.content["status"] == "pending_approval"  # write_external → ask
         approval = await gateway.approve(write.content["approval_id"], decided_by="17")
         assert approval.status is ApprovalStatus.EXECUTED
-        assert fake.calls[-1] == ("app_publish_rfq", {"rfq_id": 981}, "17")
+        assert fake.calls[-1] == ("app_publish_rfq", {"rfq_id": 981}, "501")
 
+        # Automations have no person, but still work as the AI identity.
         agentless = RunContext(run_id="r2", thread_key="automation:x")
-        assert (await gateway.call(agentless, "crontal_get_rfqs", {})).is_error
+        assert not (await gateway.call(agentless, "crontal_get_rfqs", {})).is_error
+        assert fake.calls[-1][2] == "501"
+        chat = RunContext(run_id="r3", thread_key="chat:17:c", user_id="17", acting_as="17")
+        assert not (await gateway.call(chat, "crontal_get_rfqs", {})).is_error
+        assert fake.calls[-1][2] == "501" and fake.obo[-1] == "17"
         await store.close()

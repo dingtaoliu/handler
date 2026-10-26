@@ -13,19 +13,37 @@ from handler.runtime.gateway.crontal_api import CrontalApiTools, crontal_base_ur
 AGENT = "agent-secret"
 
 
+AI_USER = 501
+
+
 class FakeCrontal:
     def __init__(self) -> None:
         self.minted = 0
         self.requests: list[httpx.Request] = []
+        self.mints: list[httpx.Request] = []
         self.expire_next = False
         self.described = 0
+        self.identities = 0
+        self.refuse_obo = False
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         path = request.url.path
         auth = request.headers.get("authorization", "")
+        if path == "/api/v1/agent-access/identity":
+            assert auth == f"Bearer {AGENT}"
+            self.identities += 1
+            return httpx.Response(200, json={
+                "user_id": AI_USER, "username": "Crontal AI", "display_name": "Brava AI",
+                "kind": "ai", "merchant_id": 2, "merchant_name": "Brava"})
         if path == "/api/v1/agent-access/token":
             assert auth == f"Bearer {AGENT}"
+            # Crontal mints only for the instance's AI user.
+            if request.headers.get("x-crontal-user") not in (None, str(AI_USER)):
+                return httpx.Response(403, json={"error": "not the AI identity"})
+            if self.refuse_obo and request.headers.get("x-crontal-on-behalf-of"):
+                return httpx.Response(403, json={"error": "obo not entitled"})
+            self.mints.append(request)
             self.minted += 1
             expires = datetime.now(timezone.utc) + timedelta(minutes=15)
             return httpx.Response(200, json={"token": f"jwt-{self.minted}",
@@ -101,8 +119,44 @@ async def test_get_uses_a_minted_user_token_and_caches_it(setup):
     assert not first.is_error and first.content["body"]["rfqs"] == [{"id": 1}]
     assert first.content["body"]["q"] == {"status": "published"}
     assert second.content["status"] == 200 and fake.minted == 1
-    mint = fake.requests[0]
-    assert mint.headers["x-crontal-user"] == "7"
+    assert fake.identities == 1
+    mint = fake.mints[0]
+    # Always the AI user; the chatting person only as on-behalf-of.
+    assert mint.headers["x-crontal-user"] == str(AI_USER)
+    assert mint.headers["x-crontal-on-behalf-of"] == "7"
+
+
+async def test_background_threads_act_as_the_ai_user_without_obo(setup):
+    fake, tools, _, _ = setup
+    for ctx in (RunContext(run_id="r2", thread_key="email:x:y", user_id="1", acting_as="1"),
+                RunContext(run_id="r3", thread_key="automation:daily"),
+                RunContext(run_id="r4", thread_key="crontal:rfq:9", user_id="7")):
+        result = await tools["crontal_api_get"].handler(ctx, {"path": "/api/v1/rfq"})
+        assert not result.is_error and result.content["status"] == 200
+    assert fake.minted == 1
+    assert fake.mints[0].headers["x-crontal-user"] == str(AI_USER)
+    assert "x-crontal-on-behalf-of" not in fake.mints[0].headers
+
+
+async def test_refused_on_behalf_of_falls_back_to_the_ai_user(setup):
+    fake, tools, ctx, _ = setup
+    fake.refuse_obo = True
+    result = await tools["crontal_api_get"].handler(ctx, {"path": "/api/v1/rfq"})
+    assert not result.is_error and result.content["status"] == 200
+    assert "x-crontal-on-behalf-of" not in fake.mints[-1].headers
+
+
+async def test_no_identity_is_a_tool_error(tmp_path):
+    def refuse(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "no AI identity"})
+
+    tools = CrontalApiTools("https://crontal.test", AGENT,
+                            workspace_for=lambda key: tmp_path,
+                            client=httpx.AsyncClient(transport=httpx.MockTransport(refuse)))
+    get = {s.name: s for s in tools.tools()}["crontal_api_get"]
+    ctx = RunContext(run_id="r1", thread_key="chat:7:c1", user_id="7")
+    result = await get.handler(ctx, {"path": "/api/v1/rfq"})
+    assert result.is_error and "AI identity" in str(result.content)
 
 
 async def test_expired_token_is_refreshed_once(setup):
@@ -253,10 +307,3 @@ async def test_upload_field_names_the_multipart_part(setup):
         ctx, {"method": "POST", "path": "/api/v1/files/upload", "upload_file": "a/cert.pdf",
               "upload_field": "document"})
     assert 'name="document"; filename="cert.pdf"' in result.content["body"]["body"]
-
-
-async def test_instance_runs_without_a_user_are_refused(setup):
-    fake, tools, _, _ = setup
-    ctx = RunContext(run_id="r", thread_key="automation:x", user_id=None, acting_as=None)
-    result = await tools["crontal_api_get"].handler(ctx, {"path": "/api/v1/rfq"})
-    assert result.is_error and fake.requests == []

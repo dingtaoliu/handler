@@ -63,6 +63,16 @@ Deliveries carry `X-Handler-Instance: <name>` (`main` for the root instance)
 and are signed with that instance's webhook secret, which must match the
 secret registered for it in Crontal. See `notifications.md`.
 
+## Crontal AI identity
+
+Each instance's `CRONTAL_AGENT_TOKEN` acts in Crontal only as that instance's AI
+user, which Crontal creates per registered instance (Crontal's
+`docs/handler-instances.md` → *AI identity*). Handler discovers it with
+`GET /api/v1/agent-access/identity` and caches it per (Crontal URL, token), so
+instances on one host never share an identity. Check after deploy: each
+instance's prompt preview (`GET /api/settings/prompt?thread_type=chat`) names its
+own merchant's AI user.
+
 ## URLs and OAuth
 
 Use `https://handler.example/i/bss` as BSS's Handler base URL in the associated

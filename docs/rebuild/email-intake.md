@@ -11,7 +11,7 @@ forwards to `crontal.contacts@gmail.com`. The Crontal admin Handler instance (He
 `crontal-agent`) should react to each email:
 - parse it;
 - create the matching objects in Crontal (RFQs, demand listings, bids, supply
-  listings, …) under the admin merchant, acting as the admin user.
+  listings, …) under the instance's merchant, acting as its AI user.
 
 The owner then checks the results in Crontal as admin. This is a test setup:
 per-sender user mapping comes later. Neither the Gmail API nor the Crontal backend
@@ -21,7 +21,7 @@ changes.
 sender → contact@crontal.ai → Cloudflare Email Worker ─┬─ message.forward(crontal.contacts@gmail.com)
                                                         └─ POST raw RFC 822 + HMAC → crontal-agent /ingest/email
                                                               → email.received event → email thread → agent
-                                                              → crontal_api_* as email.act_as
+                                                              → crontal_api_* as the instance's AI user
 ```
 
 ## Decisions
@@ -39,7 +39,7 @@ sender → contact@crontal.ai → Cloudflare Email Worker ─┬─ message.forw
 | Least privilege | On `email` and `crontal` threads (and `gmail`), a call that leaves the merchant, runs code, or persists beyond the thread needs approval, whatever the instance grants say (`crontal_api.*: allow` included). See *Grants on untrusted threads* below |
 | Auth verdict | Handler verifies DKIM itself on the raw bytes (`mail/dkim.py`), because Cloudflare doesn't hand the Worker a trustworthy verdict (findings below). A pass needs a valid signature whose `d=` aligns with the sender |
 | Thread type | `email`: event `email.received`, key `email:<scope>:<root id>`. The root is the first id of `References`, else `In-Reply-To`, else the message's own Message-ID. Those headers are written by the sender, so the key also carries the sender's scope: its DKIM-confirmed address (or the `trusted_senders` entry it matched, so a trusted `@domain` shares threads); `via:<domain>` when only the envelope sender's domain passed; `unverified:<address>` with `require_auth` off. A stranger who knows a root Message-ID gets a thread of their own. Background lane, visible to all users (it isn't a `chat:` key) |
-| Acting user | Setting `email.act_as` (a handler user id; on the Crontal instance that's the Crontal user id). The run's `acting_as` reads the setting live, falling back to the thread owner set at ingest. `crontal_api_*` then mint that user's JWT (`POST /api/v1/agent-access/token` with `X-Crontal-User`), the same path chat uses with its owner. The user must exist and be enabled, the same rule as `X-Handler-User`. If not, mail is ignored with `act_as_not_configured` |
+| Acting user | In Crontal, always the instance's **AI user** ("<merchant> AI", discovered via `GET /api/v1/agent-access/identity`; `gateway/crontal_identity.py`), never a person. The optional setting `email.act_as` (an enabled handler user id) only attributes the thread on the handler side (owner, approvals' `requested_by`, failure notices); the run's `acting_as` reads it live. Mail is ignored with `act_as_not_configured` only when `act_as` is empty **and** Crontal definitively has no AI identity for the instance (or Crontal isn't configured); an unreachable Crontal still accepts the mail and the run retries |
 | Harness/model | `threads.email` in Settings → Threads, like the other types. An instance whose saved threads settings predate `email` starts the type with its `crontal` entry (same harness), not the bare default |
 | Instructions | Setting `email.instructions` (default in `mail/instructions.py`) replaces the one-line per-type guidance in the prompt. Saving it empty restores the default. Shown in the prompt preview as type `email` |
 
@@ -167,7 +167,7 @@ Ignore reasons:
 | Handler settings `email` | `blocked_senders` | Addresses or `@domain` to ignore; empty accepts authenticated senders |
 | | `trusted_senders` | Addresses or `@domain` marked trusted when DKIM confirms the From; empty: everyone is external |
 | | `require_auth` | `true` (default) |
-| | `act_as` | Crontal admin user id (must exist as a handler user, as for chat) |
+| | `act_as` | Optional handler user id the threads are attributed to (must exist and be enabled). Crontal work always runs as the AI user |
 | | `instructions` | Default prompt; editable |
 | Handler settings `threads.email` | `harness`/`model`/`reasoning_effort` | As for other types (inherits `crontal`'s on existing instances) |
 
@@ -209,7 +209,7 @@ or `..` segments, or backslashes), so no spelling of them reaches the server.
    `PUT /api/settings/email` with the admin key):
    - `blocked_senders`: unwanted addresses or domains (empty initially);
    - `trusted_senders`: optional (empty: every sender is external);
-   - `act_as`: the merchant user the agent acts as;
+   - `act_as`: optional, the handler user email threads are attributed to;
    - `require_auth`: true;
    - `instructions`: `""` to use the current default (a saved copy of an older
      default stays in force otherwise).
@@ -254,7 +254,7 @@ Operational notes:
 
 ## Later
 
-- Per-sender user mapping, replacing the single `act_as`.
+- Per-sender attribution (on-behalf-of) for email threads.
 - Reprocessing an ignored email from Activity. That needs its raw bytes kept
   (bucket, with retention).
 - An SRS decode for auto-forwarded envelopes. An ARC chain check if Cloudflare ever
