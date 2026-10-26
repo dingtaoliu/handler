@@ -1235,7 +1235,7 @@ function openSection(name) {
     if (!admin) form.querySelectorAll("input,select,textarea,button").forEach((e) => { e.disabled = true; });
     renderPromptPreview(name);
 }
-const PROMPT_TYPES = ["chat", "gmail", "automation", "crontal", "email"];
+const PROMPT_TYPES = ["chat", "gmail", "automation", "crontal", "email", "mail"];
 let promptType = "chat";
 function renderPromptPreview(section) {
     const box = $("settings-prompt");
@@ -1414,8 +1414,44 @@ $("google-connection").addEventListener("click", async (e) => {
         }
     } catch (err) { fail(err); }
 });
+// IMAP/SMTP mailboxes (the `mailbox` integration); absent when it is off.
+async function loadMailboxes() {
+    const box = $("mailbox-connections");
+    const data = await apiOpt("/api/mailboxes", null);
+    if (data === null) { box.innerHTML = ""; return; }
+    const rows = (data.mailboxes || []).map((m) => {
+        const tone = !m.enabled ? "gray" : m.status === "active" ? "green" : m.status === "auth_failed" ? "red" : "yellow";
+        const state = m.enabled ? m.status : "disabled";
+        return `<tr><td><b>${esc(m.label || m.email)}</b><div class="muted">${esc(m.email)}</div></td>` +
+            `<td class="mono">${esc(m.imap_host)}:${esc(m.imap_port)} ${esc(m.imap_security)}<br>${esc(m.smtp_host)}:${esc(m.smtp_port)} ${esc(m.smtp_security)}</td>` +
+            `<td>${badge(state, tone)}${m.last_error ? `<div class="muted">${esc(m.last_error)}</div>` : ""}</td>` +
+            `<td>${esc(m.wake_mode)}</td><td>${esc(fmtTime(m.last_sync_at))}</td>` +
+            `<td><button class="btn-small" data-action="mbx-test" data-id="${esc(m.id)}">Test</button> ` +
+            `<button class="btn-small" data-action="mbx-sync" data-id="${esc(m.id)}"${m.enabled ? "" : " disabled"}>Sync now</button> ` +
+            `<button class="btn-small" data-action="mbx-toggle" data-id="${esc(m.id)}" data-enabled="${m.enabled ? 1 : 0}">${m.enabled ? "Disable" : "Enable"}</button></td></tr>`;
+    }).join("");
+    const table = rows ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Mailbox</th><th>IMAP / SMTP</th><th>Status</th><th>Wake</th><th>Last sync</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<span class="muted">No mailboxes connected.</span>`;
+    box.innerHTML = `<div class="card"><div><b>Mailboxes (IMAP/SMTP)</b></div>${table}<div class="muted">Add mailboxes and change passwords in Crontal → Handler settings → Mailboxes (or POST /api/mailboxes).</div></div>`;
+}
+$("mailbox-connections").addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn) return;
+    const id = enc(btn.dataset.id);
+    try {
+        if (btn.dataset.action === "mbx-test") {
+            const r = await sendJson("POST", `/api/mailboxes/${id}/test`, {});
+            toast(r.ok ? "IMAP and SMTP login OK" : `Test failed: ${(r.imap && r.imap.error) || (r.smtp && r.smtp.error) || "unknown error"}`, !r.ok, 8000);
+        } else if (btn.dataset.action === "mbx-sync") {
+            await sendJson("POST", `/api/mailboxes/${id}/sync`, {});
+            toast("Sync scheduled");
+        } else if (btn.dataset.action === "mbx-toggle") {
+            await sendJson("PATCH", `/api/mailboxes/${id}`, {enabled: btn.dataset.enabled !== "1"});
+            await loadMailboxes();
+        }
+    } catch (err) { fail(err); }
+});
 $("conn-refresh").addEventListener("click", () => loaders.connections().catch(fail));
-loaders.connections = () => Promise.all([loadGoogleConnection(), loadConnections()]);
+loaders.connections = () => Promise.all([loadGoogleConnection(), loadMailboxes(), loadConnections()]);
 
 // ─── Users (admin) ───────────────────────────────────────────────────────────
 const usr = {tokens: null};

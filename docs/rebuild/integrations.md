@@ -45,6 +45,21 @@ Integrations live in-tree under `src/handler/runtime/integrations/<name>/`. A `h
 | `email_intake` | `/ingest/email`, the sender gate (blocklist + DKIM), the `email` thread type and its instructions, the Cloudflare Worker docs | — (uses the identity provider for `act_as` if one is present) |
 | `google` | Google OAuth, the encrypted connection secrets, the `gmail_*` tools, the Connections card | — |
 
+| `mailbox` | (new, no legacy wiring) IMAP/SMTP mailboxes: the poller, the `mail` thread type, the `mail_*` tools, `/api/mailboxes`, and a Connections card. See `mailbox-integration.md` | — |
+
+## Mailbox integration (IMAP/SMTP)
+
+Added 2026-10-25 (`integrations/mailbox/`, design and operations in `mailbox-integration.md`). It is the first integration with no legacy counterpart, so it exists only where it is listed. On a Crontal-backed instance, use `HANDLER_I_<NAME>__INTEGRATIONS=crontal,mailbox`: setting the list switches Crontal to its integration, which phase 2 proved identical to the legacy wiring. Email intake and Google stay on legacy wiring in every case. Startup warns if `CRONTAL_*` is set but `crontal` is missing from the list.
+
+It contributes the following:
+- Thread type `mail`, added as a built-in `ThreadType` so stored threads always parse, with a `threads.mail` settings entry.
+- A `mail.received` turn renderer (registered through `run.register_event_renderer`).
+- Thread guidance and a tool hint (`instructions.register_guidance` / `register_tool_hint`).
+- The `/api/mailboxes` router, the `mail_*` tool set, and a `mailbox-poller` background task.
+- UI manifest entries for a `connection` card and the `thread_type`.
+
+Its `mail_*` tables are created lazily in the instance's own store, so a core-only instance has none.
+
 ## Decisions
 
 1. **Split into three integrations**, not one Crontal bundle: email intake and Gmail are useful without Crontal (e.g. on the personal instance).

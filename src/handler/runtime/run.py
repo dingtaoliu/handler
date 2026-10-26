@@ -17,7 +17,7 @@ import re
 import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .bus import BusMessage, RunEventBus
 from .context import RunContext, current_run, reset_current_run, set_current_run
@@ -109,6 +109,15 @@ def chat_override(events: list[Event]) -> tuple[str | None, str | None]:
     return model, effort
 
 
+# Turn text for integration-defined event types (e.g. "mail.received"); pure
+# functions of the payload, so one process-wide table serves every instance.
+EVENT_RENDERERS: dict[str, Callable[[dict, str], str]] = {}
+
+
+def register_event_renderer(event_type: str, render: Callable[[dict, str], str]) -> None:
+    EVENT_RENDERERS[event_type] = render
+
+
 def render_turn(events: list[Event]) -> str:
     """Render pending events as one turn for the harness.
 
@@ -121,6 +130,8 @@ def render_turn(events: list[Event]) -> str:
             parts.append(str(ev.payload.get("text", "")))
         elif ev.type == "email.received":
             parts.append(render_email_event(ev.payload, ev.source))
+        elif ev.type in EVENT_RENDERERS:
+            parts.append(EVENT_RENDERERS[ev.type](ev.payload, ev.source))
         else:
             body = json.dumps(ev.payload, ensure_ascii=False, default=str)
             parts.append(f'<event type="{ev.type}" source="{ev.source}">\n{body}\n</event>')

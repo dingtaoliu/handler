@@ -437,6 +437,14 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             base_path=base_path, reserved_thread_types=CORE_THREAD_TYPES)
         logger.info("integrations enabled", extra={"instance": instance_name or "main",
                                                    "integrations": integrations.names})
+        if "crontal" not in integrations.names and (args.crontal_url
+                                                   or env.get("CRONTAL_AGENT_TOKEN")):
+            # Setting the list replaces the legacy wiring: e.g. "mailbox" alone
+            # turns Crontal off here. Use "crontal,mailbox" to keep it.
+            logger.warning("CRONTAL_* is set but the crontal integration is not enabled; "
+                           "this instance has no Crontal tools, webhooks or sink",
+                           extra={"instance": instance_name or "main",
+                                  "integrations": integrations.names})
     # Legacy crontal wiring runs only when HANDLER_INTEGRATIONS is unset; once it
     # is set, Crontal comes from the `crontal` integration (or not at all).
     legacy_crontal = not integrations.configured
