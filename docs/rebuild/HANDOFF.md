@@ -163,7 +163,7 @@ Working mode: the main session acts as architect and hands implementation to bac
 
 Measured on a Heroku dyno: same uid as Handler, `unprivileged_userns_clone=0` so bwrap fails, and Codex already runs with `danger-full-access` on `crontal-agent`. Code must not run on the Handler dyno. Recommended: option B, a separate sandbox dyno per instance from the same image, with no secrets and no DB, driven over HTTP behind a `Sandbox` interface. E2B can be swapped in later. Awaiting the owner's go-ahead.
 
-**In progress 2026-10-25: IMAP/SMTP mailbox integration.** It supports several mailboxes per instance, connected from Crontal. First mailbox: `sales@yeup-tube.com` (chengmail.cn: IMAP 143 STARTTLS or 993 TLS, SMTP 587 STARTTLS or 465). Reachable from Heroku. The server has no IDLE, so Handler polls. Yeup is Crontal merchant 298, and the owner is choosing which instance gets it.
+**Built 2026-10-25, not merged: IMAP/SMTP mailbox integration** (branch `feat/mailbox-integration`, `docs/rebuild/mailbox-integration.md`; Crontal side on hephaestus `feat/handler-mailboxes`). Enable per instance with `HANDLER_I_<NAME>__INTEGRATIONS=crontal,mailbox`. It supports several mailboxes per instance, connected from Crontal. First mailbox: `sales@yeup-tube.com` (chengmail.cn: IMAP 143 STARTTLS or 993 TLS, SMTP 587 STARTTLS or 465). Reachable from Heroku. The server has no IDLE, so Handler polls. Yeup is Crontal merchant 298, and the owner is choosing which instance gets it.
 
 **Waiting on the owner:**
 - Rotate the OpenAI key (`OPENAI_API_KEY` on Crontal, `CODEX_API_KEY` on `crontal-agent`) and the Bucketeer keys.

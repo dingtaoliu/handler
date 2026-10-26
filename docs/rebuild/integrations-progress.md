@@ -90,3 +90,11 @@ are set), matching legacy; no startup failure for missing Crontal vars.
 
 Next: phase 2 step 2, `email_intake` (same pattern: gate the legacy block on
 `not integrations.configured`, parity test like the crontal one).
+
+## Mailbox integration — status (2026-10-25)
+
+Branch `feat/mailbox-integration`. New in-tree integration `mailbox` (IMAP ingress, SMTP egress), see
+`mailbox-integration.md`. It has no legacy block; enable it per instance with
+`HANDLER_I_<NAME>__INTEGRATIONS=crontal,mailbox`. Core hooks added for integrations:
+`run.register_event_renderer`, `instructions.register_guidance` / `register_tool_hint`,
+`_GUIDANCE.get` (unknown thread types no longer KeyError), `ThreadType.MAIL`, `threads.mail` settings.

@@ -37,6 +37,7 @@ class ThreadType(StrEnum):
     AUTOMATION = "automation"
     CRONTAL = "crontal"  # Crontal notifications (RFQs, bids, ...), per entity
     EMAIL = "email"  # mail forwarded to the intake address, per email conversation
+    MAIL = "mail"  # IMAP mailbox integration, per mailbox conversation
 
     # Integration-defined thread types. `ThreadType(name)` also accepts any name
     # registered here (integrations register theirs when an instance loads them),

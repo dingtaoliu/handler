@@ -86,14 +86,19 @@ class ThreadsSettings(Section):
                                     description="Notifications from Crontal (RFQs, bids).")
     email: ThreadSettings = Field(default_factory=ThreadSettings, title="Email intake",
                                   description="Emails forwarded to the intake address.")
+    mail: ThreadSettings = Field(default_factory=ThreadSettings, title="Mailboxes",
+                                 description="New mail in connected IMAP mailboxes.")
 
     @model_validator(mode="before")
     @classmethod
     def _email_like_crontal(cls, value: Any) -> Any:
-        # Instances saved before the email type existed: start it like crontal
-        # (same background work, same harness), not on the bare default.
-        if isinstance(value, dict) and "email" not in value and "crontal" in value:
-            return {**value, "email": value["crontal"]}
+        # Instances saved before the email/mail types existed: start them like
+        # the closest background type (same harness), not on the bare default.
+        if isinstance(value, dict):
+            if "email" not in value and "crontal" in value:
+                value = {**value, "email": value["crontal"]}
+            if "mail" not in value and ("email" in value or "crontal" in value):
+                value = {**value, "mail": value.get("email") or value["crontal"]}
         return value
 
 
