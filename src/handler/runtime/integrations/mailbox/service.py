@@ -43,6 +43,7 @@ from .events import EVENT_TYPE, THREAD_TYPE
 from .message import MailMessage, normalize_subject, is_reply_subject, parse_message
 from .store import MailStore
 from .transport import (
+    CONNECT_TIMEOUT_SECONDS,
     FolderInfo,
     MailAuthError,
     MailError,
@@ -59,6 +60,7 @@ MAX_EVENT_BODY_CHARS = 20_000
 SUBJECT_WINDOW_DAYS = 60
 MAX_PARTICIPANTS = 50
 DEFAULT_MAX_WAKES_PER_HOUR = 30
+TEST_TIMEOUT_SECONDS = 12.0
 SENT_NAMES = ("sent", "sent messages", "sent items", "sent mail", "已发送", "已發送",
               "已发送邮件", "寄件備份", "发件箱")
 DRAFT_NAMES = ("drafts", "draft", "草稿箱", "草稿", "草稿夹")
@@ -141,12 +143,14 @@ class MailboxService:
         return value
 
     @staticmethod
-    def params(source: Mailbox | MailboxTest, password: str, which: str) -> ServerParams:
+    def params(source: Mailbox | MailboxTest, password: str, which: str, *,
+               timeout: float = CONNECT_TIMEOUT_SECONDS) -> ServerParams:
         username = getattr(source, "username", None) or source.email
         return ServerParams(
             host=getattr(source, f"{which}_host"), port=int(getattr(source, f"{which}_port")),
             security=getattr(source, f"{which}_security"), username=username,
-            password=password, allow_self_signed=bool(source.allow_self_signed))
+            password=password, allow_self_signed=bool(source.allow_self_signed),
+            timeout=timeout)
 
     async def delete(self, mailbox: Mailbox) -> None:
         if mailbox.secret_ref:
@@ -166,33 +170,43 @@ class MailboxService:
                         "smtp": {"ok": False, "error": str(exc)}}
         imap: dict[str, Any] = {"ok": False}
         smtp: dict[str, Any] = {"ok": False}
-        try:
-            session = await asyncio.to_thread(
-                self.transport.open_imap, self.params(source, password, "imap"))
+
+        async def check_imap() -> None:
             try:
-                folders = await asyncio.to_thread(session.list_folders)
-                inbox = await asyncio.to_thread(session.select, "INBOX", readonly=True)
-                imap.update(ok=True, folders=[f.name for f in folders][:100],
-                            sent_folder=special_folder(folders, "\\Sent", SENT_NAMES),
-                            drafts_folder=special_folder(folders, "\\Drafts", DRAFT_NAMES),
-                            inbox_messages=inbox.exists,
-                            idle="IDLE" in session.capabilities,
-                            capabilities=sorted(session.capabilities))
-            finally:
-                await asyncio.to_thread(session.logout)
-        except MailError as exc:
-            imap["error"] = redact(str(exc), password)
-        except Exception as exc:  # noqa: BLE001
-            imap["error"] = redact(f"{type(exc).__name__}: {exc}", password)
-        try:
-            client = await asyncio.to_thread(
-                self.transport.open_smtp, self.params(source, password, "smtp"))
-            smtp.update(ok=True, auth=list(client.auth_mechanisms))
-            await asyncio.to_thread(client.close)
-        except MailError as exc:
-            smtp["error"] = redact(str(exc), password)
-        except Exception as exc:  # noqa: BLE001
-            smtp["error"] = redact(f"{type(exc).__name__}: {exc}", password)
+                session = await asyncio.to_thread(
+                    self.transport.open_imap,
+                    self.params(source, password, "imap", timeout=TEST_TIMEOUT_SECONDS))
+                try:
+                    folders = await asyncio.to_thread(session.list_folders)
+                    inbox = await asyncio.to_thread(session.select, "INBOX", readonly=True)
+                    imap.update(ok=True, folders=[f.name for f in folders][:100],
+                                sent_folder=special_folder(folders, "\\Sent", SENT_NAMES),
+                                drafts_folder=special_folder(folders, "\\Drafts", DRAFT_NAMES),
+                                inbox_messages=inbox.exists,
+                                idle="IDLE" in session.capabilities,
+                                capabilities=sorted(session.capabilities))
+                finally:
+                    await asyncio.to_thread(session.logout)
+            except MailError as exc:
+                imap["error"] = redact(str(exc), password)
+            except Exception as exc:  # noqa: BLE001
+                imap["error"] = redact(f"{type(exc).__name__}: {exc}", password)
+
+        async def check_smtp() -> None:
+            try:
+                client = await asyncio.to_thread(
+                    self.transport.open_smtp,
+                    self.params(source, password, "smtp", timeout=TEST_TIMEOUT_SECONDS))
+                smtp.update(ok=True, auth=list(client.auth_mechanisms))
+                await asyncio.to_thread(client.close)
+            except MailError as exc:
+                smtp["error"] = redact(str(exc), password)
+            except Exception as exc:  # noqa: BLE001
+                smtp["error"] = redact(f"{type(exc).__name__}: {exc}", password)
+
+        # Both at once with short timeouts: the answer must beat Heroku's 30 s
+        # router timeout when Crontal proxies the test.
+        await asyncio.gather(check_imap(), check_smtp())
         return {"ok": imap["ok"] and smtp["ok"], "imap": imap, "smtp": smtp}
 
     # ── polling ────────────────────────────────────────────────────────────
