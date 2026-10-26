@@ -151,3 +151,29 @@ def test_curated_crontal_tools_are_classified():
     assert policy.decide(EMAIL, curated("app_add_demand_listings"), {})[0] == Decision.ALLOW
     assert policy.decide(EMAIL, curated("app_define_shape"), {})[0] == Decision.ASK
     assert policy.decide(CHAT, curated("app_publish_rfq"), {})[0] == Decision.ALLOW
+
+
+MAIL = RunContext(run_id="r", thread_key="mail:mbx1:conv1")
+
+
+def test_mailbox_threads_are_untrusted(call_spec):
+    """Anyone can email a connected mailbox, so its threads get the same floor."""
+    policy = GrantPolicy(PROD)
+    for method, path, body in OUTWARD:
+        decision, reason = policy.decide(MAIL, call_spec, {"method": method, "path": path,
+                                                           "json": body})
+        assert decision == Decision.ASK, (method, path)
+        assert "mail thread carries outside input" in reason
+    for method, path, body in INSIDE:
+        decision, _ = policy.decide(MAIL, call_spec, {"method": method, "path": path,
+                                                      "json": body})
+        assert decision == Decision.ALLOW, (method, path)
+
+
+def test_mailbox_drafts_stay_allowed_but_memory_does_not():
+    policy = GrantPolicy({"actions": {"mail.*": "allow", "memory.*": "allow"}})
+    assert policy.decide(MAIL, spec("mail.draft_reply", Risk.WRITE_INTERNAL), {})[0] \
+        == Decision.ALLOW
+    assert policy.decide(MAIL, spec("memory.write", Risk.WRITE_INTERNAL), {})[0] \
+        == Decision.ASK
+    assert policy.decide(MAIL, spec("shell.exec", Risk.EXEC), {})[0] == Decision.ASK

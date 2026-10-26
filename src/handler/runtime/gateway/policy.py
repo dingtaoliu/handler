@@ -1,6 +1,7 @@
 """Grant policy: exact action, then longest glob, then risk default, then ask.
 
-Threads fed by outside input (email intake, Crontal notifications, Gmail) get
+Threads fed by outside input (email intake, Crontal notifications, Gmail,
+connected IMAP mailboxes) get
 a floor on top: their content is written by people outside the merchant, so
 a call that sends the merchant's data outside it (publish, submit, message,
 share, send mail...), runs code, or persists beyond the thread (memory,
@@ -30,12 +31,13 @@ DEFAULT_RISK_DECISIONS = {
 }
 
 # Thread types (the thread key's prefix) whose turns carry outside input.
-UNTRUSTED_THREAD_TYPES = frozenset({"email", "crontal", "gmail"})
+UNTRUSTED_THREAD_TYPES = frozenset({"email", "crontal", "gmail", "mail"})
 # write_internal actions that stay inside the thread or the merchant, so they
 # may still run unasked there. Every other write_internal (memory, automations,
 # future tools) persists into what other threads read and needs approval.
 INSIDE_ACTIONS = frozenset({
     "thread.set_title", "notify.send", "gmail.create_draft", "gmail.update_draft",
+    "mail.draft_reply",
 })
 
 
