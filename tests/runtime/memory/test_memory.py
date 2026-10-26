@@ -16,18 +16,20 @@ from handler.runtime.memory import MemoryTools
 from handler.runtime.settings import SettingsConflict, SettingsService
 from handler.runtime.store.sqlite import SQLiteCore
 from handler.runtime.store.sqlite_memory import MemoryMixin, NotificationMixin, SettingsMixin
+from handler.runtime.store.sqlite_users import User, UsersMixin
 from handler.runtime.tools.notify import NotifyTools
 from handler.runtime.types import MemoryTopic, Risk, ThreadType
 from handler.runtime.web.settings_api import settings_router
 
 
-class _Store(MemoryMixin, SettingsMixin, NotificationMixin, SQLiteCore):
+class _Store(MemoryMixin, SettingsMixin, NotificationMixin, UsersMixin, SQLiteCore):
     pass
 
 
 @pytest.fixture
 async def store(tmp_path):
     instance = _Store(tmp_path / "memory.db")
+    await instance.create_user(User("alice", "Alice"))
     yield instance
     await instance.close()
 
@@ -66,22 +68,22 @@ async def test_tools_and_concurrent_append(store, ctx):
         for text in ("second", "third")
     ])
     assert all(not result.is_error for result in results)
-    topic = await store.get_topic("people/alice")
+    topic = await memory.get_visible("bob", "people/alice")
     assert set(topic.content.split("\n\n")) == {"first", "second", "third"}
     assert topic.version == 3 and topic.updated_by == "bob"
     assert (await invoke(memory, "memory_read", ctx, name=topic.name)).content == topic.content
     assert (await invoke(memory, "memory_list", ctx)).content == "people/alice: Updated"
-    assert await memory.index_text(7) == "people/"
-    assert await memory.index_text(0) == ""
+    assert await memory.index_text(7, user_id="bob") == "people/"
+    assert await memory.index_text(0, user_id="bob") == ""
     assert (await invoke(memory, "memory_rewrite", ctx, name=topic.name,
                          content="replacement", description="New")).is_error is False
     await invoke(memory, "memory_save", ctx, name="occupied", content="keep", description="")
     assert (await invoke(memory, "memory_rewrite", ctx, name=topic.name, content="bad",
                          description="", new_name="occupied")).is_error
-    assert (await store.get_topic("occupied")).content == "keep"
+    assert (await memory.get_visible("bob", "occupied")).content == "keep"
     assert not (await invoke(memory, "memory_rewrite", ctx, name=topic.name,
                             content="moved", description="Moved", new_name="people/bob")).is_error
-    assert await store.get_topic(topic.name) is None
+    assert await memory.get_visible("bob", topic.name) is None
     assert (await invoke(memory, "memory_delete", ctx, name="people/bob")).content == {"deleted": True}
     assert (await invoke(memory, "memory_read", ctx, name="missing")).is_error
     assert (await invoke(memory, "memory_rewrite", ctx, name="missing", content="", description="")).is_error
@@ -188,14 +190,16 @@ async def test_seeding(store, tmp_path):
 async def test_instructions(store, thread_type, guidance):
     service = SettingsService(store)
     await service.put("persona", {"system": "System", "identity": "Identity", "persona": "Persona"}, None, None)
-    await store.put_topic(MemoryTopic("people/alice", "Alice", "private detail"), None)
-    instructions = await build_instructions(service, MemoryTools(store), speaker="alice", thread_type=thread_type)
+    memory = MemoryTools(store)
+    await memory.put_visible("alice", MemoryTopic("people/alice", "Alice", "private detail"), None)
+    instructions = await build_instructions(service, memory, speaker="alice",
+                                             thread_type=thread_type, user_id="alice")
     for fragment in ["System\n\nIdentity\n\nPersona", "# Memory", "people/alice: Alice",
                      "memory_read", "You are talking with alice", guidance,
                      "Durable facts go to memory_save, not files."]:
         assert fragment in instructions
     assert "private detail" not in instructions
-    anonymous = await build_instructions(service, MemoryTools(store), speaker=None, thread_type=thread_type)
+    anonymous = await build_instructions(service, memory, speaker=None, thread_type=thread_type)
     assert "You are talking with" not in anonymous
 
 
@@ -249,11 +253,15 @@ async def test_api(store, ctx):
         assert (await client.get("/api/settings/unknown")).status_code == 404
         assert (await client.put("/api/settings/unknown", json={})).status_code == 404
         notification = await store.add_notification("alice", ctx.thread_key, ctx.run_id, "test")
-        response = await client.get("/api/notifications", params={"user_id": "alice", "unread_only": True})
+        acting = {"X-Handler-User": "alice"}
+        response = await client.get("/api/notifications", params={"user_id": "alice", "unread_only": True},
+                                    headers=acting)
         assert response.json()[0]["id"] == notification.id
-        assert (await client.post(f"/api/notifications/{notification.id}/read")).status_code == 200
-        assert (await client.get("/api/notifications", params={"user_id": "alice", "unread_only": True})).json() == []
-        assert (await client.post("/api/notifications/missing/read")).status_code == 404
+        assert (await client.post(f"/api/notifications/{notification.id}/read",
+                                  headers=acting)).status_code == 200
+        assert (await client.get("/api/notifications", params={"user_id": "alice", "unread_only": True},
+                                 headers=acting)).json() == []
+        assert (await client.post("/api/notifications/missing/read", headers=acting)).status_code == 404
 
 
 async def test_persistence_and_clock(tmp_path):

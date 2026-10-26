@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from ..auth import Authenticator, Principal, can_see_thread
+from ..auth import Authenticator, Principal, can_access_thread
 from ..types import ApprovalStatus
 from .gateway import Gateway
 
@@ -52,12 +52,16 @@ def approvals_router(gateway: Gateway, store: Any, auth: Authenticator) -> APIRo
         except ValueError:
             raise HTTPException(422, f"unknown status: {status}")
         approvals = await store.list_approvals(wanted, limit)
-        return [_json(a) for a in approvals if can_see_thread(principal, a.thread_key)]
+        visible = []
+        for approval in approvals:
+            if await can_access_thread(store, principal, approval.thread_key):
+                visible.append(_json(approval))
+        return visible
 
     @router.get("/api/approvals/{approval_id}")
     async def get_approval(approval_id: str, principal: Principal = user):
         approval = await store.get_approval(approval_id)
-        if approval is None or not can_see_thread(principal, approval.thread_key):
+        if approval is None or not await can_access_thread(store, principal, approval.thread_key):
             raise HTTPException(404, "approval not found")
         return _json(approval)
 
@@ -77,7 +81,7 @@ def approvals_router(gateway: Gateway, store: Any, auth: Authenticator) -> APIRo
 
     async def _check_visible(approval_id: str, principal: Principal) -> None:
         approval = await store.get_approval(approval_id)
-        if approval is not None and not can_see_thread(principal, approval.thread_key):
+        if approval is not None and not await can_access_thread(store, principal, approval.thread_key):
             raise HTTPException(404, "approval not found")
 
     async def _decided(approval_id: str, approval: Any):
@@ -90,8 +94,13 @@ def approvals_router(gateway: Gateway, store: Any, auth: Authenticator) -> APIRo
     @router.get("/api/audit")
     async def audit(
         run_id: str | None = None, limit: int = 200,
-        _: Principal = Depends(auth.require_admin),
+        principal: Principal = Depends(auth.require_admin),
     ):
-        return [_json(e) for e in await store.list_audit(run_id, limit)]
+        visible = []
+        for entry in await store.list_audit(run_id, limit):
+            run = await store.get_run(entry.run_id)
+            if run is not None and await can_access_thread(store, principal, run.thread_key):
+                visible.append(_json(entry))
+        return visible
 
     return router

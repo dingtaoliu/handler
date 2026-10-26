@@ -28,7 +28,6 @@ from pydantic import BaseModel
 from ..auth import Authenticator, Principal
 from ..gateway.google_oauth import (
     CALLBACK_PATH,
-    INSTANCE_OWNER,
     GoogleOAuth,
     OAuthError,
     user_owner,
@@ -120,10 +119,9 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *,
     user = Depends(auth.require_principal)
 
     def owner_for(principal: Principal) -> str:
-        # A bare instance admin key has no Handler user. Keep its operator flow
-        # on the legacy instance owner; user tokens, trusted devices and an
-        # admin key acting as a user all get an isolated account.
-        return user_owner(principal.user_id) if principal.user_id else INSTANCE_OWNER
+        if principal.user_id is None:
+            raise HTTPException(400, "X-Handler-User is required for Google connections")
+        return user_owner(principal.user_id)
 
     def configured() -> GoogleOAuth:
         if oauth is None:

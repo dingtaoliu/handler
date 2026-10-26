@@ -34,7 +34,8 @@ async def test_memory_crud_and_conflict(client, world):
     assert r.status_code == 200
     body = r.json()
     assert body["version"] == 1 and body["updated_by"] == "alice" and body["size"] == 9
-    listing = (await client.get("/api/memory", headers=world.h("bob"))).json()
+    assert (await client.get("/api/memory", headers=world.h("bob"))).json() == []
+    listing = (await client.get("/api/memory", headers=alice)).json()
     assert [t["name"] for t in listing] == ["people/danny"]
     assert "content" not in listing[0]
     got = (await client.get("/api/memory/people/danny", headers=alice)).json()
@@ -57,6 +58,21 @@ async def test_memory_crud_and_conflict(client, world):
     assert (await client.delete("/api/memory/people/danny", headers=alice)).status_code == 200
     assert (await client.delete("/api/memory/people/danny", headers=alice)).status_code == 404
     assert (await client.get("/api/memory/people/danny", headers=alice)).status_code == 404
+
+
+async def test_memory_is_private_unless_shared_is_explicit(client, world):
+    alice, bob = world.h("alice"), world.h("bob")
+    assert (await client.put("/api/memory/preferences", headers=alice,
+                             json={"content": "private", "description": "mine"})).status_code == 200
+    assert (await client.get("/api/memory/preferences", headers=bob)).status_code == 404
+    assert (await client.put("/api/memory/shared/household", headers=alice,
+                             json={"content": "shared", "description": "ours"})).status_code == 200
+    assert (await client.get("/api/memory/shared/household", headers=bob)
+            ).json()["content"] == "shared"
+    assert {item["name"] for item in (await client.get("/api/memory", headers=bob)).json()} == {
+        "shared/household"}
+    admin_key = {"Authorization": "Bearer test-admin-key-0123456789"}
+    assert (await client.get("/api/memory", headers=admin_key)).status_code == 400
 
 
 async def test_memory_name_validation(client, world):
@@ -82,25 +98,26 @@ async def test_automation_lifecycle(client, world):
     assert a["next_run_at"] and a["thread_key"] == f"automation:{a['id']}"
     assert a["last_run"] is None and a["notify"] == ["alice"] and a["spec"] == "every 1h"
 
-    assert len((await client.get("/api/automations", headers=bob)).json()) == 1
-    # a member can't touch someone else's automation; an admin can
+    assert (await client.get("/api/automations", headers=bob)).json() == []
+    # Roles do not grant access to someone else's automation.
     assert (await client.patch(f"/api/automations/{a['id']}", headers=bob,
-                               json={"name": "x"})).status_code == 403
-    assert (await client.delete(f"/api/automations/{a['id']}", headers=bob)).status_code == 403
-    assert (await client.post(f"/api/automations/{a['id']}/run", headers=bob)).status_code == 403
+                               json={"name": "x"})).status_code == 404
+    assert (await client.delete(f"/api/automations/{a['id']}", headers=bob)).status_code == 404
+    assert (await client.post(f"/api/automations/{a['id']}/run", headers=bob)).status_code == 404
 
     p = await client.patch(f"/api/automations/{a['id']}", headers=alice,
                            json={"schedule": "at: 2999-01-01T00:00", "enabled": True})
     assert p.json()["one_shot"] is True and p.json()["next_run_at"].startswith("2999-01-01")
-    off = await client.patch(f"/api/automations/{a['id']}", headers=root, json={"enabled": False})
-    assert off.json()["enabled"] is False
+    assert (await client.patch(f"/api/automations/{a['id']}", headers=root,
+                               json={"enabled": False})).status_code == 404
     assert (await client.patch(f"/api/automations/{a['id']}", headers=alice,
                                json={"schedule": "bogus"})).status_code == 422
     assert (await client.patch(f"/api/automations/{a['id']}", headers=alice,
                                json={"name": None})).status_code == 422
     assert (await client.patch("/api/automations/nope", headers=alice, json={})).status_code == 404
 
-    assert (await client.delete(f"/api/automations/{a['id']}", headers=root)).status_code == 200
+    assert (await client.delete(f"/api/automations/{a['id']}", headers=root)).status_code == 404
+    assert (await client.delete(f"/api/automations/{a['id']}", headers=alice)).status_code == 200
     assert (await client.get("/api/automations", headers=alice)).json() == []
 
 
@@ -116,10 +133,9 @@ async def test_automation_run_now(client, world):
     before = a["next_run_at"]
     r1 = await client.post(f"/api/automations/{a['id']}/run", headers=world.h("alice"))
     r2 = await client.post(f"/api/automations/{a['id']}/run", headers=world.h("root"))
-    assert r1.status_code == r2.status_code == 200
-    assert r1.json()["event_id"] != r2.json()["event_id"]
+    assert r1.status_code == 200 and r2.status_code == 404
     events = await world.store.pending_events(a["thread_key"])
-    assert len(events) == 2
+    assert len(events) == 1
     assert all(e.type == "automation.fired" and f"automation:{a['id']}:manual:" in e.idempotency_key
                for e in events)
     thread = await world.store.get_thread(a["thread_key"])
@@ -139,7 +155,8 @@ async def test_automation_last_run(client, world):
               finished_at=utcnow(), error="boom")
     await world.store.create_run(lease, run)
     await world.store.finish_run(lease, run)
-    last = (await client.get("/api/automations", headers=world.h("bob"))).json()[0]["last_run"]
+    assert (await client.get("/api/automations", headers=world.h("bob"))).json() == []
+    last = (await client.get("/api/automations", headers=world.h("alice"))).json()[0]["last_run"]
     assert last["status"] == "failed" and last["error"] == "boom" and last["finished_at"]
 
 
@@ -168,18 +185,14 @@ async def test_usage_aggregation_and_visibility(client, world):
 
     alice = (await client.get("/api/usage", headers=world.h("alice"))).json()
     assert alice["totals"] == {
-        "input_tokens": 110, "cached_input_tokens": 40, "output_tokens": 11,
-        "reasoning_tokens": 4, "cost_usd": 0.75, "runs": 2}
-    assert {t["thread_key"] for t in alice["by_thread"]} == {"chat:alice:c", "gmail:inbox"}
+        "input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 10,
+        "reasoning_tokens": 4, "cost_usd": 0.5, "runs": 1}
+    assert {t["thread_key"] for t in alice["by_thread"]} == {"chat:alice:c"}
     assert [m["model"] for m in alice["by_model"]] == ["m1"]
-    assert len(alice["by_day"]) == 1 and alice["by_day"][0]["runs"] == 2
+    assert len(alice["by_day"]) == 1 and alice["by_day"][0]["runs"] == 1
 
     root = (await client.get("/api/usage?days=90", headers=world.h("root"))).json()
-    assert root["totals"]["runs"] == 4 and root["totals"]["input_tokens"] == 1117
-    assert root["by_thread"][0]["thread_key"] == "chat:bob:c"
-    assert root["by_thread"][0]["cost_usd"] is None  # unpriced
-    assert {m["model"] for m in root["by_model"]} == {"m1", "m2"}
-    assert len(root["by_day"]) == 2
+    assert root["totals"]["runs"] == 0 and root["by_thread"] == []
     assert (await client.get("/api/usage?days=0", headers=world.h("root"))).status_code == 422
 
 
@@ -204,7 +217,7 @@ async def test_connections_scoping(client, world):
     assert set(mine[0]) == {"id", "connector", "owner", "provider", "status", "scopes",
                             "last_used_at"}
     everyone = (await client.get("/api/connections", headers=world.h("root"))).json()
-    assert len(everyone) == 3
+    assert everyone == []
     assert "SECRET" not in json.dumps(everyone)
 
 
@@ -223,13 +236,13 @@ async def test_upload_roundtrip_and_access(client, world):
 
     dl = await client.get(f"/api/uploads/{a['id']}", headers=world.h("alice"))
     assert dl.content == b"hello" and "attachment" in dl.headers["content-disposition"]
-    assert (await client.get(f"/api/uploads/{a['id']}", headers=world.h("root"))).content == b"hello"
+    assert (await client.get(f"/api/uploads/{a['id']}", headers=world.h("root"))).status_code == 404
     assert (await client.get(f"/api/uploads/{a['id']}", headers=world.h("bob"))).status_code == 404
     assert (await client.delete(f"/api/uploads/{a['id']}", headers=world.h("bob"))).status_code == 404
 
     assert len((await client.get("/api/uploads", headers=world.h("alice"))).json()) == 2
     assert (await client.get("/api/uploads", headers=world.h("bob"))).json() == []
-    assert len((await client.get("/api/uploads", headers=world.h("root"))).json()) == 2
+    assert (await client.get("/api/uploads", headers=world.h("root"))).json() == []
 
     assert (await client.delete(f"/api/uploads/{a['id']}", headers=world.h("alice"))).status_code == 200
     assert (await client.get(f"/api/uploads/{a['id']}", headers=world.h("alice"))).status_code == 404

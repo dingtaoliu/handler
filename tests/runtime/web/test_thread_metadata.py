@@ -85,12 +85,12 @@ async def test_list_activity_order_shared_threads_and_api_auth(db):
                                 headers={"Authorization": f"Bearer {token}"}) as client:
         rows = (await client.get("/api/threads?user_id=one")).json()
         assert rows[0]["key"] == "chat:one:old"
-        assert {r["key"] for r in rows} == {"chat:one:old", "chat:one:new", "automation:shared"}
+        assert {r["key"] for r in rows} == {"chat:one:old", "chat:one:new"}
         assert rows[0]["unread"]
         assert (await client.put("/api/threads/chat:two:private/title", json={"title": "bad"})).status_code == 404
-        assert (await client.put("/api/threads/automation:shared/title", json={"title": "bad"})).status_code == 403
+        assert (await client.put("/api/threads/automation:shared/title", json={"title": "bad"})).status_code == 404
         assert (await client.put("/api/threads/chat:one:old/title", json={"title": "Mine"})).json()["title"] == "Mine"
         assert (await client.post("/api/threads/chat:one:old/read", json={"last_message_at": (now + timedelta(seconds=3)).isoformat()})).status_code == 200
         assert not (await client.get("/api/threads?user_id=one")).json()[0]["unread"]
         assert (await client.post("/api/threads/chat:one:old/read", json={"last_message_at": "2026-10-18T00:00:00"})).status_code == 422
-        assert (await client.post("/api/threads/chat:one:old/read", json={}, headers={"Authorization": "Bearer admin"})).status_code == 400
+        assert (await client.post("/api/threads/chat:one:old/read", json={}, headers={"Authorization": "Bearer admin"})).status_code == 404

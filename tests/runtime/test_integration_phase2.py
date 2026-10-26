@@ -111,7 +111,7 @@ async def test_approval_resolution_is_routed_into_the_requesting_thread(tmp_path
     approval_id = pending.content["approval_id"]
     approval = await gateway.approve(approval_id, decided_by="danny")
     assert approval.status is ApprovalStatus.EXECUTED
-    assert (await store.get_topic("notes")).content == "x"
+    assert (await MemoryTools(store).get_visible("danny", "notes")).content == "x"
 
     events = await store.pending_events(key)
     assert [e.type for e in events] == ["chat.message", "approval.resolved"]

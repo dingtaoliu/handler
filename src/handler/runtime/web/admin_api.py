@@ -14,7 +14,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 
-from ..auth import Authenticator, Principal, can_see_thread
+from ..auth import Authenticator, Principal
 from ..context import RunContext
 from ..gateway.gateway import Gateway
 from ..memory import MemoryTools
@@ -133,6 +133,7 @@ def admin_router(
     router = APIRouter()
     user = Depends(auth.require_principal)
     admin = Depends(auth.require_admin)
+    memory = MemoryTools(store)
 
     # ---- memory ----------------------------------------------------------
 
@@ -142,13 +143,18 @@ def admin_router(
         except ValueError as exc:
             raise HTTPException(422, str(exc))
 
+    def identity(principal: Principal) -> str:
+        if principal.user_id is None:
+            raise HTTPException(400, "X-Handler-User is required for private resources")
+        return principal.user_id
+
     @router.get("/api/memory")
-    async def list_memory(_: Principal = user) -> list:
-        return [_topic_summary(t) for t in await store.list_topics()]
+    async def list_memory(principal: Principal = user) -> list:
+        return [_topic_summary(t) for t in await memory.list_visible(identity(principal))]
 
     @router.get("/api/memory/{name:path}")
-    async def get_memory(name: str, _: Principal = user) -> dict:
-        topic = await store.get_topic(topic_name(name))
+    async def get_memory(name: str, principal: Principal = user) -> dict:
+        topic = await memory.get_visible(identity(principal), topic_name(name))
         if topic is None:
             raise HTTPException(404, "Topic not found")
         return {**_topic_summary(topic), "content": topic.content}
@@ -157,18 +163,19 @@ def admin_router(
     async def put_memory(name: str, body: MemoryBody, if_match: str | None = Header(None),
                          principal: Principal = user) -> dict:
         name = topic_name(name)
+        user_id = identity(principal)
         try:
             expected = int(if_match.strip().strip('"')) if if_match is not None else None
         except ValueError:
             raise HTTPException(422, "If-Match must contain an integer version")
         for _attempt in range(3):
-            current = await store.get_topic(name)
+            current = await memory.get_visible(user_id, name)
             if expected is None:
                 version = current.version if current else None  # last write wins
             else:
                 version = expected
             topic = MemoryTopic(name, body.description, body.content, updated_by=principal.identity)
-            stored = await store.put_topic(topic, version)
+            stored = await memory.put_visible(user_id, topic, version)
             if stored is not None:
                 return {**_topic_summary(stored), "content": stored.content}
             if expected is not None:
@@ -176,8 +183,8 @@ def admin_router(
         raise HTTPException(409, "Memory version conflict")
 
     @router.delete("/api/memory/{name:path}")
-    async def delete_memory(name: str, _: Principal = user) -> dict:
-        if not await store.delete_topic(topic_name(name)):
+    async def delete_memory(name: str, principal: Principal = user) -> dict:
+        if not await memory.delete_visible(identity(principal), topic_name(name)):
             raise HTTPException(404, "Topic not found")
         return {"deleted": True}
 
@@ -200,8 +207,8 @@ def admin_router(
         schedule = await store.get_schedule(schedule_id)
         if schedule is None:
             raise HTTPException(404, "Automation not found")
-        if not principal.is_admin and schedule.created_by != principal.user_id:
-            raise HTTPException(403, "Only the owner or an admin can change this automation")
+        if principal.user_id is None or schedule.created_by != principal.user_id:
+            raise HTTPException(404, "Automation not found")
         return schedule
 
     def next_run(spec: str, tz: str) -> tuple[datetime | None, bool]:
@@ -211,11 +218,14 @@ def admin_router(
             raise HTTPException(422, str(exc))
 
     @router.get("/api/automations")
-    async def list_automations(_: Principal = user) -> list:
-        return [await render_schedule(s) for s in await store.list_schedules(include_disabled=True)]
+    async def list_automations(principal: Principal = user) -> list:
+        return [await render_schedule(s) for s in await store.list_schedules(include_disabled=True)
+                if s.created_by == principal.user_id]
 
     @router.post("/api/automations")
     async def create_automation(body: AutomationCreate, principal: Principal = user) -> dict:
+        if principal.user_id is None:
+            raise HTTPException(400, "X-Handler-User is required for automations")
         nxt, one_shot = next_run(body.schedule, body.timezone)
         schedule = Schedule(
             name=body.name, prompt=body.prompt, spec=body.schedule, timezone=body.timezone,
@@ -280,8 +290,9 @@ def admin_router(
         if not 1 <= days <= 3650:
             raise HTTPException(422, "days must be between 1 and 3650")
         since = scheduler.clock() - timedelta(days=days)
-        threads = [t for t in await store.list_threads(limit=THREAD_SCAN_LIMIT)
-                   if can_see_thread(principal, t.key)]
+        threads = await store.list_threads(owner_user_id=principal.user_id,
+                                           limit=THREAD_SCAN_LIMIT) \
+            if principal.user_id is not None else []
         runs: list[Run] = []
         for thread in threads:
             for run in await store.list_runs(thread.key, limit=RUN_SCAN_LIMIT):
@@ -308,7 +319,7 @@ def admin_router(
 
     def visible_upload(file_id: str, principal: Principal):
         meta = uploads.get(file_id)
-        if meta is None or not (principal.is_admin or meta.user_id == principal.user_id):
+        if meta is None or meta.user_id != principal.user_id:
             raise HTTPException(404, "File not found")
         return meta
 
@@ -334,7 +345,7 @@ def admin_router(
 
     @router.get("/api/uploads")
     async def list_uploads(principal: Principal = user) -> list:
-        files = uploads.list() if principal.is_admin else uploads.list(principal.user_id)
+        files = uploads.list(principal.user_id) if principal.user_id is not None else []
         return [{**m.public(), "user_id": m.user_id} for m in files]
 
     @router.get("/api/uploads/{file_id}")
@@ -343,8 +354,6 @@ def admin_router(
         path = uploads.path(meta)
         if path is None:
             raise HTTPException(404, "File not found")
-        # The owner lets a proxy acting for one user (Crontal) refuse others' files:
-        # an admin principal may read every upload.
         return FileResponse(path, media_type=meta.content_type, filename=meta.filename,
                             headers={"X-Handler-Upload-Owner": meta.user_id})
 
@@ -386,7 +395,9 @@ def admin_router(
 
     @router.get("/api/connections")
     async def connections(principal: Principal = user) -> list:
-        owner = None if principal.is_admin else f"user:{principal.user_id}"
+        if principal.user_id is None:
+            return []
+        owner = f"user:{principal.user_id}"
         return [{"id": c.id, "connector": c.connector, "owner": c.owner,
                  "provider": c.provider, "status": c.status, "scopes": c.scopes,
                  "last_used_at": _iso(c.last_used_at)}

@@ -242,9 +242,11 @@ async def list_tasks(
     before = decode_cursor(cursor) if cursor else None
     run_statuses = None if statuses is None else [s for s in statuses if s in RUN_STATUSES]
     rows = [] if run_statuses == [] else await store.task_rows(
-        types=types, statuses=run_statuses, since=since, before=before, limit=limit)
+        types=types, statuses=run_statuses, since=since, before=before,
+        owner_user_id=user_id, limit=limit)
     include_queued = before is None and (statuses is None or "queued" in statuses)
-    queued = await store.queued_task_rows(types=types, since=since, limit=QUEUED_LIMIT) \
+    queued = await store.queued_task_rows(types=types, since=since,
+                                          owner_user_id=user_id, limit=QUEUED_LIMIT) \
         if include_queued else []
     items = await _items(store, rows, queued, user_id)
     last = rows[-1] if len(rows) == limit else None
@@ -305,7 +307,7 @@ def _approval_step(approval: dict) -> dict:
 async def get_task(store: Any, run_id: str, *, user_id: str | None,
                    include_steps: bool) -> dict | None:
     """One task by run id (non-chat threads only), with `steps` when asked."""
-    rows = await store.task_rows(run_id=run_id, limit=1)
+    rows = await store.task_rows(run_id=run_id, owner_user_id=user_id, limit=1)
     if not rows:
         return None
     item = (await _items(store, rows, [], user_id))[0]

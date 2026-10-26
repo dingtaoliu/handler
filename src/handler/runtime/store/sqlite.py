@@ -334,7 +334,7 @@ class SQLiteCore:
     async def list_threads(
         self, owner_user_id: str | None = None, limit: int = 100
     ) -> list[Thread]:
-        where = "" if owner_user_id is None else "WHERE (owner_user_id = ? OR type <> 'chat') "
+        where = "" if owner_user_id is None else "WHERE owner_user_id = ? "
         parameters = (limit,) if owner_user_id is None else (owner_user_id, limit)
         return await self._list(
             Thread, f"SELECT * FROM threads {where}ORDER BY COALESCE((SELECT MAX(created_at) FROM messages WHERE thread_key=threads.key), threads.created_at) DESC, rowid DESC LIMIT ?",

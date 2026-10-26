@@ -30,7 +30,7 @@ def test_tool_specs(tools):
     assert specs["automation_create"].input_schema["required"] == ["name", "prompt", "schedule"]
 
 
-@pytest.mark.parametrize("acting_as,user_id,creator", [("delegate", "u", "delegate"), (None, "u", "u"), (None, None, None)])
+@pytest.mark.parametrize("acting_as,user_id,creator", [("delegate", "u", "delegate"), (None, "u", "u")])
 async def test_create_defaults_and_authority(store, clock, tools, acting_as, user_id, creator):
     specs, scheduler = tools
     ctx = RunContext("run", "chat:u:c", user_id=user_id, acting_as=acting_as)
@@ -50,7 +50,7 @@ async def test_create_defaults_and_authority(store, clock, tools, acting_as, use
 
 async def test_create_one_shot_with_timezone_and_notify(store, clock, tools):
     specs, scheduler = tools
-    result = await specs["automation_create"].handler(RunContext("run", "chat:u:c"), {
+    result = await specs["automation_create"].handler(RunContext("run", "chat:u:c", user_id="u"), {
         "name": "One shot", "prompt": "Check", "schedule": "at: 2026-10-18T09:00:00",
         "timezone": "America/New_York", "notify": ["u", "v"],
     })

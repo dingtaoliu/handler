@@ -217,10 +217,9 @@ async def test_routes_connect_status_disconnect(web, world):
     assert conn["account"] == ACCOUNT and conn["status"] == "active"
     assert GMAIL_MODIFY in conn["scopes"]
     assert (await world.oauth.connection(user_owner("alice"))).id == conn["id"]
-    assert (await client.get("/api/connections/google", headers=admin)).json()[
-        "connection"] is None
+    assert (await client.get("/api/connections/google", headers=admin)).status_code == 400
     url = f"/api/connections/google/{conn['id']}"
-    assert (await client.delete(url, headers=admin)).status_code == 404
+    assert (await client.delete(url, headers=admin)).status_code == 400
     assert (await client.delete(url, headers=member)).json() == {"deleted": True,
                                                                  "revoked": True}
     assert (await client.delete(url, headers=member)).status_code == 404
@@ -229,7 +228,8 @@ async def test_routes_connect_status_disconnect(web, world):
 async def test_forwarded_proto_builds_the_redirect_uri(web):
     client, admin, _ = web
     response = await client.post(
-        "/api/connections/google/start", headers={**admin, "x-forwarded-proto": "https",
+        "/api/connections/google/start", headers={**admin, "X-Handler-User": "alice",
+                                                  "x-forwarded-proto": "https",
                                                   "host": "agent.herokuapp.com"})
     assert response.json()["redirect_uri"] == (
         "https://agent.herokuapp.com/oauth/google/callback")
@@ -291,12 +291,13 @@ def test_allowed_return_to(url, ok):
 
 @pytest.fixture
 async def web_rt(world):
+    await world.store.create_user(User("alice", "Alice", "member"))
     app = FastAPI()
     app.include_router(google_router(world.oauth, Authenticator(world.store, ADMIN_KEY),
                                      return_to_origins=CRONTAL))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="https://handler.test") as client:
-        yield client, {"Authorization": f"Bearer {ADMIN_KEY}"}
+        yield client, {"Authorization": f"Bearer {ADMIN_KEY}", "X-Handler-User": "alice"}
 
 
 async def _start(client, admin, return_to):
@@ -374,10 +375,11 @@ async def test_signed_return_to_rechecked_against_allowlist(world):
 
 async def test_return_to_origins_read_from_env(world, monkeypatch):
     monkeypatch.setenv("HANDLER_RETURN_TO_ORIGINS", "https://crontal.test")
+    await world.store.create_user(User("alice", "Alice", "member"))
     app = FastAPI()
     app.include_router(google_router(world.oauth, Authenticator(world.store, ADMIN_KEY)))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="https://handler.test") as client:
-        admin = {"Authorization": f"Bearer {ADMIN_KEY}"}
+        admin = {"Authorization": f"Bearer {ADMIN_KEY}", "X-Handler-User": "alice"}
         assert (await _start(client, admin, RETURN_TO)).status_code == 200
         assert (await _start(client, admin, "https://evil.test/")).status_code == 400

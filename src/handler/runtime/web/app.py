@@ -16,7 +16,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
+from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_access_thread
 from ..bus import BusMessage, RunEventBus
 from ..store.base import Store
 from ..images import MAX_IMAGES_PER_MESSAGE, VISION_TYPES
@@ -96,7 +96,7 @@ async def sse_stream(
     thread_key: str,
     request: Request | None = None,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
-    visible: Callable[[str], bool] | None = None,
+    visible: Callable[[str], bool | Awaitable[bool]] | None = None,
     authorized: Callable[[], Awaitable[bool]] | None = None,
     accept: Callable[[BusMessage], bool] | None = None,
 ) -> AsyncIterator[str]:
@@ -121,7 +121,10 @@ async def sse_stream(
                 continue
             if authorized is not None and not await authorized():
                 return
-            if (visible is None or visible(msg.thread_key)) and (accept is None or accept(msg)):
+            allowed = True if visible is None else visible(msg.thread_key)
+            if hasattr(allowed, "__await__"):
+                allowed = await allowed
+            if allowed and (accept is None or accept(msg)):
                 yield f"data: {json.dumps(_json(msg))}\n\n"
 
 
@@ -142,9 +145,9 @@ def create_app(
     async def healthz() -> dict[str, bool]:
         return {"ok": True}
 
-    def visible_thread(principal: Principal, key: str) -> None:
+    async def visible_thread(principal: Principal, key: str) -> None:
         # 404 rather than 403 so other users' thread keys aren't confirmed.
-        if not can_see_thread(principal, key):
+        if not await can_access_thread(store, principal, key):
             raise HTTPException(404, "thread not found")
 
     @router.post("/api/chat")
@@ -208,10 +211,9 @@ def create_app(
     @router.get("/api/threads")
     async def list_threads(user_id: str | None = None,
                            principal: Principal = principal_dep) -> Any:
-        if not principal.is_admin and user_id not in (None, principal.user_id):
+        if principal.user_id is None or user_id not in (None, principal.user_id):
             return []
-        threads = await store.list_threads(owner_user_id=user_id, limit=MEMBER_SCAN_LIMIT)
-        threads = [t for t in threads if can_see_thread(principal, t.key)]
+        threads = await store.list_threads(owner_user_id=principal.user_id, limit=MEMBER_SCAN_LIMIT)
         metadata = await store.thread_metadata([t.key for t in threads], principal.user_id)
         rows = [{**_json(t), **_json(metadata.get(t.key, {}))} for t in threads]
         rows.sort(key=lambda t: (t.get("last_message_at") or t["created_at"], t["key"]), reverse=True)
@@ -223,15 +225,19 @@ def create_app(
         """Recent events (e.g. ignored emails for Activity), newest first."""
         rows = await store.list_events(source=source, status=status,
                                        limit=max(1, min(limit, 200)))
-        return _json([{**_json(event), "status": state} for event, state in rows
-                      if not event.thread_key or can_see_thread(principal, event.thread_key)])
+        visible = []
+        for event, state in rows:
+            if ((event.thread_key and await can_access_thread(store, principal, event.thread_key))
+                    or (not event.thread_key and event.user_id == principal.user_id)):
+                visible.append({**_json(event), "status": state})
+        return _json(visible)
 
     @router.get("/api/runs/{run_id}")
     async def get_run(run_id: str, principal: Principal = principal_dep) -> Any:
         run = await store.get_run(run_id)
         if run is None:
             raise HTTPException(404, "run not found")
-        if not can_see_thread(principal, run.thread_key):
+        if not await can_access_thread(store, principal, run.thread_key):
             raise HTTPException(404, "run not found")
         steps = await store.list_steps(run_id)
         return {"run": _json(run), "steps": _json(steps)}
@@ -245,13 +251,12 @@ def create_app(
     @router.put("/api/threads/{key:path}/title")
     async def rename_thread(key: str, body: ThreadTitleRequest,
                             principal: Principal = principal_dep) -> Any:
-        visible_thread(principal, key)
+        await visible_thread(principal, key)
         thread = await store.get_thread(key)
         if thread is None:
             raise HTTPException(404, "thread not found")
-        if not principal.is_admin and (thread.type != ThreadType.CHAT or
-                                      thread.owner_user_id != principal.user_id):
-            raise HTTPException(403, "only the owner or an admin can rename this thread")
+        if thread.type != ThreadType.CHAT:
+            raise HTTPException(403, "only chat conversations can be renamed")
         try:
             await store.set_thread_title(key, body.title)
         except ValueError as exc:
@@ -262,7 +267,7 @@ def create_app(
     @router.post("/api/threads/{key:path}/read")
     async def mark_read(key: str, body: ThreadReadRequest,
                         principal: Principal = principal_dep) -> Any:
-        visible_thread(principal, key)
+        await visible_thread(principal, key)
         if principal.user_id is None:
             raise HTTPException(400, f"{ACT_AS_HEADER} is required to mark a thread read")
         thread = await store.get_thread(key)
@@ -277,22 +282,22 @@ def create_app(
     @router.get("/api/threads/{key:path}/stream")
     async def stream_thread(key: str, request: Request,
                             principal: Principal = sse_dep) -> StreamingResponse:
-        visible_thread(principal, key)
+        await visible_thread(principal, key)
         return _sse_response(request, key, principal)
 
     @router.get("/api/threads/{key:path}/messages")
     async def thread_messages(key: str, principal: Principal = principal_dep) -> Any:
-        visible_thread(principal, key)
+        await visible_thread(principal, key)
         return _json(await fill_tool_inputs(store, await store.list_messages(key, newest=True)))
 
     @router.get("/api/threads/{key:path}/runs")
     async def thread_runs(key: str, principal: Principal = principal_dep) -> Any:
-        visible_thread(principal, key)
+        await visible_thread(principal, key)
         return _json(await store.list_runs(key))
 
     @router.get("/api/threads/{key:path}")
     async def get_thread(key: str, principal: Principal = principal_dep) -> Any:
-        visible_thread(principal, key)
+        await visible_thread(principal, key)
         thread = await store.get_thread(key)
         if thread is None:
             raise HTTPException(404, "thread not found")
@@ -308,7 +313,8 @@ def create_app(
                 return False
 
         return StreamingResponse(
-            sse_stream(bus, key, request, visible=lambda k: can_see_thread(principal, k),
+            sse_stream(bus, key, request,
+                       visible=lambda k: can_access_thread(store, principal, k),
                        authorized=authorized),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

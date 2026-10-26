@@ -13,7 +13,7 @@ import uvicorn
 from fastapi.routing import APIRoute
 from starlette.requests import Request
 
-from handler.runtime.auth import Authenticator, Principal, can_see_thread
+from handler.runtime.auth import Authenticator, Principal, can_access_thread, can_see_thread
 from handler.runtime.bus import BusMessage
 from tests.runtime.auth.conftest import ADMIN_KEY, ctx
 
@@ -278,9 +278,18 @@ def test_can_see_thread_rules():
     assert can_see_thread(alice, "chat:alice:1")
     assert not can_see_thread(alice, "chat:bob:1")
     assert not can_see_thread(alice, "chat:alicia:1") and not can_see_thread(alice, "chat:alice")
-    assert can_see_thread(alice, "gmail:inbox") and can_see_thread(alice, "automation:x")
-    assert can_see_thread(Principal("root", "admin", "user_token"), "chat:bob:1")
-    assert can_see_thread(Principal(None, "admin", "admin_key"), "chat:bob:1")
+    assert not can_see_thread(alice, "gmail:inbox")
+    assert not can_see_thread(Principal("root", "admin", "user_token"), "chat:bob:1")
+    assert not can_see_thread(Principal(None, "admin", "admin_key"), "chat:bob:1")
+
+
+async def test_durable_thread_ownership_ignores_admin_role(store, world):
+    assert await can_access_thread(
+        store, Principal("alice", "member", "user_token"), "gmail:inbox")
+    assert not await can_access_thread(
+        store, Principal("root", "admin", "user_token"), "gmail:inbox")
+    assert not await can_access_thread(
+        store, Principal(None, "admin", "admin_key"), "gmail:inbox")
 
 
 THREAD_ROUTES = ["/api/threads/{k}", "/api/threads/{k}/messages", "/api/threads/{k}/runs",
@@ -297,8 +306,10 @@ async def test_members_cannot_read_other_users_chats(client, world, route):
     # SSE routes are exercised against a live server below; skip the open-ended ones here.
     if not route.endswith("/stream"):
         assert (await client.get(bob_chat, headers=world.as_user("bob"))).status_code == 200
-        assert (await client.get(bob_chat, headers=world.as_user("root"))).status_code == 200
-        assert (await client.get(bob_chat, headers=world.admin_key)).status_code == 200
+        assert (await client.get(bob_chat, headers=world.as_user("root"))).status_code == 404
+        assert (await client.get(bob_chat, headers=world.admin_key)).status_code == 404
+        acting = {**world.admin_key, "X-Handler-User": "bob"}
+        assert (await client.get(bob_chat, headers=acting)).status_code == 200
 
 
 async def test_members_read_own_and_shared_threads(client, world):
@@ -317,7 +328,7 @@ async def test_run_detail_respects_thread_visibility(client, world):
     assert (await client.get("/api/runs/run-gmail:inbox", headers=alice)).status_code == 200
     assert (await client.get("/api/runs/run-chat:bob:c1", headers=alice)).status_code == 404
     assert (await client.get("/api/runs/run-chat:bob:c1", headers=world.as_user("root"))
-            ).status_code == 200
+            ).status_code == 404
 
 
 async def test_thread_listing_is_filtered(client, world):
@@ -330,33 +341,34 @@ async def test_thread_listing_is_filtered(client, world):
                             headers=world.as_user("alice"))
     assert keys(peek) == set()
     everything = await client.get("/api/threads", headers=world.as_user("root"))
-    assert keys(everything) == {"chat:alice:c1", "chat:bob:c1", "gmail:inbox"}
-    assert keys(await client.get("/api/threads", headers=world.admin_key)) == keys(everything)
+    assert keys(everything) == set()
+    assert keys(await client.get("/api/threads", headers=world.admin_key)) == set()
     scoped = {**world.admin_key, "X-Handler-User": "bob"}
-    assert keys(await client.get("/api/threads", headers=scoped)) == {"chat:bob:c1",
-                                                                      "gmail:inbox"}
+    assert keys(await client.get("/api/threads", headers=scoped)) == {"chat:bob:c1"}
 
 
 # --- approvals and notifications -------------------------------------------------
-async def test_approvals_are_scoped_but_any_member_may_decide_visible_ones(
+async def test_approvals_are_scoped_to_the_thread_owner(
     client, world, gateway
 ):
     private = (await gateway.call(ctx("chat:alice:c1"), "send_it", {})).content["approval_id"]
     shared = (await gateway.call(ctx("gmail:inbox"), "send_it", {})).content["approval_id"]
     bob = world.as_user("bob")
     listed = (await client.get("/api/approvals", headers=bob)).json()
-    assert [a["id"] for a in listed] == [shared]
+    assert listed == []
     assert (await client.get(f"/api/approvals/{private}", headers=bob)).status_code == 404
     for action in ("approve", "deny"):
         assert (await client.post(f"/api/approvals/{private}/{action}", json={},
                                   headers=bob)).status_code == 404
-    done = await client.post(f"/api/approvals/{shared}/approve", json={"decided_by": "root"},
-                             headers=bob)
-    assert done.status_code == 200 and done.json()["decided_by"] == "bob"  # not spoofable
+    assert (await client.post(f"/api/approvals/{shared}/approve", json={}, headers=bob)
+            ).status_code == 404
     alice = world.as_user("alice")
     denied = await client.post(f"/api/approvals/{private}/deny", json={}, headers=alice)
     assert denied.json()["status"] == "denied"
-    assert len((await client.get("/api/approvals", headers=world.as_user("root"))).json()) == 2
+    assert (await client.get("/api/approvals", headers=world.as_user("root"))).json() == []
+    acting = {**world.admin_key, "X-Handler-User": "alice"}
+    owned = (await client.get("/api/approvals", headers=acting)).json()
+    assert {a["id"] for a in owned} == {private, shared}
 
 
 async def test_notifications_are_private(client, world, store):
@@ -366,14 +378,14 @@ async def test_notifications_are_private(client, world, store):
     assert [n["id"] for n in (await client.get("/api/notifications", headers=alice)).json()
             ] == [mine.id]
     assert (await client.get("/api/notifications", params={"user_id": "bob"},
-                             headers=alice)).status_code == 403
+                             headers=alice)).status_code == 404
     assert (await client.post(f"/api/notifications/{theirs.id}/read", headers=alice)
             ).status_code == 404
     assert (await client.post(f"/api/notifications/{mine.id}/read", headers=alice)
             ).status_code == 200
     root = world.as_user("root")
-    assert len((await client.get("/api/notifications", params={"user_id": "bob"},
-                                 headers=root)).json()) == 1
+    assert (await client.get("/api/notifications", params={"user_id": "bob"},
+                             headers=root)).status_code == 404
     assert (await client.get("/api/notifications", headers=world.admin_key)
             ).status_code == 400
 
@@ -455,19 +467,15 @@ async def test_live_sse_stream_only_carries_visible_threads(app, world, bus):
             keys = [__import__("json").loads(frame)["thread_key"] for frame in seen]
             assert keys == ["chat:alice:c1", "gmail:inbox"]
 
-            # An admin gets everything, and a wildcard thread stream can't be abused.
-            seen = []
+            # A wildcard thread stream can't be abused, and explicit admin-key
+            # impersonation gets exactly the selected user's stream.
             wild = quote("*", safe="")
-            async with http.stream("GET", f"{url}/api/threads/{wild}/stream",
-                                   params={"access_token": world.tokens["alice"]}) as response:
-                await asyncio.sleep(0.2)
-                bus.publish(BusMessage("chat:bob:c1", None, "event_queued", {}))
-                bus.publish(BusMessage("chat:alice:c1", None, "event_queued", {}))
-                await asyncio.wait_for(_frames(response, 1, seen), 5)
-            assert __import__("json").loads(seen[0])["thread_key"] == "chat:alice:c1"
+            response = await http.get(f"{url}/api/threads/{wild}/stream",
+                                      params={"access_token": world.tokens["alice"]})
+            assert response.status_code == 404
             seen = []
             async with http.stream("GET", f"{url}/api/stream", params={
-                "access_token": world.tokens["root"]}) as response:
+                "access_token": ADMIN_KEY, "act_as": "bob"}) as response:
                 await asyncio.sleep(0.2)
                 bus.publish(BusMessage("chat:bob:c1", None, "event_queued", {}))
                 await asyncio.wait_for(_frames(response, 1, seen), 5)

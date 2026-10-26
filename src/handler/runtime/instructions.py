@@ -8,12 +8,14 @@ from .types import ThreadType
 
 async def build_instructions(
     settings: SettingsService, memory_tools: MemoryTools, *,
-    speaker: str | None, thread_type: ThreadType,
+    speaker: str | None, thread_type: ThreadType, user_id: str | None = None,
 ) -> str:
     persona, _ = await settings.get("persona")
     sections = [persona[name] for name in ("system", "identity", "persona") if persona[name]]
-    sections.append("# Memory\n" + await memory_tools.index_text()
-                    + "\nUse memory_read for details.")
+    sections.append("# Memory\n" + await memory_tools.index_text(user_id=user_id)
+                    + "\nUse memory_read for details. Memory is private to this user by "
+                    "default; shared/ topics are household-visible and must only be written "
+                    "when the user explicitly asks to share them.")
     if speaker is not None:
         sections.append(f"You are talking with {speaker}")
     if thread_type == ThreadType.EMAIL:

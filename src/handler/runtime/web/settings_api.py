@@ -54,7 +54,8 @@ def settings_router(service: SettingsService, auth: Authenticator,
         speaker = principal.user_id
         text = await build_instructions(
             service, memory_tools or MemoryTools(service.store),
-            speaker=speaker if kind == ThreadType.CHAT else None, thread_type=kind)
+            speaker=speaker if kind == ThreadType.CHAT else None, thread_type=kind,
+            user_id=principal.user_id)
         return {"thread_type": kind.value, "prompt": text}
 
     @router.get("/api/chat/options")
@@ -67,7 +68,7 @@ def settings_router(service: SettingsService, auth: Authenticator,
         threads, _ = await service.get("threads")
         get_thread = getattr(service.store, "get_thread", None)
         thread = await get_thread(thread_key) if thread_key and get_thread else None
-        if thread is not None and not principal.is_admin and thread.owner_user_id != principal.user_id:
+        if thread is not None and thread.owner_user_id != principal.user_id:
             thread = None
         if thread is None:
             chat = await service.resolve_thread(threads.get("chat") or {})
@@ -128,16 +129,17 @@ def settings_router(service: SettingsService, auth: Authenticator,
         target = user_id or principal.user_id
         if target is None:
             raise HTTPException(400, "user_id is required")
-        if target != principal.user_id and not principal.is_admin:
-            raise HTTPException(403, "Cannot read another user's notifications")
+        if target != principal.user_id:
+            raise HTTPException(404, "Notifications not found")
         return jsonable_encoder(await service.store.list_notifications(target, unread_only))
 
     @router.post("/api/notifications/{id}/read")
     async def mark_read(id: str, principal: Principal = user) -> dict:
-        if not principal.is_admin and principal.user_id is not None:
-            own = await service.store.list_notifications(principal.user_id, False)
-            if id not in {n.id for n in own}:
-                raise HTTPException(404, "Notification not found")
+        if principal.user_id is None:
+            raise HTTPException(404, "Notification not found")
+        own = await service.store.list_notifications(principal.user_id, False)
+        if id not in {n.id for n in own}:
+            raise HTTPException(404, "Notification not found")
         if not await service.store.mark_read(id):
             raise HTTPException(404, "Notification not found")
         return {"read": True}

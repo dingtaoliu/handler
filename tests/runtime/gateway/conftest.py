@@ -5,13 +5,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from handler.runtime.gateway import Gateway, GrantPolicy, ToolResult, ToolSpec
-from handler.runtime.store.sqlite import SQLiteCore
-from handler.runtime.store.sqlite_gateway import ApprovalMixin, AuditMixin
-from handler.runtime.types import Risk
-
-
-class GatewayStore(ApprovalMixin, AuditMixin, SQLiteCore):
-    pass
+from handler.runtime.store.sqlite import SQLiteStore
+from handler.runtime.store.sqlite_users import User
+from handler.runtime.types import Event, Lane, Risk, Run, RunStatus, ThreadSpec, ThreadType
 
 
 @dataclass
@@ -72,8 +68,22 @@ def clock():
 
 @pytest.fixture
 async def store(tmp_path, clock):
-    s = GatewayStore(tmp_path / "gw.db", clock=clock)
+    s = SQLiteStore(tmp_path / "gw.db", clock=clock)
+    await s.create_user(User("u1", "User One", "admin"))
+    for key, run_id in (("chat:u:1", "run1"), ("t", "other")):
+        event = Event("chat.message", "test", {}, f"event-{run_id}",
+                      thread_key=key, user_id="u1")
+        await s.put(event, ThreadSpec(key, ThreadType.CHAT, Lane.INTERACTIVE,
+                                     owner_user_id="u1", harness="test"))
+    leases = await s.claim("test", Lane.INTERACTIVE, 2, 60)
+    for lease in leases:
+        run_id = "run1" if lease.thread_key == "chat:u:1" else "other"
+        events = await s.pending_events(lease.thread_key)
+        assert await s.create_run(lease, Run(run_id, lease.thread_key, lease.version,
+                                             [e.id for e in events], RunStatus.RUNNING,
+                                             "test", None))
     yield s
+    await s.close()
 
 
 @pytest.fixture

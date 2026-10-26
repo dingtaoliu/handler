@@ -4,9 +4,9 @@ GET /api/tasks              one page of tasks, newest first
 GET /api/tasks/stream       SSE of `task_updated` messages only
 GET /api/tasks/{run_id}     one task; admins also get its `steps` debug trace
 
-Non-chat threads are shared with every user of the instance, so any
-authenticated principal may list them. The step trace (tool arguments and
-outputs, model calls, errors, approvals) is for admin principals only.
+Tasks are private to the durable owner of their thread. The step trace (tool
+arguments and outputs, model calls, errors, approvals) is available only when
+that owner also has the admin role.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 
-from ..auth import Authenticator, Principal, can_see_thread
+from ..auth import Authenticator, Principal, can_access_thread
 from ..bus import RunEventBus
 from ..tasks import TASK_UPDATED, get_task, list_tasks
 from .app import sse_stream
@@ -45,7 +45,11 @@ def tasks_router(store: Any, bus: RunEventBus, auth: Authenticator) -> APIRouter
                                     limit=limit)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-        page["items"] = [i for i in page["items"] if can_see_thread(principal, i["thread_key"])]
+        visible = []
+        for item in page["items"]:
+            if await can_access_thread(store, principal, item["thread_key"]):
+                visible.append(item)
+        page["items"] = visible
         return jsonable_encoder(page)
 
     # Before the {run_id} route so "stream" is not taken for a run id.
@@ -59,7 +63,8 @@ def tasks_router(store: Any, bus: RunEventBus, auth: Authenticator) -> APIRouter
                 return False
 
         return StreamingResponse(
-            sse_stream(bus, "*", request, visible=lambda k: can_see_thread(principal, k),
+            sse_stream(bus, "*", request,
+                       visible=lambda k: can_access_thread(store, principal, k),
                        authorized=authorized, accept=lambda m: m.type == TASK_UPDATED),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -69,7 +74,7 @@ def tasks_router(store: Any, bus: RunEventBus, auth: Authenticator) -> APIRouter
     async def task(run_id: str, principal: Principal = principal_dep) -> Any:
         item = await get_task(store, run_id, user_id=principal.user_id,
                               include_steps=principal.is_admin)
-        if item is None or not can_see_thread(principal, item["thread_key"]):
+        if item is None or not await can_access_thread(store, principal, item["thread_key"]):
             raise HTTPException(404, "task not found")
         return jsonable_encoder(item)
 

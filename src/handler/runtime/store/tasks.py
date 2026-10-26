@@ -69,13 +69,16 @@ class TaskQueries:
     async def task_rows(
         self, *, types: list[str] | None = None, statuses: list[str] | None = None,
         since: datetime | None = None, before: tuple[datetime, str] | None = None,
-        run_id: str | None = None, limit: int = 50,
+        run_id: str | None = None, owner_user_id: str | None = None, limit: int = 50,
     ) -> list[dict]:
         """Runs of non-chat threads, newest first, with their derived task status."""
         clauses, params = [f"t.type <> '{ThreadType.CHAT.value}'"], [self._thread_timestamp(self._clock())]
         if run_id is not None:
             clauses.append("r.id = ?")
             params.append(run_id)
+        if owner_user_id is not None:
+            clauses.append("t.owner_user_id = ?")
+            params.append(owner_user_id)
         if types:
             clauses.append(f"t.type IN ({','.join('?' for _ in types)})")
             params += types
@@ -102,13 +105,16 @@ class TaskQueries:
 
     async def queued_task_rows(
         self, *, types: list[str] | None = None, since: datetime | None = None,
-        limit: int = 50,
+        owner_user_id: str | None = None, limit: int = 50,
     ) -> list[dict]:
         """Non-chat threads with pending events that no worker holds right now."""
         now = self._thread_timestamp(self._clock())
         clauses = [f"t.type <> '{ThreadType.CHAT.value}'", "t.pending_since IS NOT NULL",
                    "NOT t.dead", "(t.lease_until IS NULL OR t.lease_until <= ?)"]
         params: list[Any] = [now]
+        if owner_user_id is not None:
+            clauses.append("t.owner_user_id = ?")
+            params.append(owner_user_id)
         if types:
             clauses.append(f"t.type IN ({','.join('?' for _ in types)})")
             params += types

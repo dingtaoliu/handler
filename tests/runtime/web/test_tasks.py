@@ -57,8 +57,8 @@ async def queue(db, key, kind, event_type, payload, owner="member"):
     return lane
 
 
-async def start(db, key, kind, event_type, payload):
-    lane = await queue(db, key, kind, event_type, payload)
+async def start(db, key, kind, event_type, payload, owner="member"):
+    lane = await queue(db, key, kind, event_type, payload, owner=owner)
     lease, = await db.claim("worker", lane, 1, 60)
     events = await db.pending_events(key)
     run = Run(id=new_id("run"), thread_key=key, lease_version=lease.version,
@@ -110,6 +110,13 @@ async def seeded(db):
     await finish(db, lease, runs["chat"], "Private chat reply")
     _, runs["running"] = await start(db, "crontal:rfq:42", ThreadType.CRONTAL,
                                      "crontal.notification", CRONTAL)
+    lease, runs["boss"] = await start(db, "crontal:rfq:boss", ThreadType.CRONTAL,
+                                      "crontal.notification", CRONTAL, owner="boss")
+    await finish(db, lease, runs["boss"])
+    await db.create_approval(Approval(run_id=runs["boss"].id,
+                                      thread_key=runs["boss"].thread_key,
+                                      tool="gmail_send", action="gmail.send",
+                                      args={"to": "alice@buyer.example"}, requested_by="boss"))
     await queue(db, "email:new", ThreadType.EMAIL, "email.received",
                 {"subject": "Hello", "forwarder": {"name": "", "address": "bob@example.com"}})
     return runs
@@ -201,21 +208,27 @@ async def test_cursor_pagination_is_stable_and_queued_only_on_first_page(seeded,
     assert pages == 3
 
 
-async def test_detail_steps_are_admin_only(seeded, clients):
+async def test_detail_steps_are_admin_only(db, seeded, clients):
     member, boss, admin_key = clients
     run_id = seeded["email"].id
     plain = (await member.get(f"/api/tasks/{run_id}")).json()
     assert plain["run_id"] == run_id and "steps" not in plain
-    for client in (boss, admin_key):
-        detail = (await client.get(f"/api/tasks/{run_id}")).json()
-        kinds = [s["kind"] for s in detail["steps"]]
-        assert kinds == ["llm_call", "tool_call"]
-        llm, tool = detail["steps"]
+    assert (await boss.get(f"/api/tasks/{run_id}")).status_code == 404
+    assert (await admin_key.get(f"/api/tasks/{run_id}")).status_code == 404
+
+    # The admin user gets traces for their own tasks, including through an
+    # explicit admin-key act-as request.
+    owned = seeded["boss"]
+    for client, headers in ((boss, {}), (admin_key, {"X-Handler-User": "boss"})):
+        detail = (await client.get(f"/api/tasks/{owned.id}", headers=headers)).json()
+        steps = [s for s in detail["steps"] if s["kind"] != "approval"]
+        assert [s["kind"] for s in steps] == ["llm_call", "tool_call"]
+        llm, tool = steps
         assert llm["model"] == "gpt-test" and llm["usage"]["input_tokens"] == 1200
         assert llm["cost_usd"] == 0.25 and "latency_ms" in llm
         assert tool["data"]["input"] == '{"path": "/rfq/42"}'
         assert tool["data"]["output"].endswith("[5000 chars]") and len(tool["data"]["output"]) < 2100
-    trace = (await boss.get(f"/api/tasks/{seeded['approval'].id}")).json()["steps"]
+    trace = (await boss.get(f"/api/tasks/{owned.id}")).json()["steps"]
     approval = [s for s in trace if s["kind"] == "approval"]
     assert approval[0]["status"] == "pending" and approval[0]["data"]["args"]["to"] == "alice@buyer.example"
     # Chat runs are not tasks, even for admins; unknown runs 404 too.

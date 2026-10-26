@@ -7,7 +7,7 @@ Updated 2026-10-18 by the driver (Claude Code), for whoever picks this up next. 
 Handler is an **agent runtime layered on agent harnesses**. It does not write its own agent loop: a harness runs each turn. Handler owns everything around that:
 - durable, event-driven threads;
 - the tool gateway (MCP server, grants, approvals, audit);
-- shared memory and settings;
+- private per-user memory, explicit `shared/` memory, and instance settings;
 - schedules;
 - connectors;
 - observability and cost;
@@ -31,11 +31,12 @@ Repo and code layout:
 | **Harnesses** | `harness/codex.py`, `harness/openai_agents.py` | See §3 |
 | Gateway | `gateway/` | MCP server at `/mcp/`; per-run tokens; `GrantPolicy` (exact action → glob → risk default); approvals; audit |
 | Crontal access | `gateway/crontal_api.py` (generic REST), `gateway/crontal.py` (older curated MCP tools) | See §4 |
-| Memory, settings, prompts | `memory.py`, `settings.py`, `instructions.py`, `web/settings_api.py` | Settings are versioned in the store. Thread-type `harness`/`model`/`reasoning_effort` are enums (dropdowns). `GET /api/settings/{s}` returns `defaults`; `GET /api/settings/prompt?thread_type=` returns the rendered prompt |
+| Memory, settings, prompts | `memory.py`, `settings.py`, `instructions.py`, `web/settings_api.py` | Memory is private per user unless its logical name starts with `shared/`; legacy topics appear under `shared/`. Settings remain instance-wide and versioned. Thread-type `harness`/`model`/`reasoning_effort` are enums (dropdowns). `GET /api/settings/{s}` returns `defaults`; `GET /api/settings/prompt?thread_type=` returns the rendered prompt |
 | Workspace sync | `workspaces.py`, `files.py` | Runs only mark a thread dirty; a background flush uploads every `HANDLER_SYNC_INTERVAL_SECONDS` (300) and again on SIGTERM. Uploads skip harness caches (`.tmp/` etc.), send only files whose content hash changed, and run 16 transfers in parallel |
 | Web UI | `web/static/app/` (full UI), `login.html`, `timeline.html` | Tabs: chat (model/effort selects, attachments), memory, automations, activity, usage, approvals, notifications, settings (prompt preview, "Default (…)" labels), tools, files, logs, connections, users |
 | Admin APIs | `web/admin_api.py`, `uploads.py` | Memory, automations, usage, tools, uploads, logs, connections |
 | Auth | `auth.py`, `web/auth_api.py` | Admin key (+ `X-Handler-User` to act as a user), per-user tokens, `/login` |
+| User privacy | `auth.py`, content APIs, `docs/rebuild/private-user-spaces.md` | Durable thread ownership controls all content. Admin role does not reveal another user's content; the admin key must explicitly act as a user. Conversation fallback titles come from the first user message |
 | Legacy import | `migrate_legacy.py` (`handler-rt import-legacy`) | Used once for the personal instance: persona, memory, users, conversations |
 
 ## 3. Harnesses

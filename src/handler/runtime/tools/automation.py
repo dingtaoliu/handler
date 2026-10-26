@@ -58,6 +58,9 @@ class AutomationTools:
         ]
 
     async def _create(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        owner = ctx.acting_as or ctx.user_id
+        if owner is None:
+            return ToolResult("A user identity is required for an automation", is_error=True)
         now = self.scheduler.clock()
         tz = args.get("timezone", "UTC")
         try:
@@ -66,7 +69,7 @@ class AutomationTools:
             return ToolResult(str(exc), is_error=True)
         schedule = Schedule(
             name=args["name"], prompt=args["prompt"], spec=args["schedule"], timezone=tz,
-            notify=args.get("notify", []), created_by=ctx.acting_as or ctx.user_id,
+            notify=args.get("notify", []), created_by=owner,
             next_run_at=next_run, one_shot=one_shot, created_at=now,
         )
         await self.store.create_schedule(schedule)
@@ -77,15 +80,19 @@ class AutomationTools:
         })
 
     async def _list(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        owner = ctx.acting_as or ctx.user_id
         schedules = await self.store.list_schedules(include_disabled=True)
         return ToolResult([
             {"id": schedule.id, "name": schedule.name, "spec": schedule.spec,
              "next_run_at": schedule.next_run_at.isoformat() if schedule.next_run_at else None,
              "enabled": schedule.enabled}
-            for schedule in schedules
+            for schedule in schedules if schedule.created_by == owner
         ])
 
     async def _delete(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
-        deleted = await self.store.delete_schedule(args["schedule_id"])
+        owner = ctx.acting_as or ctx.user_id
+        schedule = await self.store.get_schedule(args["schedule_id"])
+        deleted = bool(schedule and schedule.created_by == owner
+                       and await self.store.delete_schedule(args["schedule_id"]))
         self.scheduler.wake()
         return ToolResult({"schedule_id": args["schedule_id"], "deleted": deleted})

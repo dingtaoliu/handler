@@ -378,7 +378,7 @@ class PostgresCore:
     async def list_threads(
         self, owner_user_id: str | None = None, limit: int = 100
     ) -> list[Thread]:
-        where = "" if owner_user_id is None else "WHERE (owner_user_id = %s OR type <> 'chat') "
+        where = "" if owner_user_id is None else "WHERE owner_user_id = %s "
         parameters = (limit,) if owner_user_id is None else (owner_user_id, limit)
         return await self._list(
             Thread, f"SELECT {_columns(Thread)} FROM threads {where}"

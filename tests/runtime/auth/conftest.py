@@ -101,7 +101,7 @@ async def world(store, bus):
         w.token_ids[name], w.tokens[name] = await store.create_token(name, "test")
     await _make_thread(store, "chat:alice:c1", ThreadType.CHAT, Lane.INTERACTIVE, "alice")
     await _make_thread(store, "chat:bob:c1", ThreadType.CHAT, Lane.INTERACTIVE, "bob")
-    await _make_thread(store, "gmail:inbox", ThreadType.GMAIL, Lane.BACKGROUND, None)
+    await _make_thread(store, "gmail:inbox", ThreadType.GMAIL, Lane.BACKGROUND, "alice")
     return w
 
 

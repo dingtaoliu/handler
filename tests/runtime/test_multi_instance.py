@@ -150,7 +150,8 @@ async def test_credentials_users_settings_threads_and_webhooks_are_isolated(runn
 
 
 async def test_browser_and_oauth_paths_stay_with_instance(running):
-    client, _ = running
+    from handler.runtime.store.sqlite_users import User
+    client, host = running
     for name in ('main', 'bss'):
         base = '/i/' + name
         page = await client.get(base + '/app')
@@ -161,7 +162,9 @@ async def test_browser_and_oauth_paths_stay_with_instance(running):
         assert 'handlerKey' in (await client.get(base + '/login')).text
         callback = await client.get(base + '/oauth/google/callback?error=access_denied')
         assert callback.headers['location'].startswith(base + '/app?')
-    status = await client.get('/i/main/api/connections/google', headers=headers('main-admin'))
+    await host.state.resources['main']['store'].create_user(User('alice', 'Alice'))
+    status = await client.get('/i/main/api/connections/google',
+                              headers=headers('main-admin', 'alice'))
     assert status.json()['redirect_uri'] == 'https://handler.example/oauth/google/callback'
     assert not (await client.get('/i/bss/api/connections/google', headers=headers('bss-admin'))).json()['configured']
 
@@ -256,19 +259,22 @@ async def test_single_instance_preserves_root_routes(tmp_path, monkeypatch, inst
 
 async def test_tasks_api_is_served_per_instance_prefix(running):
     from handler.runtime.types import Event, Lane, Run, RunStatus, ThreadSpec, ThreadType
+    from handler.runtime.store.sqlite_users import User
     client, host = running
     store = host.state.resources['main']['store']
+    await store.create_user(User('alice', 'Alice', 'admin'))
     await store.put(Event(type='automation.fired', source='test', payload={'name': 'Main digest'},
-                          idempotency_key='tasks-main'),
-                    ThreadSpec('automation:main', ThreadType.AUTOMATION, Lane.BACKGROUND, harness='codex'))
+                          idempotency_key='tasks-main', user_id='alice'),
+                    ThreadSpec('automation:main', ThreadType.AUTOMATION, Lane.BACKGROUND,
+                               owner_user_id='alice', harness='codex'))
     lease, = await store.claim('test', Lane.BACKGROUND, 1, 60)
     events = [e.id for e in await store.pending_events(lease.thread_key)]
     run = Run('run_main_task', lease.thread_key, lease.version, events, RunStatus.RUNNING, 'codex', None)
     assert await store.create_run(lease, run)
     for path in ('/i/main/api/tasks', '/api/tasks'):
-        page = (await client.get(path, headers=headers('main-admin'))).json()
+        page = (await client.get(path, headers=headers('main-admin', 'alice'))).json()
         assert [i['trigger_summary'] for i in page['items']] == ['Main digest']
-        detail = await client.get(path + '/run_main_task', headers=headers('main-admin'))
+        detail = await client.get(path + '/run_main_task', headers=headers('main-admin', 'alice'))
         assert detail.status_code == 200 and detail.json()['steps'] == []
     assert (await client.get('/i/bss/api/tasks', headers=headers('bss-admin'))).json()['items'] == []
     assert (await client.get('/i/bss/api/tasks/run_main_task', headers=headers('bss-admin'))).status_code == 404

@@ -21,7 +21,7 @@ import os
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import HTTPException, Request
 
@@ -50,12 +50,26 @@ class Principal:
 
 
 def can_see_thread(principal: Principal, thread_key: str) -> bool:
-    """Members see their own ``chat:`` threads and every shared thread."""
-    if principal.is_admin or not thread_key.startswith("chat:"):
-        return True
+    """Fast check for chat keys; admin role never grants another user's content.
+
+    New request paths use :func:`can_access_thread`, which checks the durable
+    owner.  This helper remains for callers that only have a chat key.
+    """
     return principal.user_id is not None and thread_key.startswith(
         f"chat:{principal.user_id}:"
     )
+
+
+async def can_access_thread(store: Any, principal: Principal, thread_key: str) -> bool:
+    """Whether this signed-in user owns the durable thread.
+
+    Roles control administration, not access to personal content.  An admin
+    key must explicitly act as a user before it can read that user's threads.
+    """
+    if principal.user_id is None:
+        return False
+    thread = await store.get_thread(thread_key)
+    return thread is not None and thread.owner_user_id == principal.user_id
 
 
 def _digest(value: str) -> bytes:

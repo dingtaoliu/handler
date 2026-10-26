@@ -668,7 +668,8 @@ class RunExecutor:
         if self.memory_tools is not None:
             speaker = thread.owner_user_id if str(thread.type) == "chat" else None
             built = await build_instructions(self.settings, self.memory_tools,
-                                             speaker=speaker, thread_type=thread.type)
+                                             speaker=speaker, thread_type=thread.type,
+                                             user_id=thread.owner_user_id)
             plan.instructions = "\n\n".join(p for p in (built, self.config.instructions) if p)
         return plan
 

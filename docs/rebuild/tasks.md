@@ -82,8 +82,9 @@ Strings in `data` are truncated to 2,000 characters (`… [N chars]`). Members g
 the item without `steps`. Chat runs are 404 here even for admins: use
 `/api/runs/{id}` for chat.
 
-Non-chat threads are shared with all users of the instance, so any
-authenticated user may list tasks.
+Non-chat threads are private to their durable `owner_user_id`. A user lists only
+their own tasks; an admin role does not bypass that boundary. An instance admin
+key must explicitly act as the owner.
 
 ## Live updates
 
