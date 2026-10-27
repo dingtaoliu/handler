@@ -14,6 +14,7 @@ from handler.runtime.observability.pricing import PriceTable
 from handler.runtime.run import RunConfig, RunExecutor, render_turn
 from handler.runtime.store.sqlite import SQLiteStore
 from handler.runtime.types import (
+    Approval,
     Event,
     Lane,
     Role,
@@ -33,6 +34,7 @@ class FakeHarness:
         self.fail_with: HarnessError | None = None
         self.gate: asyncio.Event | None = None  # when set, the run waits on it
         self.started = asyncio.Event()
+        self.tool_output: object = "a.txt"
 
     async def run(self, req: RunRequest):
         self.requests.append(req)
@@ -47,7 +49,7 @@ class FakeHarness:
         yield RunEvent(RunEventKind.TOOL_STARTED, {"id": "t1", "tool": "shell", "kind": "command_execution",
                                                    "input": "ls"}, raw={"n": 1})
         yield RunEvent(RunEventKind.TOOL_FINISHED, {"id": "t1", "tool": "shell", "kind": "command_execution",
-                                                    "input": "ls", "output": "a.txt", "status": "completed",
+                                                    "input": "ls", "output": self.tool_output, "status": "completed",
                                                     "exit_code": 0}, raw={"n": 2})
         yield RunEvent(RunEventKind.ASSISTANT_TEXT, {"text": f"echo: {req.prompt}"}, raw={"n": 3})
         yield RunEvent(RunEventKind.USAGE, {"model": "fake-model"},
@@ -118,6 +120,31 @@ async def test_chat_run_commits_transcript_run_and_steps(env):
     assert StepKind.TOOL_CALL in kinds and StepKind.LLM_CALL in kinds
     tool = next(s for s in steps if s.kind is StepKind.TOOL_CALL)
     assert tool.status == "ok" and tool.ended_at is not None
+
+
+async def test_a_call_waiting_on_approval_is_logged_in_the_transcript(env):
+    store, _, harness, dispatcher = env
+    waiting = Approval(run_id="r0", thread_key="chat:u1:c1", tool="gmail_send",
+                       action="gmail.send", args={"to": "a@b.c"}, requested_by="u1",
+                       reason="Send the draft to a@b.c")
+    elsewhere = Approval(run_id="r9", thread_key="chat:u9:c9", tool="x", action="a.x",
+                         args={}, requested_by="u9")
+    for approval in (waiting, elsewhere):
+        await store.create_approval(approval)
+    # MCP-style text content, as harnesses report the gateway's pending result
+    harness.tool_output = [{"type": "text", "text": (
+        f'{{"status": "pending_approval", "approval_id": "{waiting.id}", "message": "m"}}'
+        f' see also {elsewhere.id}')}]
+    await store.put(*chat("send it"))
+    await drain(dispatcher)
+
+    msgs = await store.list_messages("chat:u1:c1")
+    assert [m.role for m in msgs] == [Role.USER, Role.TOOL, Role.EVENT, Role.ASSISTANT]
+    (block,) = msgs[2].blocks
+    assert block["type"] == "approval_request" and block["approval_id"] == waiting.id
+    assert block["tool"] == "gmail_send" and block["summary"] == "Send the draft to a@b.c"
+    assert block["args"] == {"to": "a@b.c"} and block["expires_at"] is None
+    assert msgs[2].raw == {"approval_id": waiting.id}
 
 
 async def test_second_turn_resumes_session_and_sends_only_new_events(env):

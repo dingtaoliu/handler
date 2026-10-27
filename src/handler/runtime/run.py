@@ -43,6 +43,7 @@ from .tasks import publish_task
 from .store.base import Store
 from .uploads import UploadedFile, UploadStore
 from .types import (
+    Approval,
     Event,
     Lease,
     Message,
@@ -195,6 +196,39 @@ def transcript_message(thread_key: str, run_id: str, ev: RunEvent,
         ]
         return Message(thread_key, Role.TOOL, blocks, run_id=run_id, raw=ev.raw)
     return None
+
+
+_APPROVAL_ID = re.compile(r"\bapr_[0-9a-f]{16}\b")
+
+
+def pending_approval_ids(message: Message) -> list[str]:
+    """Approval ids a tool message's result says are waiting on a person.
+
+    Harnesses report the gateway's `{"status": "pending_approval", ...}` as a
+    dict, a JSON string or MCP content blocks, so match on the serialized text.
+    """
+    if message.role is not Role.TOOL:
+        return []
+    ids: list[str] = []
+    for block in message.blocks:
+        if block.get("type") != "tool_result":
+            continue
+        text = json.dumps(block.get("output"), default=str)
+        if "pending_approval" in text:
+            ids += [i for i in _APPROVAL_ID.findall(text) if i not in ids]
+    return ids
+
+
+def approval_request_message(thread_key: str, run_id: str, approval: Approval) -> Message:
+    """The transcript record of a request for a person's approval."""
+    block = {
+        "type": "approval_request", "approval_id": approval.id,
+        "tool": approval.tool, "action": approval.action, "summary": approval.reason,
+        "args": approval.args, "requested_by": approval.requested_by,
+        "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
+    }
+    return Message(thread_key, Role.EVENT, [block], run_id=run_id,
+                   raw={"approval_id": approval.id})
 
 
 def _step_input(preview: Any) -> Any:
@@ -603,6 +637,7 @@ class RunExecutor:
                     msg = transcript_message(thread.key, run.id, ev, tool_inputs)
                     if msg is not None:
                         transcript.append(msg)
+                        transcript.extend(await self._approval_requests(msg))
                 return final_text
             except HarnessError as exc:
                 if (attempt or progressed or not req.session_id
@@ -617,6 +652,20 @@ class RunExecutor:
                               prompt=(recap + "\n\nCurrent turn:\n" if recap else "") + req.prompt)
                 del transcript[input_count:]
         raise AssertionError("unreachable")
+
+    async def _approval_requests(self, message: Message) -> list[Message]:
+        """Log the approvals a tool call is waiting on, right after the call."""
+        requests: list[Message] = []
+        for approval_id in pending_approval_ids(message):
+            try:
+                approval = await self.store.get_approval(approval_id)
+            except Exception:  # the transcript must not fail the run
+                logger.exception("reading approval %s for the transcript failed", approval_id)
+                continue
+            if approval is not None and approval.thread_key == message.thread_key:
+                requests.append(
+                    approval_request_message(message.thread_key, message.run_id or "", approval))
+        return requests
 
     async def _recap(
         self, thread_key: str,

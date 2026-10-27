@@ -373,6 +373,13 @@ function blockHtml(b, role) {
         return `<span>${esc(p.name || b.event_type || "event")}</span>` +
             (p.prompt ? `<div>${esc(p.prompt)}</div>` : "");
     }
+    if (b.type === "approval_request") {
+        // Decided requests answer 409; the outcome follows as an approval.resolved event.
+        return `<div><b>Approval requested:</b> ${esc(b.tool || b.action || "tool")}</div>` +
+            (b.summary ? `<pre>${esc(b.summary)}</pre>` : "") +
+            `<div class="row"><button class="btn-small btn-primary" data-action="appr-approve" data-id="${esc(b.approval_id)}">Approve</button>
+            <button class="btn-small btn-danger" data-action="appr-deny" data-id="${esc(b.approval_id)}">Deny</button></div>`;
+    }
     return `<pre>${esc(json(b))}</pre>`;
 }
 
