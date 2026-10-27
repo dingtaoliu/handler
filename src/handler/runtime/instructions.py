@@ -28,6 +28,7 @@ async def build_instructions(
     elif _GUIDANCE.get(thread_type):
         sections.append(_GUIDANCE[thread_type])
     sections.append("Durable facts go to memory_save, not files.")
+    sections.append(ASK_USER_GUIDANCE)
     sections.append("If you have crontal_api_* tools: find endpoints with crontal_api_routes, "
                     "and call crontal_api_describe before a write you haven't made in this "
                     "thread, so the body matches its schema. A 400/422 result includes the "
@@ -43,6 +44,15 @@ async def build_instructions(
                     "(crontal_api_get /api/v1/files/merchant, newest first) before answering "
                     "from memory or searching the web.")
     return "\n\n".join(sections)
+
+
+ASK_USER_GUIDANCE = (
+    "Use ask_user only when you are genuinely blocked by a decision a person must make, "
+    "and offer a few concrete options (2-5 short labels). Don't ask when a reasonable "
+    "default exists: pick it and say so. After asking, end your turn; don't wait, poll "
+    "or ask again. The answer (or a note that the question expired) arrives in this "
+    "thread as a new message. A message typed in the meantime is not the answer; the "
+    "question stays open until someone picks an option.")
 
 
 async def crontal_identity_section(client: Any) -> str:

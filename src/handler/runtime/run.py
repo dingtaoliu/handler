@@ -47,6 +47,7 @@ from .types import (
     Event,
     Lease,
     Message,
+    Question,
     Role,
     Run,
     RunStatus,
@@ -119,6 +120,33 @@ def register_event_renderer(event_type: str, render: Callable[[dict, str], str])
     EVENT_RENDERERS[event_type] = render
 
 
+QUESTION_ANSWERED = "question.answered"
+
+
+def render_question_answered(payload: dict) -> str:
+    """One line telling the agent how its `ask_user` question was resolved."""
+    question = " ".join(str(payload.get("question") or "").split())
+    if len(question) > 200:
+        question = question[:199] + "…"
+    status = payload.get("status")
+    who = payload.get("answered_by_name") or payload.get("answered_by") or "Someone"
+    qid = payload.get("question_id") or ""
+    if status == "expired":
+        return f'Your question "{question}" ({qid}) expired unanswered.'
+    if status == "canceled":
+        return (f'Your question "{question}" ({qid}) was canceled by {who}; '
+                "don't wait for an answer.")
+    answer = payload.get("answer") or {}
+    label, text = answer.get("label"), answer.get("text")
+    if label and text:
+        said = f'{label} (and wrote: "{text}")'
+    elif label:
+        said = str(label)
+    else:
+        said = f'"{text or ""}"'
+    return f'{who} answered your question "{question}" ({qid}): {said}'
+
+
 def render_turn(events: list[Event]) -> str:
     """Render pending events as one turn for the harness.
 
@@ -131,6 +159,8 @@ def render_turn(events: list[Event]) -> str:
             parts.append(str(ev.payload.get("text", "")))
         elif ev.type == "email.received":
             parts.append(render_email_event(ev.payload, ev.source))
+        elif ev.type == QUESTION_ANSWERED:
+            parts.append(render_question_answered(ev.payload))
         elif ev.type in EVENT_RENDERERS:
             parts.append(EVENT_RENDERERS[ev.type](ev.payload, ev.source))
         else:
@@ -229,6 +259,37 @@ def approval_request_message(thread_key: str, run_id: str, approval: Approval) -
     }
     return Message(thread_key, Role.EVENT, [block], run_id=run_id,
                    raw={"approval_id": approval.id})
+
+
+_QUESTION_ID = re.compile(r"\bq_[0-9a-f]{16}\b")
+
+
+def pending_question_ids(message: Message) -> list[str]:
+    """Question ids a tool message's result says are waiting for an answer
+    (`ask_user`'s `{"status": "waiting_for_answer", ...}`, in any shape)."""
+    if message.role is not Role.TOOL:
+        return []
+    ids: list[str] = []
+    for block in message.blocks:
+        if block.get("type") != "tool_result":
+            continue
+        text = json.dumps(block.get("output"), default=str)
+        if "waiting_for_answer" in text:
+            ids += [i for i in _QUESTION_ID.findall(text) if i not in ids]
+    return ids
+
+
+def question_request_message(thread_key: str, run_id: str, question: Question) -> Message:
+    """The transcript record of a question the agent asked people."""
+    block = {
+        "type": "question_request", "question_id": question.id,
+        "question": question.question, "options": question.options,
+        "allow_text": question.allow_text,
+        "expires_at": question.expires_at.isoformat() if question.expires_at else None,
+        "untrusted": question.untrusted,
+    }
+    return Message(thread_key, Role.EVENT, [block], run_id=run_id,
+                   raw={"question_id": question.id})
 
 
 def _step_input(preview: Any) -> Any:
@@ -638,6 +699,7 @@ class RunExecutor:
                     if msg is not None:
                         transcript.append(msg)
                         transcript.extend(await self._approval_requests(msg))
+                        transcript.extend(await self._question_requests(msg))
                 return final_text
             except HarnessError as exc:
                 if (attempt or progressed or not req.session_id
@@ -665,6 +727,20 @@ class RunExecutor:
             if approval is not None and approval.thread_key == message.thread_key:
                 requests.append(
                     approval_request_message(message.thread_key, message.run_id or "", approval))
+        return requests
+
+    async def _question_requests(self, message: Message) -> list[Message]:
+        """Log the questions a tool call asked, right after the call."""
+        requests: list[Message] = []
+        for question_id in pending_question_ids(message):
+            try:
+                question = await self.store.get_question(question_id)
+            except Exception:  # the transcript must not fail the run
+                logger.exception("reading question %s for the transcript failed", question_id)
+                continue
+            if question is not None and question.thread_key == message.thread_key:
+                requests.append(
+                    question_request_message(message.thread_key, message.run_id or "", question))
         return requests
 
     async def _recap(

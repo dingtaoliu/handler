@@ -70,6 +70,13 @@ def _event_summary(event: dict) -> str:
                           if v not in (None, ""))
         note = payload.get("type") or "notification"
         return f"{entity or 'Crontal'} · {note}"
+    if kind == "question.answered":
+        question = _clip(payload.get("question"), 100)
+        status = payload.get("status") or "answered"
+        if status == "answered":
+            answer = payload.get("answer") or {}
+            return f"Answer: {_clip(answer.get('label') or answer.get('text'), 60)} ({question})"
+        return f"Question {status}: {question}"
     if kind == "approval.resolved":
         return f"Approval {payload.get('status') or 'resolved'}: {payload.get('tool') or 'tool'}"
     if kind == "chat.message":
@@ -115,7 +122,7 @@ def _tokens(usage: Any) -> dict | None:
 
 
 def _run_item(row: dict, events: list[dict], titles: dict[str, dict], pending: list[str],
-              now: datetime) -> dict:
+              now: datetime, questions: list[str] | None = None) -> dict:
     status = row["task_status"]
     error = row.get("error")
     if status in ("failed", "dead") and row["run_status"] in ("running", "abandoned"):
@@ -143,6 +150,7 @@ def _run_item(row: dict, events: list[dict], titles: dict[str, dict], pending: l
         "summary": _final_text(row),
         "error": error,
         "pending_approval_ids": pending,
+        "pending_question_ids": questions or [],
     }
 
 
@@ -173,6 +181,7 @@ def _queued_item(row: dict, events: list[dict], titles: dict[str, dict]) -> dict
         "retry_at": row.get("available_at") if row.get("attempts") else None,
         "attempts": row.get("attempts") or 0,
         "pending_approval_ids": [],
+        "pending_question_ids": [],
     }
 
 
@@ -204,6 +213,10 @@ async def _items(store: Any, rows: list[dict], queued: list[dict], user_id: str 
     approvals: dict[str, list[str]] = {}
     for a in await store.task_approvals(waiting, pending_only=True) if waiting else []:
         approvals.setdefault(a["run_id"], []).append(a["id"])
+    asking = [r["run_id"] for r in rows if r["task_status"] == "waiting_answer"]
+    questions: dict[str, list[str]] = {}
+    for q in await store.task_questions(asking, pending_only=True) if asking else []:
+        questions.setdefault(q["run_id"], []).append(q["id"])
     keys = sorted({r["thread_key"] for r in rows} | {q["thread_key"] for q in queued})
     titles = await store.thread_metadata(keys, user_id) if keys else {}
     now = utcnow()
@@ -211,7 +224,8 @@ async def _items(store: Any, rows: list[dict], queued: list[dict], user_id: str 
     for row in rows:
         trigger = sorted((events[i] for i in row.get("trigger_event_ids") or [] if i in events),
                          key=lambda e: (e["received_at"], e["id"]))
-        items.append(_run_item(row, trigger, titles, approvals.get(row["run_id"], []), now))
+        items.append(_run_item(row, trigger, titles, approvals.get(row["run_id"], []), now,
+                               questions.get(row["run_id"], [])))
     return items
 
 
@@ -302,6 +316,23 @@ def _approval_step(approval: dict) -> dict:
     }
 
 
+def _question_step(question: dict) -> dict:
+    return {
+        "seq": None, "kind": "question", "name": "ask_user", "status": question["status"],
+        "source": "gateway", "started_at": question["created_at"],
+        "ended_at": question.get("answered_at"),
+        "duration_ms": _ms(question["created_at"], question.get("answered_at")),
+        "model": None, "usage": None, "cost_usd": None, "parent_seq": None, "raw_ref": None,
+        "data": _truncate({"question_id": question["id"], "question": question["question"],
+                           "options": question.get("options"),
+                           "allow_text": question.get("allow_text"),
+                           "answer": question.get("answer"),
+                           "answered_by": question.get("answered_by"),
+                           "expires_at": question.get("expires_at"),
+                           "untrusted": question.get("untrusted")}),
+    }
+
+
 async def get_task(store: Any, run_id: str, *, user_id: str | None,
                    include_steps: bool) -> dict | None:
     """One task by run id (non-chat threads only), with `steps` when asked."""
@@ -316,6 +347,7 @@ async def get_task(store: Any, run_id: str, *, user_id: str | None,
             steps.append(_step(step, previous))
             previous = step.ended_at or step.started_at
         steps += [_approval_step(a) for a in await store.task_approvals([run_id])]
+        steps += [_question_step(q) for q in await store.task_questions([run_id])]
         steps.sort(key=lambda s: (s["started_at"], s["seq"] if s["seq"] is not None else 1 << 30))
         item["steps"] = steps
     return item

@@ -541,6 +541,7 @@ from .postgres_domains import (  # noqa: E402
     ConnectionMixin,
     MemoryMixin,
     NotificationMixin,
+    QuestionMixin,
     ScheduleMixin,
     SettingsMixin,
     UsersMixin,
@@ -554,7 +555,7 @@ from .thread_metadata import PostgresThreadMetadata  # noqa: E402
 
 class PostgresStore(
     TaskQueries, PostgresThreadMetadata, PostgresDeliveries, ScheduleMixin, ApprovalMixin,
-    AuditMixin,
+    QuestionMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, PostgresCore,
 ):

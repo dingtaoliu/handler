@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -218,3 +219,96 @@ def test_render_turn_wraps_non_chat_events():
                idempotency_key="x")
     out = render_turn([ev])
     assert out.startswith('<event type="automation.fired"') and '"job": "digest"' in out
+
+
+class AskingHarness(FakeHarness):
+    """Calls ask_user through the real gateway on its first turn, like an MCP call."""
+
+    def __init__(self, gateway) -> None:
+        super().__init__()
+        self.gateway = gateway
+
+    async def run(self, req: RunRequest):
+        from handler.runtime.context import RunContext
+
+        self.requests.append(req)
+        yield RunEvent(RunEventKind.SESSION, {"session_id": req.session_id or "sess-1"})
+        if len(self.requests) == 1:
+            args = {"question": "Ship by sea or air?", "options": ["Sea", "Air"]}
+            yield RunEvent(RunEventKind.TOOL_STARTED, {"id": "t1", "tool": "ask_user",
+                                                       "kind": "mcp_tool_call", "input": args})
+            result = await self.gateway.call(
+                RunContext(run_id=req.run_id, thread_key=req.thread_key, user_id="u1",
+                           acting_as="u1"), "ask_user", args)
+            # MCP harnesses see the result as text content blocks
+            output = [{"type": "text", "text": json.dumps(result.content)}]
+            yield RunEvent(RunEventKind.TOOL_FINISHED, {"id": "t1", "tool": "ask_user",
+                                                        "kind": "mcp_tool_call", "output": output,
+                                                        "status": "completed"})
+        yield RunEvent(RunEventKind.ASSISTANT_TEXT, {"text": "ok"})
+        yield RunEvent(RunEventKind.FINAL, {"text": "ok", "session_id": "sess-1"})
+
+
+async def test_ask_user_question_answer_wakes_a_new_run(tmp_path: Path):
+    from handler.runtime.gateway import Gateway, GrantPolicy, QuestionService, QuestionTools
+    from handler.runtime.server import thread_router
+
+    store = SQLiteStore(tmp_path / "h.db")
+    try:
+        emit = thread_router(store)
+        service = QuestionService(store, emit_event=emit)
+        gateway = Gateway(store, GrantPolicy(), emit_event=emit)
+        gateway.register(QuestionTools(service))
+        harness = AskingHarness(gateway)
+        config = RunConfig(data_dir=tmp_path / "data", heartbeat_seconds=0.05, lease_seconds=5)
+        executor = RunExecutor(store, {"fake": harness}, RunEventBus(), config,
+                               PriceTable.from_yaml())
+        dispatcher = Dispatcher(store, executor, lease_seconds=5)
+
+        await store.put(*chat("book the shipment"))
+        await drain(dispatcher)
+        msgs = await store.list_messages("chat:u1:c1")
+        assert [m.role for m in msgs] == [Role.USER, Role.TOOL, Role.EVENT, Role.ASSISTANT]
+        (block,) = msgs[2].blocks
+        (question,) = await store.list_questions()
+        assert block == {
+            "type": "question_request", "question_id": question.id,
+            "question": "Ship by sea or air?",
+            "options": [{"id": "o1", "label": "Sea"}, {"id": "o2", "label": "Air"}],
+            "allow_text": False, "expires_at": question.expires_at.isoformat(),
+            "untrusted": False,
+        }
+        # The run ended; nothing is pending until someone answers.
+        assert (await store.get_thread("chat:u1:c1")).pending_since is None
+
+        # A typed message is a normal turn; the question stays open.
+        await store.put(*chat("any update?"))
+        await drain(dispatcher)
+        assert harness.requests[-1].prompt == "any update?"
+        assert (await store.get_question(question.id)).answered_by is None
+
+        await service.answer(question.id, "u1", option_id="o2")
+        await drain(dispatcher)
+        assert len(harness.requests) == 3
+        prompt = harness.requests[-1].prompt
+        assert prompt == (f'u1 answered your question "Ship by sea or air?" '
+                          f'({question.id}): Air')
+        last = (await store.list_messages("chat:u1:c1"))[-2]
+        assert last.role is Role.EVENT and last.blocks[0]["event_type"] == "question.answered"
+        assert last.blocks[0]["payload"]["answer"]["label"] == "Air"
+    finally:
+        await store.close()
+
+
+def test_render_question_answered_lines():
+    from handler.runtime.types import Event as Ev
+
+    def line(payload):
+        return render_turn([Ev(type="question.answered", source="gateway", payload=payload, idempotency_key="k")])
+
+    base = {"question_id": "q_1", "question": "Sea or air?"}
+    assert line({**base, "status": "expired"}) == 'Your question "Sea or air?" (q_1) expired unanswered.'
+    assert line({**base, "status": "answered", "answered_by": "u1", "answered_by_name": "Ann",
+                 "answer": {"option_id": None, "label": None, "text": "Rail"}}) \
+        == 'Ann answered your question "Sea or air?" (q_1): "Rail"'
+    assert "canceled" in line({**base, "status": "canceled", "answered_by": "admin"})

@@ -35,8 +35,10 @@ UNTRUSTED_THREAD_TYPES = frozenset({"email", "crontal", "gmail", "mail"})
 # write_internal actions that stay inside the thread or the merchant, so they
 # may still run unasked there. Every other write_internal (memory, automations,
 # future tools) persists into what other threads read and needs approval.
+# question.ask only notifies the merchant's own users and waits for one of
+# them to pick an answer (the record is flagged untrusted for the UI).
 INSIDE_ACTIONS = frozenset({
-    "thread.set_title", "notify.send", "gmail.create_draft", "gmail.update_draft",
+    "thread.set_title", "notify.send", "question.ask", "gmail.create_draft", "gmail.update_draft",
     "mail.draft_reply",
 })
 

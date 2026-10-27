@@ -22,6 +22,8 @@ from ..types import (
     Decision,
     Event,
     MemoryTopic,
+    Question,
+    QuestionStatus,
     Schedule,
     SettingsVersion,
     ThreadSpec,
@@ -33,7 +35,7 @@ from .sqlite_memory import Notification
 from .sqlite_users import ROLES, User, UserToken, check_user, hash_token, new_token
 
 T = TypeVar("T")
-_JSON = {"args", "result", "notify", "scopes"}
+_JSON = {"args", "result", "notify", "scopes", "options", "answer"}
 
 
 def _row_values(record: Any) -> dict[str, Any]:
@@ -56,6 +58,8 @@ def _from_row(cls: type[T], row: dict[str, Any]) -> T:
     values = {field.name: row[field.name] for field in fields(cls)}
     if cls is Approval:
         values["status"] = ApprovalStatus(values["status"])
+    elif cls is Question:
+        values["status"] = QuestionStatus(values["status"])
     elif cls is AuditEntry:
         values["decision"] = Decision(values["decision"])
     return cls(**values)
@@ -195,6 +199,64 @@ class ApprovalMixin(_Rows):
             cursor = await conn.execute(
                 f"UPDATE approvals SET {', '.join(sets)} WHERE id = %s AND status = %s",
                 (*params, approval_id, expected.value),
+            )
+            return cursor.rowcount == 1
+
+
+class QuestionMixin(_Rows):
+    async def create_question(self, question: Question) -> None:
+        async with self._conn() as conn:
+            await _insert(conn, "questions", _row_values(question))
+
+    async def get_question(self, question_id: str) -> Question | None:
+        return await self._fetch_one(
+            Question, f"SELECT {_columns(Question)} FROM questions WHERE id = %s",
+            (question_id,),
+        )
+
+    async def list_questions(
+        self,
+        status: QuestionStatus | None = None,
+        limit: int = 100,
+        thread_key: str | None = None,
+        run_ids: list[str] | None = None,
+    ) -> list[Question]:
+        clauses, params = [], []
+        if status:
+            clauses.append("status = %s")
+            params.append(status.value)
+        if thread_key:
+            clauses.append("thread_key = %s")
+            params.append(thread_key)
+        if run_ids is not None:
+            if not run_ids:
+                return []
+            clauses.append("run_id = ANY(%s)")
+            params.append(list(run_ids))
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        return await self._fetch(
+            Question, f"SELECT {_columns(Question)} FROM questions {where}"
+            "ORDER BY created_at DESC, seq DESC LIMIT %s", (*params, limit),
+        )
+
+    async def transition_question(
+        self,
+        question_id: str,
+        expected: QuestionStatus,
+        new: QuestionStatus,
+        *,
+        answer: dict | None = None,
+        answered_by: str | None = None,
+    ) -> bool:
+        sets = ["status = %s"]
+        params: list[Any] = [new.value]
+        if answer is not None:
+            sets += ["answer = %s", "answered_by = %s", "answered_at = %s"]
+            params += [Jsonb(answer), answered_by, self._clock()]
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                f"UPDATE questions SET {', '.join(sets)} WHERE id = %s AND status = %s",
+                (*params, question_id, expected.value),
             )
             return cursor.rowcount == 1
 

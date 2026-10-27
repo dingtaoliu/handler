@@ -5,6 +5,8 @@ from handler.runtime.types import (
     Event,
     Lane,
     Message,
+    Question,
+    QuestionStatus,
     Role,
     Run,
     RunStatus,
@@ -82,3 +84,29 @@ async def test_task_status_derivation_and_pagination(domain_store, clock):
     assert item["status"] == "failed" and item["steps"] == []
     approval = (await get_task(store, waiting.id, user_id=None, include_steps=True))["steps"]
     assert [s["kind"] for s in approval] == ["approval"]
+
+
+async def test_a_run_waiting_on_a_question_is_waiting_answer(domain_store, clock):
+    store = domain_store
+    lease, run = await _start(store, clock, "automation:ask", ThreadType.AUTOMATION,
+                              {"name": "Ask"})
+    await _complete(store, clock, lease, run, "Asked")
+    question = Question(run_id=run.id, thread_key=run.thread_key, asked_by=None,
+                        question="Which one?", options=[{"id": "o1", "label": "A"},
+                                                        {"id": "o2", "label": "B"}],
+                        created_at=clock())
+    await store.create_question(question)
+    (item,) = (await list_tasks(store, user_id=None))["items"]
+    assert item["status"] == "waiting_answer"
+    assert item["pending_question_ids"] == [question.id] and item["pending_approval_ids"] == []
+    assert [i["run_id"] for i in (await list_tasks(
+        store, user_id=None, statuses=["waiting_answer"]))["items"]] == [run.id]
+    detail = await get_task(store, run.id, user_id=None, include_steps=True)
+    (step,) = [s for s in detail["steps"] if s["kind"] == "question"]
+    assert step["status"] == "pending" and step["data"]["question"] == "Which one?"
+
+    assert await store.transition_question(
+        question.id, QuestionStatus.PENDING, QuestionStatus.ANSWERED,
+        answer={"option_id": "o1", "label": "A", "text": None}, answered_by="u")
+    (item,) = (await list_tasks(store, user_id=None))["items"]
+    assert item["status"] == "succeeded" and item["pending_question_ids"] == []
