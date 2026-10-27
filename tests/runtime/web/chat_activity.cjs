@@ -80,6 +80,14 @@ function browser() {
     // Data remains escaped in run/event rendering.
     assert.doesNotMatch(b.run('stepHtml({kind:"assistant_text",data:{text:"<script>bad()</script>"}})'), /<script>/);
     assert.match(b.run('messageHtml({role:"tool",blocks:[{type:"tool_call",name:"notify",input:{message:"Visible reminder",to:["1"]}},{type:"tool_result",output:{}}]})'), /Notification<\/b><div><p>Visible reminder/);
+    const markdown = b.run('md("| Item | Qty | Status |\\n|:---|---:|:---:|\\n| **Bolts** | 20 | Ready |\\n| Nuts | 10 | ~~Waiting~~ |")');
+    assert.match(markdown, /<table><thead><tr>/);
+    assert.match(markdown, /<strong>Bolts<\/strong>/);
+    assert.match(markdown, /md-align-right[^>]*>20<\/td>/);
+    assert.match(markdown, /<del>Waiting<\/del>/);
+    assert.doesNotMatch(b.run('md("| Value |\\n|---|\\n| <img src=x onerror=bad()> |")'), /<img/,
+        'raw HTML in Markdown must remain escaped');
+    assert.match(b.run('md("- [x] Done\\n- [ ] Next")'), /checkbox[^>]*checked/);
 
     // Tasks tab: list from /api/tasks, admin trace, member note, live refresh.
     const tk = browser();

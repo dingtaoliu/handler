@@ -628,9 +628,17 @@ body.light .badge-blue { background: #dbeafe; color: #1d4ed8; }
 .msg.assistant a { color: var(--primary); text-decoration: none; }
 .msg.assistant a:hover { text-decoration: underline; }
 .msg.assistant hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
-.msg.assistant table { border-collapse: collapse; margin: 8px 0; font-size: 13px; width: 100%; }
+.msg.assistant .markdown-table { max-width: 100%; margin: 10px 0; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+.msg.assistant table { border-collapse: collapse; font-size: 13px; width: 100%; min-width: max-content; }
 .msg.assistant table th, .msg.assistant table td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.msg.assistant .markdown-table table { margin: -1px; width: calc(100% + 2px); }
 .msg.assistant table th { background: var(--panel-3); font-weight: 600; font-size: 12px; }
+.msg.assistant table .md-align-center { text-align: center; }
+.msg.assistant table .md-align-right { text-align: right; }
+.msg.assistant table .md-align-left { text-align: left; }
+.msg.assistant .md-task { list-style: none; margin-left: -20px; display: flex; align-items: baseline; gap: 7px; }
+.msg.assistant .md-task input { accent-color: var(--primary); }
+.msg.assistant del { color: var(--muted); }
 .msg.assistant img { max-width: 100%; border-radius: 6px; margin: 8px 0; }
 .chat-image { max-width: 100%; max-height: 300px; border-radius: 10px; margin: 4px 0; display: block; }
 .msg.user .chat-image { max-height: 200px; }

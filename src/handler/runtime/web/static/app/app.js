@@ -216,7 +216,8 @@ function download(blob, name) {
 }
 async function fetchBlob(path) { return (await apiRaw(path)).blob(); }
 
-// Minimal safe markdown (input is escaped first).
+// Safe, dependency-free Markdown for chat messages. Input is escaped before
+// any markup is introduced, so raw HTML always remains text.
 function md(src) {
     const stash = [];
     const keep = (html) => { stash.push(html); return `\u0000${stash.length - 1}\u0000`; };
@@ -226,13 +227,52 @@ function md(src) {
     const inline = (s) => s
         .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
         .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+        .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
         .replace(/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^)\s]+)\)/g,
             '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    const tableCells = (line) => {
+        let row = line.trim();
+        if (row.startsWith("|")) row = row.slice(1);
+        if (row.endsWith("|") && !row.endsWith("\\|")) row = row.slice(0, -1);
+        const cells = [], cell = [];
+        let escaped = false;
+        for (const ch of row) {
+            if (escaped) { cell.push(ch); escaped = false; }
+            else if (ch === "\\") escaped = true;
+            else if (ch === "|") { cells.push(cell.join("").trim()); cell.length = 0; }
+            else cell.push(ch);
+        }
+        if (escaped) cell.push("\\");
+        cells.push(cell.join("").trim());
+        return cells;
+    };
+    const delimiter = (line) => tableCells(line).map((cell) => cell.replace(/\s/g, ""));
+    const isTable = (lines) => lines.length >= 2 && lines[0].includes("|") &&
+        delimiter(lines[1]).length === tableCells(lines[0]).length &&
+        delimiter(lines[1]).every((cell) => /^:?-{3,}:?$/.test(cell));
+    const alignClass = (cell) => cell.startsWith(":") && cell.endsWith(":") ? " md-align-center"
+        : cell.endsWith(":") ? " md-align-right" : cell.startsWith(":") ? " md-align-left" : "";
+    const listItem = (text) => {
+        const task = /^\[([ xX])\]\s+(.*)$/.exec(text);
+        return task ? `<li class="md-task"><input type="checkbox" disabled${task[1] === " " ? "" : " checked"}>${inline(task[2])}</li>`
+            : `<li>${inline(text)}</li>`;
+    };
     const out = [];
     for (const block of t.split(/\n{2,}/)) {
         const lines = block.split("\n");
-        if (lines.every((l) => /^\s*[-*] /.test(l))) {
-            out.push("<ul>" + lines.map((l) => `<li>${inline(l.replace(/^\s*[-*] /, ""))}</li>`).join("") + "</ul>");
+        if (isTable(lines)) {
+            const headers = tableCells(lines[0]), rules = delimiter(lines[1]);
+            const cells = (line) => {
+                const row = tableCells(line);
+                return headers.map((_, i) => row[i] || "");
+            };
+            out.push('<div class="markdown-table"><table><thead><tr>' +
+                headers.map((cell, i) => `<th class="${alignClass(rules[i]).trim()}">${inline(cell)}</th>`).join("") +
+                "</tr></thead><tbody>" + lines.slice(2).filter((line) => line.trim()).map((line) =>
+                    "<tr>" + cells(line).map((cell, i) => `<td class="${alignClass(rules[i]).trim()}">${inline(cell)}</td>`).join("") + "</tr>").join("") +
+                "</tbody></table></div>");
+        } else if (lines.every((l) => /^\s*[-*] /.test(l))) {
+            out.push("<ul>" + lines.map((l) => listItem(l.replace(/^\s*[-*] /, ""))).join("") + "</ul>");
         } else if (lines.every((l) => /^\s*\d+[.)] /.test(l))) {
             out.push("<ol>" + lines.map((l) => `<li>${inline(l.replace(/^\s*\d+[.)] /, ""))}</li>`).join("") + "</ol>");
         } else if (lines.every((l) => /^&gt; ?/.test(l))) {
