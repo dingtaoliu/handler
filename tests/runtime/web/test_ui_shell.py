@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import httpx
 import pytest
 
@@ -42,6 +44,16 @@ async def test_shell_has_workspace_navigation_and_accessible_chat_controls(clien
 async def test_assets_are_served(client, name, kind):
     r = await client.get(f"/app/static/{name}")
     assert r.status_code == 200 and kind in r.headers["content-type"]
+
+
+async def test_composer_override_stretches_both_rows(client):
+    css = (await client.get("/app/static/style.css")).text
+    input_area = re.findall(r"#input-area\s*\{([^}]*)\}", css)[-1]
+    input_rule = re.findall(r"#input\s*\{([^}]*)\}", css)[-1]
+    actions = re.findall(r"\.composer-actions\s*\{([^}]*)\}", css)[-1]
+    assert "align-items: stretch" in input_area
+    assert "width: 100%" in input_rule
+    assert "width: 100%" in actions
 
 
 @pytest.mark.parametrize("name", ["missing.js", "..%2Flogin.html", "index.html"])
