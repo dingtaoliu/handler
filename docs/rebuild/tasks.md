@@ -14,7 +14,8 @@ instance prefix (`/i/<name>/api/tasks`) like the rest of the API.
 | `queued` | Thread has unconsumed routed events, is not dead, and no live lease. Includes a retry after a failure (`retry_at`, `attempts`, `error`) |
 | `running` | Run row `running` and the thread's lease is still held by that run (same lease version, not expired) |
 | `waiting_approval` | Run is not failed/running, and one of its approvals is still `pending` |
-| `succeeded` | Run `completed` (and no pending approval) |
+| `waiting_answer` | As `waiting_approval`, with no pending approval but a `pending` question (`ask_user`, see `ask-user.md`) |
+| `succeeded` | Run `completed` (and no pending approval or question) |
 | `failed` | Run `failed`/`cancelled`, or a `running` row whose lease lapsed (worker died: `error` says it was interrupted) |
 | `dead` | Failed run that is the latest run of a thread marked dead (retries exhausted or not retryable) |
 
@@ -55,6 +56,7 @@ decision queues an `approval.resolved` event, which becomes a new task.
   "summary": "I replied with …",  // last assistant text, ≤300 chars
   "error": null,
   "pending_approval_ids": [],
+  "pending_question_ids": [],
   "retry_at": null, "attempts": 0  // queued items only
 }], "next_cursor": "eyJ…"}
 ```

@@ -80,6 +80,17 @@ function browser() {
     // Data remains escaped in run/event rendering.
     assert.doesNotMatch(b.run('stepHtml({kind:"assistant_text",data:{text:"<script>bad()</script>"}})'), /<script>/);
     assert.match(b.run('messageHtml({role:"tool",blocks:[{type:"tool_call",name:"notify",input:{message:"Visible reminder",to:["1"]}},{type:"tool_result",output:{}}]})'), /Notification<\/b><div><p>Visible reminder/);
+    // ask_user: a question with option buttons (and a text box when allowed) that post answers.
+    const q = b.run('blockHtml({type:"question_request",question_id:"q_1",question:"Sea or <b>air</b>?",options:[{id:"o1",label:"Sea"},{id:"o2",label:"Air"}],allow_text:true,untrusted:true}, "event")');
+    assert.match(q, /Question:<\/b> Sea or &lt;b&gt;air/);
+    assert.match(q, /data-action="q-answer" data-id="q_1" data-option="o2">Air</);
+    assert.match(q, /id="qtext-q_1"/); assert.match(q, /outside input/);
+    assert.doesNotMatch(b.run('blockHtml({type:"question_request",question_id:"q_2",question:"x",options:[{id:"o1",label:"A"}]}, "event")'), /qtext|outside input/);
+    assert.match(b.run('blockHtml({type:"event",event_type:"question.answered",payload:{question:"Sea or air?",status:"answered",answered_by:"u1",answer:{label:"Air"}}}, "event")'), /u1 answered "Sea or air\?": <b>Air/);
+    assert.match(b.run('blockHtml({type:"event",event_type:"question.answered",payload:{question:"Sea?",status:"expired"}}, "event")'), /expired unanswered/);
+    b.run('var answerCalls = []; api = async (path, opts) => { answerCalls.push([path, opts && opts.body]); return {}; }');
+    await b.run('actions["q-answer"]({dataset:{id:"q_1",option:"o2"}})');
+    assert.deepEqual(JSON.parse(JSON.stringify(b.run('answerCalls'))), [["/api/questions/q_1/answer", JSON.stringify({option_id:"o2"})]]);
 
     // Tasks tab: list from /api/tasks, admin trace, member note, live refresh.
     const tk = browser();

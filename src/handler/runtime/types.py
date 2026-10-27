@@ -300,6 +300,39 @@ class Approval:
     created_at: datetime = field(default_factory=utcnow)
 
 
+class QuestionStatus(StrEnum):
+    PENDING = "pending"
+    ANSWERED = "answered"
+    EXPIRED = "expired"
+    CANCELED = "canceled"
+
+
+@dataclass
+class Question:
+    """A multiple-choice question the agent asked people (`ask_user`).
+
+    options: [{"id": "o1", "label": "..."}], 2-5 of them.
+    answer: {"option_id": str | None, "label": str | None, "text": str | None}.
+    untrusted: asked on a thread fed by outside input (email, crontal, mail...),
+        so the question may have been shaped by that input.
+    """
+
+    run_id: str
+    thread_key: str
+    asked_by: str | None  # acting_as user of the run, None = the agent itself
+    question: str
+    options: list[dict[str, Any]]
+    allow_text: bool = False
+    status: QuestionStatus = QuestionStatus.PENDING
+    answer: dict[str, Any] | None = None
+    answered_by: str | None = None
+    answered_at: datetime | None = None
+    expires_at: datetime | None = None
+    untrusted: bool = False
+    id: str = field(default_factory=lambda: new_id("q"))
+    created_at: datetime = field(default_factory=utcnow)
+
+
 @dataclass
 class AuditEntry:
     run_id: str | None

@@ -18,6 +18,8 @@ from ..types import (
     Connection,
     Event,
     MemoryTopic,
+    Question,
+    QuestionStatus,
     Schedule,
     SettingsVersion,
     Lane,
@@ -231,6 +233,36 @@ class ApprovalStore(Protocol):
         """Compare-and-set the status. Sets decided_by/decided_at when given a
         decider, and result when given. Returns False if the status wasn't
         `expected` (e.g. already decided)."""
+        ...
+
+
+class QuestionStore(Protocol):
+    """Questions the agent asked people (`ask_user`); see docs/rebuild/ask-user.md."""
+
+    async def create_question(self, question: Question) -> None: ...
+    async def get_question(self, question_id: str) -> Question | None: ...
+    async def list_questions(
+        self,
+        status: QuestionStatus | None = None,
+        limit: int = 100,
+        thread_key: str | None = None,
+        run_ids: list[str] | None = None,
+    ) -> list[Question]:
+        """Newest first."""
+        ...
+
+    async def transition_question(
+        self,
+        question_id: str,
+        expected: QuestionStatus,
+        new: QuestionStatus,
+        *,
+        answer: dict | None = None,
+        answered_by: str | None = None,
+    ) -> bool:
+        """Compare-and-set the status. With `answer`, also sets answer,
+        answered_by and answered_at. Returns False if the status wasn't
+        `expected` (e.g. someone else answered first)."""
         ...
 
 

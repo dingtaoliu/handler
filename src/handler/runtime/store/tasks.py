@@ -13,12 +13,14 @@ from typing import Any
 
 from ..types import Event, ThreadSpec, ThreadType
 
-TASK_STATUSES = ("queued", "running", "waiting_approval", "succeeded", "failed", "dead")
+TASK_STATUSES = ("queued", "running", "waiting_approval", "waiting_answer", "succeeded",
+                 "failed", "dead")
 RUN_STATUSES = TASK_STATUSES[1:]  # every status a run row can derive
 
 # Failed (or dead) first; a live lease means running; a finished run with a
-# pending approval is waiting on a human; a "running" row whose lease is gone
-# was abandoned by its worker and counts as failed.
+# pending approval, or else a pending question (ask_user), is waiting on a
+# human; a "running" row whose lease is gone was abandoned by its worker and
+# counts as failed.
 _STATUS = """CASE
   WHEN r.status IN ('failed','cancelled','abandoned') AND t.dead AND r.id = (
        SELECT x.id FROM runs x WHERE x.thread_key = r.thread_key
@@ -28,6 +30,8 @@ _STATUS = """CASE
        AND t.lease_until IS NOT NULL AND t.lease_until > ? THEN 'running'
   WHEN EXISTS (SELECT 1 FROM approvals a WHERE a.status = 'pending'
        AND a.run_id = r.id) THEN 'waiting_approval'
+  WHEN EXISTS (SELECT 1 FROM questions q
+       WHERE q.status = 'pending' AND q.run_id = r.id) THEN 'waiting_answer'
   WHEN r.status = 'running' THEN 'failed'
   ELSE 'succeeded' END"""
 
@@ -142,6 +146,24 @@ class TaskQueries:
         for row in rows:
             row["payload"] = _json(row["payload"]) or {}
             row["received_at"] = _date(row["received_at"])
+        return rows
+
+    async def task_questions(self, run_ids: list[str], *,
+                             pending_only: bool = False) -> list[dict]:
+        """Questions asked by these runs (ask_user), oldest first."""
+        if not run_ids:
+            return []
+        status = " AND status = 'pending'" if pending_only else ""
+        rows = await self._thread_query(
+            "SELECT id, run_id, question, options, allow_text, status, answer, answered_by, "
+            "answered_at, expires_at, untrusted, created_at FROM questions "
+            f"WHERE run_id IN ({','.join('?' for _ in run_ids)}){status} ORDER BY created_at, id",
+            tuple(run_ids))
+        for row in rows:
+            row["options"], row["answer"] = _json(row["options"]), _json(row["answer"])
+            row["allow_text"], row["untrusted"] = bool(row["allow_text"]), bool(row["untrusted"])
+            for name in ("answered_at", "expires_at", "created_at"):
+                row[name] = _date(row[name])
         return rows
 
     async def task_approvals(self, run_ids: list[str], *, pending_only: bool = False) -> list[dict]:

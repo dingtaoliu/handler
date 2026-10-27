@@ -27,7 +27,8 @@ from .auth import Authenticator, add_cli_commands, run_cli
 from .bus import RunEventBus
 from .dispatcher import Dispatcher
 from .files import LocalFileStore, S3FileStore
-from .gateway.api import approvals_router
+from .gateway.api import approvals_router, questions_router
+from .gateway.questions import QuestionService, QuestionTools
 from .gateway.gateway import Gateway
 from .gateway.gmail import GmailTools
 from .gateway.google_oauth import INSTANCE_OWNER, google_oauth_from_env, user_owner
@@ -513,8 +514,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         memory_tools = MemoryTools(store)
         scheduler = Scheduler(store, default_harness=settings.harness_source("automation"))
         gateway = Gateway(store, GrantPolicy(grants_cfg), emit_event=emit_event)
+        questions = QuestionService(store, emit_event=emit_event, notifier=notifier)
         for provider in (memory_tools, AutomationTools(store, scheduler), ThreadTools(store, bus),
-                         NotifyTools(store, bus, notifier=notifier)):
+                         NotifyTools(store, bus, notifier=notifier), QuestionTools(questions)):
             gateway.register(provider)
         tokens = RunTokens()
         mcp_app = create_mcp_app(gateway, tokens)
@@ -581,6 +583,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                          uploads=uploads, instance_name=instance_name)
         app.mount("/mcp", mcp_app)
         app.include_router(approvals_router(gateway, store, auth))
+        app.include_router(questions_router(questions, store, auth))
         app.include_router(tasks_router(store, bus, auth))
         store.on_routed = lambda event, spec: publish_queued(bus, event, spec)
         app.include_router(settings_router(settings, auth, memory_tools,
@@ -613,11 +616,12 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         loop = asyncio.get_running_loop()
 
         async def housekeeping() -> None:
-            """Expire stale approvals and pick up grant changes from settings."""
+            """Expire stale approvals and questions; pick up grant changes from settings."""
             version = grants_version
             while not stop.is_set():
                 try:
                     await gateway.expire_stale()
+                    await questions.expire_stale()
                     grants, latest = await settings.get("grants")
                     if latest != version:
                         gateway.set_policy(GrantPolicy(grants))

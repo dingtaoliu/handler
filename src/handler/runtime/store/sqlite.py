@@ -506,7 +506,7 @@ class SQLiteCore:
 
 # Domain mixins import the helpers above, so they're imported after them.
 from .sqlite_connections import ConnectionMixin  # noqa: E402
-from .sqlite_gateway import ApprovalMixin, AuditMixin  # noqa: E402
+from .sqlite_gateway import ApprovalMixin, AuditMixin, QuestionMixin  # noqa: E402
 from .sqlite_memory import MemoryMixin, NotificationMixin, SettingsMixin  # noqa: E402
 from .sqlite_schedules import ScheduleMixin  # noqa: E402
 from .sqlite_users import UsersMixin  # noqa: E402
@@ -519,7 +519,7 @@ from .thread_metadata import SQLiteThreadMetadata  # noqa: E402
 
 class SQLiteStore(
     TaskQueries, SQLiteThreadMetadata, SQLiteDeliveries, ScheduleMixin, ApprovalMixin,
-    AuditMixin,
+    QuestionMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, SQLiteCore,
 ):

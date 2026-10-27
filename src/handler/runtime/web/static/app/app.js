@@ -32,6 +32,7 @@ const API = {
     approvals: (status) => "/api/approvals" + (status ? `?status=${status}` : "?limit=200"),
     approve: (id) => `/api/approvals/${enc(id)}/approve`,
     deny: (id) => `/api/approvals/${enc(id)}/deny`,
+    answer: (id) => `/api/questions/${enc(id)}/answer`,
     notifications: (unread) => "/api/notifications" + (unread ? "?unread_only=true" : ""),
     notificationRead: (id) => `/api/notifications/${enc(id)}/read`,
     settings: "/api/settings",
@@ -368,6 +369,7 @@ function blockHtml(b, role) {
     }
     if (b.type === "tool_call") return `<div><b>${esc(b.name || "tool")}</b></div><pre>${esc(typeof b.input === "string" ? b.input : json(b.input))}</pre>`;
     if (b.type === "tool_result") return `<div class="${b.is_error ? "status-error" : "muted"}">${b.is_error ? "error" : "result"}</div><pre>${esc(typeof b.output === "string" ? b.output : json(b.output))}</pre>`;
+    if (b.type === "event" && b.event_type === "question.answered") return questionNoteHtml(b.payload || {});
     if (b.type === "event") {
         const p = b.payload || {};
         return `<span>${esc(p.name || b.event_type || "event")}</span>` +
@@ -380,7 +382,30 @@ function blockHtml(b, role) {
             `<div class="row"><button class="btn-small btn-primary" data-action="appr-approve" data-id="${esc(b.approval_id)}">Approve</button>
             <button class="btn-small btn-danger" data-action="appr-deny" data-id="${esc(b.approval_id)}">Deny</button></div>`;
     }
+    if (b.type === "question_request") return questionHtml(b);
     return `<pre>${esc(json(b))}</pre>`;
+}
+
+// ask_user: the question with one button per option (and a text box when typed
+// answers are allowed). The first answer wins; later ones get 409. The outcome
+// follows as a question.answered event.
+function questionHtml(b) {
+    const id = esc(b.question_id);
+    const warn = b.untrusted ? `<div class="status-error">Asked while handling outside input (email, Crontal...): check it before answering.</div>` : "";
+    const buttons = (b.options || []).map((o) =>
+        `<button class="btn-small" data-action="q-answer" data-id="${id}" data-option="${esc(o.id)}">${esc(o.label)}</button>`).join(" ");
+    const text = b.allow_text ? `<div class="row"><input type="text" id="qtext-${id}" placeholder="Or type an answer" aria-label="Your answer">
+        <button class="btn-small btn-primary" data-action="q-answer-text" data-id="${id}">Send answer</button></div>` : "";
+    return `<div><b>Question:</b> ${esc(b.question || "")}</div>${warn}<div class="row">${buttons}</div>${text}`;
+}
+
+function questionNoteHtml(p) {
+    const q = esc(p.question || "");
+    if (p.status === "expired") return `<span class="muted">Question expired unanswered: "${q}"</span>`;
+    if (p.status === "canceled") return `<span class="muted">Question canceled: "${q}"</span>`;
+    const a = p.answer || {};
+    const said = [a.label, a.text ? `"${a.text}"` : ""].filter(Boolean).join(" · ");
+    return `<span>${esc(p.answered_by_name || p.answered_by || "Someone")} answered "${q}": <b>${esc(said)}</b></span>`;
 }
 
 function notificationHtml(name, input, failed = false) {
@@ -825,7 +850,7 @@ loaders.automations = loadAutomations;
 // Every run of a non-chat thread, plus queued work, from /api/tasks. Admins also
 // get each task's step trace (model calls, tool calls, errors, approvals).
 const act = {run: null, items: [], cursor: null};
-const TASK_BADGE = {queued: "yellow", running: "blue", waiting_approval: "yellow",
+const TASK_BADGE = {queued: "yellow", running: "blue", waiting_approval: "yellow", waiting_answer: "yellow",
     succeeded: "green", failed: "red", dead: "red"};
 const taskBadge = (s) => badge(String(s || "").replace("_", " "), TASK_BADGE[s] || "gray");
 async function loadIgnoredEmail() {
@@ -987,6 +1012,15 @@ async function loadApprovals() {
     }
     box.innerHTML = html;
 }
+actions["q-answer"] = async (el) => {
+    await sendJson("POST", API.answer(el.dataset.id), {option_id: el.dataset.option}); toast("Answered");
+};
+actions["q-answer-text"] = async (el) => {
+    const input = $("qtext-" + el.dataset.id);
+    const text = input ? input.value.trim() : "";
+    if (!text) { toast("Type an answer first", true); return; }
+    await sendJson("POST", API.answer(el.dataset.id), {text}); toast("Answered");
+};
 actions["appr-approve"] = async (el) => { await sendJson("POST", API.approve(el.dataset.id), {}); toast("Approved"); await loadApprovals(); };
 actions["appr-deny"] = async (el) => {
     const r = $("reason-" + el.dataset.id);

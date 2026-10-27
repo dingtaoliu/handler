@@ -1,4 +1,4 @@
-"""SQLite storage for approvals and the audit log (mixins for SQLiteStore)."""
+"""SQLite storage for approvals, questions and the audit log (mixins for SQLiteStore)."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from dataclasses import fields
 from datetime import datetime
 from typing import Any
 
-from ..types import Approval, ApprovalStatus, AuditEntry, Decision
+from ..types import Approval, ApprovalStatus, AuditEntry, Decision, Question, QuestionStatus
 from .sqlite import _insert, _timestamp, _transaction, _values
 
-_JSON = {"args", "result"}
-_TIMES = {"decided_at", "expires_at", "created_at", "at"}
+_JSON = {"args", "result", "options", "answer"}
+_TIMES = {"decided_at", "expires_at", "created_at", "at", "answered_at"}
+_BOOLS = {"allow_text", "untrusted"}
 
 
 def _row_values(record: Any) -> dict[str, Any]:
@@ -23,6 +24,9 @@ def _row_values(record: Any) -> dict[str, Any]:
     for name in _TIMES:
         if isinstance(values.get(name), datetime):
             values[name] = _timestamp(values[name])
+    for name in _BOOLS:
+        if name in values:
+            values[name] = int(bool(values[name]))
     return values
 
 
@@ -35,8 +39,12 @@ def _from_row(cls: type, row: sqlite3.Row):
             values[name] = json.loads(value)
         elif name in _TIMES:
             values[name] = datetime.fromisoformat(value)
+        elif name in _BOOLS:
+            values[name] = bool(value)
     if cls is Approval:
         values["status"] = ApprovalStatus(values["status"])
+    elif cls is Question:
+        values["status"] = QuestionStatus(values["status"])
     else:
         values["decision"] = Decision(values["decision"])
     return cls(**values)
@@ -103,6 +111,75 @@ class ApprovalMixin:
                 return db.execute(
                     f"UPDATE approvals SET {', '.join(sets)} WHERE id = ? AND status = ?",
                     (*params, approval_id, expected.value),
+                ).rowcount == 1
+
+        return await self._call(write)
+
+
+class QuestionMixin:
+    async def create_question(self, question: Question) -> None:
+        def write(db: sqlite3.Connection) -> None:
+            _insert(db, "questions", _row_values(question))
+
+        await self._call(write)
+
+    async def get_question(self, question_id: str) -> Question | None:
+        def read(db: sqlite3.Connection) -> Question | None:
+            row = db.execute(
+                "SELECT * FROM questions WHERE id = ?", (question_id,)
+            ).fetchone()
+            return _from_row(Question, row) if row else None
+
+        return await self._call(read)
+
+    async def list_questions(
+        self,
+        status: QuestionStatus | None = None,
+        limit: int = 100,
+        thread_key: str | None = None,
+        run_ids: list[str] | None = None,
+    ) -> list[Question]:
+        def read(db: sqlite3.Connection) -> list[Question]:
+            clauses, params = [], []
+            if status:
+                clauses.append("status = ?")
+                params.append(status.value)
+            if thread_key:
+                clauses.append("thread_key = ?")
+                params.append(thread_key)
+            if run_ids is not None:
+                if not run_ids:
+                    return []
+                clauses.append(f"run_id IN ({','.join('?' for _ in run_ids)})")
+                params += run_ids
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = db.execute(
+                f"SELECT * FROM questions {where} ORDER BY created_at DESC, rowid DESC "
+                "LIMIT ?", (*params, limit),
+            )
+            return [_from_row(Question, row) for row in rows]
+
+        return await self._call(read)
+
+    async def transition_question(
+        self,
+        question_id: str,
+        expected: QuestionStatus,
+        new: QuestionStatus,
+        *,
+        answer: dict | None = None,
+        answered_by: str | None = None,
+    ) -> bool:
+        def write(db: sqlite3.Connection) -> bool:
+            sets = ["status = ?"]
+            params: list[Any] = [new.value]
+            if answer is not None:
+                sets += ["answer = ?", "answered_by = ?", "answered_at = ?"]
+                params += [json.dumps(answer), answered_by, _timestamp(self._clock())]
+            with _transaction(db):
+                return db.execute(
+                    f"UPDATE questions SET {', '.join(sets)} WHERE id = ? AND status = ?",
+                    (*params, question_id, expected.value),
                 ).rowcount == 1
 
         return await self._call(write)
