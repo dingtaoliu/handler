@@ -90,7 +90,8 @@ async def test_fire_schedule_one_shot_disables_and_event_idempotent(domain_store
 
 # --- approvals and audit -------------------------------------------------------
 def approval(**kw):
-    return Approval(run_id="r", thread_key="t", tool="x", action="a.x",
+    kw.setdefault("thread_key", "t")
+    return Approval(run_id="r", tool="x", action="a.x",
                     args={"k": [1, {"z": None}]}, requested_by="u", **kw)
 
 
@@ -127,6 +128,11 @@ async def test_list_approvals_and_audit_order(domain_store):
     assert [a.id for a in await store.list_approvals(ApprovalStatus.PENDING)] == [second.id]
     assert [a.id for a in await store.list_approvals()] == [second.id, first.id]
     assert len(await store.list_approvals(limit=1)) == 1
+    elsewhere = approval(thread_key="chat:9")
+    await store.create_approval(elsewhere)
+    assert [a.id for a in await store.list_approvals(thread_key="chat:9")] == [elsewhere.id]
+    assert [a.id for a in await store.list_approvals(
+        ApprovalStatus.PENDING, thread_key="t")] == [second.id]
     for i, run in enumerate(["r1", "r2", "r1"]):
         await store.add_audit(AuditEntry(
             run_id=run, thread_key="t", actor=None, tool=f"t{i}", action="a.b",

@@ -156,9 +156,19 @@ class ApprovalMixin(_Rows):
         )
 
     async def list_approvals(
-        self, status: ApprovalStatus | None = None, limit: int = 100
+        self,
+        status: ApprovalStatus | None = None,
+        limit: int = 100,
+        thread_key: str | None = None,
     ) -> list[Approval]:
-        where, params = ("WHERE status = %s ", (status.value,)) if status else ("", ())
+        clauses, params = [], []
+        if status:
+            clauses.append("status = %s")
+            params.append(status.value)
+        if thread_key:
+            clauses.append("thread_key = %s")
+            params.append(thread_key)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         return await self._fetch(
             Approval, f"SELECT {_columns(Approval)} FROM approvals {where}"
             "ORDER BY created_at DESC, seq DESC LIMIT %s", (*params, limit),

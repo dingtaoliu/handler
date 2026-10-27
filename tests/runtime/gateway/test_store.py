@@ -2,7 +2,8 @@ from handler.runtime.types import Approval, ApprovalStatus, AuditEntry, Decision
 
 
 def approval(**kw):
-    return Approval(run_id="r", thread_key="t", tool="x", action="a.x",
+    kw.setdefault("thread_key", "t")
+    return Approval(run_id="r", tool="x", action="a.x",
                     args={"k": [1, {"z": None}]}, requested_by="u", **kw)
 
 
@@ -36,6 +37,17 @@ async def test_list_approvals_filter_and_order(store):
     assert [a.id for a in await store.list_approvals(ApprovalStatus.PENDING)] == [second.id]
     assert len(await store.list_approvals()) == 2
     assert len(await store.list_approvals(limit=1)) == 1
+
+
+async def test_list_approvals_by_thread(store):
+    mine, other, done = approval(thread_key="chat:1"), approval(thread_key="chat:2"), \
+        approval(thread_key="chat:1")
+    for a in (mine, other, done):
+        await store.create_approval(a)
+    await store.transition_approval(done.id, ApprovalStatus.PENDING, ApprovalStatus.DENIED)
+    assert [a.id for a in await store.list_approvals(thread_key="chat:1")] == [done.id, mine.id]
+    assert [a.id for a in await store.list_approvals(
+        ApprovalStatus.PENDING, thread_key="chat:1")] == [mine.id]
 
 
 async def test_audit_roundtrip_newest_first(store):

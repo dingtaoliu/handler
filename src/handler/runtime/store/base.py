@@ -213,7 +213,10 @@ class ApprovalStore(Protocol):
     async def create_approval(self, approval: Approval) -> None: ...
     async def get_approval(self, approval_id: str) -> Approval | None: ...
     async def list_approvals(
-        self, status: ApprovalStatus | None = None, limit: int = 100
+        self,
+        status: ApprovalStatus | None = None,
+        limit: int = 100,
+        thread_key: str | None = None,
     ) -> list[Approval]: ...
 
     async def transition_approval(

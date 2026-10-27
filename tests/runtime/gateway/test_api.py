@@ -29,6 +29,11 @@ async def test_list_get_approve_flow(client, gateway, tools):
     assert (await client.get(f"/api/approvals/{aid}")).json()["tool"] == "send_it"
     assert (await client.get("/api/approvals/nope")).status_code == 404
     assert (await client.get("/api/approvals", params={"status": "bad"})).status_code == 422
+    by_thread = {"status": "pending", "thread_key": CTX.thread_key}
+    assert [a["id"] for a in (await client.get("/api/approvals", params=by_thread)).json()] \
+        == [aid]
+    elsewhere = {"status": "pending", "thread_key": "chat:other"}
+    assert (await client.get("/api/approvals", params=elsewhere)).json() == []
 
     done = await client.post(f"/api/approvals/{aid}/approve", json={"decided_by": "boss"})
     assert done.status_code == 200 and done.json()["status"] == "executed"

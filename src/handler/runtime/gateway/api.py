@@ -45,13 +45,16 @@ def approvals_router(gateway: Gateway, store: Any, auth: Authenticator) -> APIRo
 
     @router.get("/api/approvals")
     async def list_approvals(
-        status: str | None = None, limit: int = 100, principal: Principal = user
+        status: str | None = None,
+        limit: int = 100,
+        thread_key: str | None = None,
+        principal: Principal = user,
     ):
         try:
             wanted = ApprovalStatus(status) if status else None
         except ValueError:
             raise HTTPException(422, f"unknown status: {status}")
-        approvals = await store.list_approvals(wanted, limit)
+        approvals = await store.list_approvals(wanted, limit, thread_key)
         return [_json(a) for a in approvals if can_see_thread(principal, a.thread_key)]
 
     @router.get("/api/approvals/{approval_id}")

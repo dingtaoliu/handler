@@ -59,10 +59,20 @@ class ApprovalMixin:
         return await self._call(read)
 
     async def list_approvals(
-        self, status: ApprovalStatus | None = None, limit: int = 100
+        self,
+        status: ApprovalStatus | None = None,
+        limit: int = 100,
+        thread_key: str | None = None,
     ) -> list[Approval]:
         def read(db: sqlite3.Connection) -> list[Approval]:
-            where, params = ("WHERE status = ?", [status.value]) if status else ("", [])
+            clauses, params = [], []
+            if status:
+                clauses.append("status = ?")
+                params.append(status.value)
+            if thread_key:
+                clauses.append("thread_key = ?")
+                params.append(thread_key)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             rows = db.execute(
                 f"SELECT * FROM approvals {where} ORDER BY created_at DESC, rowid DESC "
                 "LIMIT ?", (*params, limit),
