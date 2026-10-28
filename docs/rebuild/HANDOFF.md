@@ -175,7 +175,15 @@ Measured on a Heroku dyno: same uid as Handler, `unprivileged_userns_clone=0` so
 - The mailbox integration is not enabled on any instance yet.
 - `feat/private-user-spaces` is still unmerged. It conflicts with `rebuild` (run.py, settings_api.py, instructions.py) and changes AI Spend usage reads, mailbox thread visibility and the console sign-in view.
 
-**2026-10-26 01:13 UTC: mailbox integration enabled** on both instances (`HANDLER_INTEGRATIONS=crontal,mailbox`, `HANDLER_I_BSS__INTEGRATIONS=crontal,mailbox`, release v44). Crontal now comes from the integration, not the legacy wiring. Email intake and Google are unaffected; main's Gmail is still active. Each instance's prompt still names its own AI user. No mailboxes are connected yet; `sales@yeup-tube.com` goes on bss.
+**2026-10-26 01:13 UTC: mailbox integration enabled** on both instances (`HANDLER_INTEGRATIONS=crontal,mailbox`, `HANDLER_I_BSS__INTEGRATIONS=crontal,mailbox`, release v44). Crontal now comes from the integration, not the legacy wiring. Email intake and Google are unaffected; main's Gmail is still active. Each instance's prompt still names its own AI user. No mailboxes are connected yet.
+
+**2026-10-27 13:02 UTC: `yeup` instance** for Shanghai Yeup Tube Co., Ltd (Crontal merchant 298; Lisa Lee is user 265) at `/i/yeup`, release v45. Schema `handler_yeup`, prefix `handler/yeup/`, integrations `crontal,mailbox`, same model/harness as bss. Crontal registry #34, AI user 364 ("Shanghai Yeup Tube Co., Ltd AI"). Verified: health, admin keys isolated across instances (401), the agent token mints only for 364 (Lisa and bss's AI are 403), and the prompt names the Yeup AI user. `sales@yeup-tube.com` goes on **yeup** (not bss); Lisa connects it from Crontal → Handler settings. DB: Crontal's Postgres role allows 20 connections; 12 were in use before yeup, which can add up to 4.
+
+**Deployed 2026-10-28 01:19–01:25 UTC:** Handler **v46** (`rebuild` @ 8fc08fc) and Crontal **v116** (`main` @ 2bb985e). Backup b023 first; migration `v7r8s9t0u1w2` (received RFQs) applied, all 20 existing RFQs became `marketplace`. Rollback targets: Handler v45, Crontal v115.
+- Handler: `GET /api/approvals?thread_key=`; approval requests logged in the transcript (`approval_request` event block); `ask_user` questions (`docs/rebuild/ask-user.md`, `questions` table created at startup, `waiting_answer` task status).
+- Crontal: received RFQs (sellers record RFQs from buyers outside Crontal), date-only values shown on the right day, approval and question cards inline in the Handler chat panel, Tasks show `waiting_answer`.
+- Verified: health on `/`, `/i/main`, `/i/bss`, `/i/yeup`; `/i/nope` 404; the new routes answer; Crontal health. No real agent turn was run, so approval and question cards are only tested against mocked Handler responses.
+- Seen before the deploy: H12 timeouts at 01:08 UTC on Crontal's Handler proxy and notification routes. Likely long-lived proxied SSE streams exhausting gunicorn's 2x4 threads; to investigate.
 
 **Waiting on the owner:**
 - Rotate the OpenAI key (`OPENAI_API_KEY` on Crontal, `CODEX_API_KEY` on `crontal-agent`) and the Bucketeer keys.

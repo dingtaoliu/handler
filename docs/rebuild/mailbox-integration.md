@@ -174,13 +174,16 @@ heroku config:set -a crontal-agent \
   HANDLER_I_YEUP__HANDLER_SECRET_KEY="$(openssl rand -base64 48)" \
   HANDLER_I_YEUP__CRONTAL_URL=<same URL as bss> HANDLER_I_YEUP__CRONTAL_AGENT_TOKEN="$AGENT" \
   HANDLER_I_YEUP__INTEGRATIONS=crontal,mailbox
-# then, in a Crontal one-off dyno with the same three values in the environment:
-HANDLER_INSTANCE_ADMIN_KEY=... HANDLER_INSTANCE_WEBHOOK_SECRET=... HANDLER_INSTANCE_AGENT_TOKEN=... \
-  flask handler-instance add --merchant-id 298 --name "Yeup Tube" \
+# then register it in Crontal from a one-off dyno. The image's FLASK_APP does not
+# import there, so pass FLASK_APP=wsgi:app. --name must equal the Handler instance
+# name: Crontal matches notification signatures on X-Handler-Instance.
+heroku run:detached -a hephaestus-backend-test \
+  --env "FLASK_APP=wsgi:app;HANDLER_INSTANCE_ADMIN_KEY=$ADMIN;HANDLER_INSTANCE_WEBHOOK_SECRET=$HOOK;HANDLER_INSTANCE_AGENT_TOKEN=$AGENT" \
+  -- flask handler-instance add --merchant-id 298 --name yeup \
   --base-url https://crontal-agent-940cc88dda66.herokuapp.com/i/yeup
 ```
 
-Also copy any other per-instance settings bss has (for example `HANDLER_I_BSS__*` harness or model overrides); see `multi-instance.md`.
+This was done on 2026-10-27 (Handler v45, Crontal registry #34, AI user 364); yeup also got `HANDLER_DB_SCHEMA=handler_yeup`, `HANDLER_FILE_PREFIX=handler/yeup/`, `HANDLER_DB_POOL_MAX=3`, `HANDLER_PUBLIC_URL`, `HANDLER_RETURN_TO_ORIGINS` and bss's harness/model/effort/concurrency. Also copy any other per-instance settings bss has (for example `HANDLER_I_BSS__*` harness or model overrides); see `multi-instance.md`.
 
 ### Admin API
 
