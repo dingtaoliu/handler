@@ -28,6 +28,7 @@ from .bus import RunEventBus
 from .dispatcher import Dispatcher
 from .files import LocalFileStore, S3FileStore
 from .gateway.api import approvals_router, questions_router
+from .web.memory_recovery_api import memory_recovery_router
 from .gateway.questions import QuestionService, QuestionTools
 from .gateway.gateway import Gateway
 from .gateway.gmail import GmailTools
@@ -595,6 +596,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                          uploads=uploads, instance_name=instance_name)
         app.mount("/mcp", mcp_app)
         app.include_router(approvals_router(gateway, store, auth))
+        app.include_router(memory_recovery_router(gateway, store, auth))
         app.include_router(questions_router(questions, store, auth))
         app.include_router(tasks_router(store, bus, auth))
         store.on_routed = lambda event, spec: publish_queued(bus, event, spec)

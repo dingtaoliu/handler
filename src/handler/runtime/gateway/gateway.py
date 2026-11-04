@@ -218,6 +218,29 @@ class Gateway:
         )
         if not moved:
             return None
+        return await self._run_approved(approval, decided_by, notify_thread=True)
+
+    async def replay(
+        self, approval_id: str, decided_by: str, *, expected: ApprovalStatus,
+        notify_thread: bool = False,
+    ) -> Approval | None:
+        """Run an approval's call now, from `expected` status (pending past its
+        expiry, expired, denied, failed): an operator recovering lost work.
+        Ignores the expiry; by default the requesting thread is not woken.
+        None if the approval is missing or no longer in `expected`."""
+        approval = await self._store.get_approval(approval_id)
+        if approval is None or approval.status != expected:
+            return None
+        moved = await self._store.transition_approval(
+            approval_id, expected, ApprovalStatus.APPROVED, decided_by=decided_by)
+        if not moved:
+            return None
+        return await self._run_approved(approval, decided_by, notify_thread=notify_thread)
+
+    async def _run_approved(
+        self, approval: Approval, decided_by: str, *, notify_thread: bool
+    ) -> Approval:
+        approval_id = approval.id
         spec = self._tools.get(approval.tool)
         ctx = RunContext(
             run_id=approval.run_id, thread_key=approval.thread_key,
@@ -233,8 +256,9 @@ class Gateway:
             approval_id, ApprovalStatus.APPROVED, final, result=stored
         )
         resolved = await self._store.get_approval(approval_id)
-        await self._resolved(resolved or approval, decided_by, result_text(result))
-        return resolved
+        if notify_thread:
+            await self._resolved(resolved or approval, decided_by, result_text(result))
+        return resolved or approval
 
     async def deny(
         self, approval_id: str, decided_by: str, reason: str = ""
