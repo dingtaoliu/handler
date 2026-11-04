@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, fields
 from datetime import datetime, timedelta
 from enum import Enum
@@ -376,13 +376,25 @@ class PostgresCore:
         return rows[0] if rows else None
 
     async def list_threads(
-        self, owner_user_id: str | None = None, limit: int = 100
+        self, owner_user_id: str | None = None, limit: int = 100,
+        types: Sequence[str] | None = None, exclude_types: Sequence[str] | None = None,
     ) -> list[Thread]:
-        where = "" if owner_user_id is None else "WHERE (owner_user_id = %s OR type <> 'chat') "
-        parameters = (limit,) if owner_user_id is None else (owner_user_id, limit)
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if owner_user_id is not None:
+            clauses.append("(owner_user_id = %s OR type <> 'chat')")
+            parameters.append(owner_user_id)
+        if types:
+            clauses.append("type = ANY(%s)")
+            parameters.append(list(types))
+        if exclude_types:
+            clauses.append("NOT (type = ANY(%s))")
+            parameters.append(list(exclude_types))
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        parameters.append(limit)
         return await self._list(
             Thread, f"SELECT {_columns(Thread)} FROM threads {where}"
-            "ORDER BY COALESCE((SELECT MAX(created_at) FROM messages WHERE thread_key=threads.key), threads.created_at) DESC, seq DESC LIMIT %s", parameters,
+            "ORDER BY COALESCE((SELECT MAX(created_at) FROM messages WHERE thread_key=threads.key), threads.created_at) DESC, seq DESC LIMIT %s", tuple(parameters),
         )
 
     async def set_session(self, lease: Lease, session_id: str) -> bool:

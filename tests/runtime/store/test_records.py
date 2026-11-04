@@ -4,7 +4,9 @@ from datetime import timedelta, timezone
 
 import pytest
 
-from handler.runtime.types import Message, Role, RunStatus, RunStep, StepKind, TokenUsage
+from handler.runtime.types import (
+    Lane, Message, Role, RunStatus, RunStep, StepKind, ThreadSpec, ThreadType, TokenUsage,
+)
 
 
 async def test_run_create_finish_round_trip(store, clock, running):
@@ -74,6 +76,40 @@ async def test_session_and_thread_listing(store, clock, spec, event, running):
     assert await store.list_threads(owner_user_id="nobody") == []
     assert [t.key for t in await store.list_threads(limit=1)] == [other.key]
     assert await store.get_thread("missing") is None
+
+
+async def test_thread_listing_type_filters(store, clock, spec, event):
+    await store.put(event("chat-1"), spec)
+    mails = []
+    for i in range(3):
+        clock.advance(1)
+        mail = ThreadSpec(f"mail:box:{i}", ThreadType.MAIL, Lane.BACKGROUND)
+        await store.put(event(f"mail-{i}", thread_key=mail.key), mail)
+        mails.append(mail.key)
+    clock.advance(1)
+    auto = ThreadSpec("automation:a", ThreadType.AUTOMATION, Lane.BACKGROUND)
+    await store.put(event("auto", thread_key=auto.key), auto)
+    clock.advance(1)
+    foreign = replace(spec, key="chat:v:1", owner_user_id="v")
+    await store.put(event("chat-v", thread_key=foreign.key), foreign)
+
+    def keys(threads):
+        return [t.key for t in threads]
+
+    assert keys(await store.list_threads(types=["chat"])) == [foreign.key, spec.key]
+    # The limit applies after filtering: newer mail threads don't crowd chats out.
+    assert keys(await store.list_threads(types=["chat"], limit=1)) == [foreign.key]
+    assert keys(await store.list_threads(owner_user_id="u", types=["chat"], limit=1)) == [
+        spec.key]
+    assert keys(await store.list_threads(types=["mail", "automation"])) == [
+        auto.key, *reversed(mails)]
+    assert keys(await store.list_threads(exclude_types=["chat"], limit=2)) == [
+        auto.key, mails[-1]]
+    # Owner visibility is unchanged: another user's chat stays hidden.
+    assert keys(await store.list_threads(owner_user_id="u", exclude_types=["mail"])) == [
+        auto.key, spec.key]
+    assert keys(await store.list_threads(types=["mail"], exclude_types=["mail"])) == []
+    assert await store.list_threads(types=["crontal"]) == []
 
 
 async def test_message_round_trip_ordering_limit_and_before(store, clock, running):
