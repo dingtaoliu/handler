@@ -361,6 +361,14 @@ class MailStore:
         await self._execute("UPDATE mail_messages SET saved_dir = ? WHERE id = ?",
                             (saved_dir, row_id))
 
+    async def message_by_saved_dir(self, mailbox_id: str,
+                                   saved_dir: str) -> dict[str, Any] | None:
+        """The message whose files were saved under *saved_dir* at ingest."""
+        rows = await self._query(
+            "SELECT * FROM mail_messages WHERE account_id = ? AND saved_dir = ? LIMIT 1",
+            (mailbox_id, saved_dir))
+        return _decode(rows[0]) if rows else None
+
     async def get_message(self, row_id: str) -> dict[str, Any] | None:
         rows = await self._query("SELECT * FROM mail_messages WHERE id = ?", (row_id,))
         return _decode(rows[0]) if rows else None

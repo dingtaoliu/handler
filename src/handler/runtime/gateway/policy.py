@@ -9,6 +9,10 @@ rewrites and deletes, automations) never runs there without approval, whatever t
 rules say (`crontal_api.*: allow` included). Writes that stay inside the
 merchant (draft RFQs, draft bids, listings, contacts...) and append-only
 memory saves (marked source_untrusted) follow the normal rules.
+
+A second, per-call floor applies on every thread: a tool's `always_ask`
+classifier flags calls that destroy data (deleting or trashing Crontal files,
+emptying the trash), which never run unasked even under `crontal_api.*: allow`.
 """
 
 from __future__ import annotations
@@ -75,6 +79,17 @@ def floor_reason(spec: ToolSpec, args: dict[str, Any]) -> str | None:
     return None
 
 
+def always_ask_reason(spec: ToolSpec, args: dict[str, Any]) -> str | None:
+    """Why `spec(args)` needs approval whatever the grants, else None."""
+    if spec.always_ask is None:
+        return None
+    try:
+        return spec.always_ask(args)
+    except Exception:  # a classifier bug must not let a call through
+        log.exception("always_ask check for %s failed", spec.name)
+        return "could not tell whether it destroys data"
+
+
 class GrantPolicy:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
@@ -85,6 +100,8 @@ class GrantPolicy:
         self, ctx: RunContext, spec: ToolSpec, args: dict[str, Any]
     ) -> tuple[Decision, str]:
         decision, reason = self._decide(spec)
+        if decision == Decision.ALLOW and (why := always_ask_reason(spec, args)):
+            return Decision.ASK, f"{reason} would allow, but it {why}: approval needed"
         thread_type = thread_type_of(ctx)
         if decision == Decision.ALLOW and thread_type in UNTRUSTED_THREAD_TYPES:
             if why := floor_reason(spec, args):
