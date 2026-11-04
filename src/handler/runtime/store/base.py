@@ -8,6 +8,7 @@ write is rejected (returns False) and nothing is changed.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -106,8 +107,12 @@ class Store(EventQueue, Protocol):
     async def mark_thread_read(self, key: str, user_id: str, last_message_at: datetime | None): ...
 
     async def list_threads(
-        self, owner_user_id: str | None = None, limit: int = 100
-    ) -> list[Thread]: ...
+        self, owner_user_id: str | None = None, limit: int = 100,
+        types: Sequence[str] | None = None, exclude_types: Sequence[str] | None = None,
+    ) -> list[Thread]:
+        """Threads by latest activity. `types` keeps only those thread types and
+        `exclude_types` drops them; both apply before `limit`."""
+        ...
 
     async def set_session(self, lease: Lease, session_id: str) -> bool:
         """Record the harness session id for the thread. Fenced."""

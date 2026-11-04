@@ -52,9 +52,12 @@ class FakeStore:
             )
         return True
 
-    async def list_threads(self, owner_user_id=None, limit=100):
+    async def list_threads(self, owner_user_id=None, limit=100, types=None,
+                           exclude_types=None):
         return [t for t in self.threads.values()
-                if owner_user_id in (None, t.owner_user_id)]
+                if owner_user_id in (None, t.owner_user_id)
+                and (not types or t.type in types)
+                and t.type not in (exclude_types or ())]
 
     async def thread_metadata(self, keys, user_id):
         return {}
@@ -170,6 +173,46 @@ async def test_listing_endpoints(client, store):
     assert (await client.get("/api/runs/nope")).status_code == 404
     assert (await client.get("/api/threads/chat:x:y")).status_code == 404
 
+
+async def test_thread_list_filters_by_type_before_the_cap(users):
+    """`type` / `exclude_type` filter in the store, so busy mail threads can't
+    push chats out of the capped list; member visibility is unchanged."""
+    await users.create_user(User("u2", "User Two"))
+    _, token = await users.create_token("u1")
+    chats = ["chat:u1:c1", "chat:u1:c2"]
+    for key in chats:
+        await users.put(Event(type="chat.message", source="web", payload={"text": key},
+                              idempotency_key=key, thread_key=key, user_id="u1"),
+                        ThreadSpec(key, ThreadType.CHAT, Lane.INTERACTIVE, owner_user_id="u1"))
+    other = "chat:u2:c1"
+    await users.put(Event(type="chat.message", source="web", payload={"text": "x"},
+                          idempotency_key=other, thread_key=other, user_id="u2"),
+                    ThreadSpec(other, ThreadType.CHAT, Lane.INTERACTIVE, owner_user_id="u2"))
+    background = [("mail:box:1", ThreadType.MAIL), ("automation:a", ThreadType.AUTOMATION),
+                  ("crontal:rfq:1", ThreadType.CRONTAL)]
+    for key, kind in background:
+        await users.put(Event(type="x", source="test", payload={}, idempotency_key=key,
+                              thread_key=key), ThreadSpec(key, kind, Lane.BACKGROUND))
+    app = create_app(users, RunEventBus(), Authenticator(users, "admin-key-for-tests"))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as c:
+        async def keys(**params):
+            r = await c.get("/api/threads", params={"user_id": "u1", **params})
+            assert r.status_code == 200
+            return sorted(t["key"] for t in r.json())
+
+        assert await keys() == sorted(chats + [k for k, _ in background])
+        assert await keys(type="chat") == sorted(chats)
+        assert await keys(exclude_type="chat") == sorted(k for k, _ in background)
+        assert await keys(type="mail,automation") == ["automation:a", "mail:box:1"]
+        assert await keys(type=["mail", "crontal"]) == ["crontal:rfq:1", "mail:box:1"]
+        assert await keys(exclude_type=["chat", "mail"]) == ["automation:a", "crontal:rfq:1"]
+        assert await keys(type="") == sorted(chats + [k for k, _ in background])
+        # Another member's chat stays hidden, filtered or not.
+        assert other not in await keys(type="chat")
+        assert (await c.get("/api/threads", params={"user_id": "u2", "type": "chat"})).json() == []
 
 async def test_sse_delivers_and_heartbeats(bus):
     gen = sse_stream(bus, "chat:u:c", heartbeat_seconds=0.05)

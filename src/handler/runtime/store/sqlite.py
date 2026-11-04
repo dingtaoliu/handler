@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, fields
@@ -332,13 +332,25 @@ class SQLiteCore:
         return rows[0] if rows else None
 
     async def list_threads(
-        self, owner_user_id: str | None = None, limit: int = 100
+        self, owner_user_id: str | None = None, limit: int = 100,
+        types: Sequence[str] | None = None, exclude_types: Sequence[str] | None = None,
     ) -> list[Thread]:
-        where = "" if owner_user_id is None else "WHERE (owner_user_id = ? OR type <> 'chat') "
-        parameters = (limit,) if owner_user_id is None else (owner_user_id, limit)
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if owner_user_id is not None:
+            clauses.append("(owner_user_id = ? OR type <> 'chat')")
+            parameters.append(owner_user_id)
+        if types:
+            clauses.append(f"type IN ({', '.join('?' * len(types))})")
+            parameters.extend(types)
+        if exclude_types:
+            clauses.append(f"type NOT IN ({', '.join('?' * len(exclude_types))})")
+            parameters.extend(exclude_types)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        parameters.append(limit)
         return await self._list(
             Thread, f"SELECT * FROM threads {where}ORDER BY COALESCE((SELECT MAX(created_at) FROM messages WHERE thread_key=threads.key), threads.created_at) DESC, rowid DESC LIMIT ?",
-            parameters,
+            tuple(parameters),
         )
 
     async def set_session(self, lease: Lease, session_id: str) -> bool:

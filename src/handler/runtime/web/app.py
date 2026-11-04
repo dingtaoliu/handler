@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -31,6 +31,12 @@ MEMBER_SCAN_LIMIT = 1000  # threads scanned when filtering a member's list
 TIMELINE_HTML = Path(__file__).resolve().parent / "static" / "timeline.html"
 APP_DIR = Path(__file__).resolve().parent / "static" / "app"
 BUILD_HEADER = "X-Handler-Build"
+
+
+def _csv_values(values: list[str] | None) -> list[str] | None:
+    """Flatten repeated and comma-separated query values; None when empty."""
+    flat = [part.strip() for value in values or [] for part in value.split(",")]
+    return [part for part in flat if part] or None
 
 
 def ui_build() -> str:
@@ -207,10 +213,17 @@ def create_app(
 
     @router.get("/api/threads")
     async def list_threads(user_id: str | None = None,
+                           thread_types: list[str] | None = Query(None, alias="type"),
+                           exclude_types: list[str] | None = Query(None, alias="exclude_type"),
                            principal: Principal = principal_dep) -> Any:
+        """Threads by latest activity. `type` / `exclude_type` (repeatable or
+        comma-separated) filter by thread type before the list is capped."""
         if not principal.is_admin and user_id not in (None, principal.user_id):
             return []
-        threads = await store.list_threads(owner_user_id=user_id, limit=MEMBER_SCAN_LIMIT)
+        threads = await store.list_threads(
+            owner_user_id=user_id, limit=MEMBER_SCAN_LIMIT,
+            types=_csv_values(thread_types), exclude_types=_csv_values(exclude_types),
+        )
         threads = [t for t in threads if can_see_thread(principal, t.key)]
         metadata = await store.thread_metadata([t.key for t in threads], principal.user_id)
         rows = [{**_json(t), **_json(metadata.get(t.key, {}))} for t in threads]
