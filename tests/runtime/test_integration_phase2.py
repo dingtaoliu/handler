@@ -117,3 +117,30 @@ async def test_approval_resolution_is_routed_into_the_requesting_thread(tmp_path
     assert [e.type for e in events] == ["chat.message", "approval.resolved"]
     assert events[1].payload["approval_id"] == approval_id
     await store.close()
+
+
+async def test_mail_run_starts_with_memory_linked_to_its_thread(tmp_path: Path):
+    import handler.runtime.integrations.mailbox  # noqa: F401  (registers mail links)
+
+    store = SQLiteStore(tmp_path / "h.db")
+    settings = SettingsService(store)
+    memory = MemoryTools(store, settings)
+    await store.put_topic(MemoryTopic("companies/acme", "Acme Steel", "Pays net 30",
+                                      links=["domain:acme.com"]), None)
+    await store.put_topic(MemoryTopic("conversations/other", "Other", "nope",
+                                      links=["mail:mbx1:conv2"]), None)
+    tokens = RunTokens()
+    harness = RecordingHarness(tokens)
+    executor = RunExecutor(store, {"fake": harness}, RunEventBus(),
+                           RunConfig(data_dir=tmp_path / "d"), PriceTable([]),
+                           tokens=tokens, mcp_url="http://127.0.0.1:9/mcp/",
+                           settings=settings, memory_tools=memory)
+    key = "mail:mbx1:conv1"
+    await store.put(Event(type="mail.received", source="mailbox", idempotency_key="m1",
+                          payload={"from": {"address": "buyer@acme.com"}}, thread_key=key),
+                    ThreadSpec(key, ThreadType("mail"), Lane.BACKGROUND, harness="fake"))
+    await _drain(Dispatcher(store, executor))
+    (req,) = harness.requests
+    assert "## Linked to this thread" in req.instructions
+    assert "Pays net 30" in req.instructions and "nope" not in req.instructions
+    await store.close()

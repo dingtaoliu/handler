@@ -32,6 +32,27 @@ from ..base import (
 from .events import EVENT_TYPE, GUIDANCE, THREAD_TYPE, render_mail_event
 
 
+def mail_thread_links(thread_key: str, events: list[Any]) -> list[str]:
+    """Memory links of a mail thread: its conversation and the sender's domain."""
+    from ...memory import domain_link
+
+    links = [thread_key] if thread_key.count(":") >= 2 else []
+    for event in events:
+        payload = getattr(event, "payload", None) or {}
+        if link := domain_link((payload.get("from") or {}).get("address")):
+            links.append(link)
+    return links
+
+
+def _register_link_source() -> None:
+    from ...memory import register_link_source
+
+    register_link_source(THREAD_TYPE, mail_thread_links)
+
+
+_register_link_source()
+
+
 def _int(env, key: str, default: int, minimum: int = 1) -> int:
     raw = (env.get(key) or "").strip()
     if not raw:

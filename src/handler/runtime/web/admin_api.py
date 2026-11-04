@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict
 from ..auth import Authenticator, Principal, can_see_thread
 from ..context import RunContext
 from ..gateway.gateway import Gateway
-from ..memory import MemoryTools
+from ..memory import MemoryTools, normalize_links
 from ..scheduler import Scheduler, parse_spec
 from ..settings import resolve_harness
 from ..store.base import Store
@@ -39,6 +39,11 @@ class MemoryBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     content: str
     description: str = ""
+    # Omitted: keep the topic's current value. A human saving here may clear
+    # source_untrusted after checking the content.
+    kind: str | None = None
+    links: list[str] | None = None
+    source_untrusted: bool | None = None
 
 
 class AutomationCreate(BaseModel):
@@ -63,7 +68,9 @@ class AutomationPatch(BaseModel):
 def _topic_summary(topic: MemoryTopic) -> dict[str, Any]:
     return {"name": topic.name, "description": topic.description, "version": topic.version,
             "updated_by": topic.updated_by, "updated_at": jsonable_encoder(topic.updated_at),
-            "size": len(topic.content.encode())}
+            "size": len(topic.content.encode()), "kind": topic.kind, "links": topic.links,
+            "source_untrusted": topic.source_untrusted,
+            "updated_thread_key": topic.updated_thread_key}
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -143,8 +150,21 @@ def admin_router(
             raise HTTPException(422, str(exc))
 
     @router.get("/api/memory")
-    async def list_memory(_: Principal = user) -> list:
-        return [_topic_summary(t) for t in await store.list_topics()]
+    async def list_memory(prefix: str | None = None, kind: str | None = None,
+                          link: str | None = None, text: str | None = None,
+                          limit: int | None = None, offset: int = 0,
+                          _: Principal = user) -> list:
+        """Every topic by name; with any filter (or limit), a page of matches."""
+        if not any((prefix, kind, link, text, limit)):
+            return [_topic_summary(t) for t in await store.list_topics()]
+        try:
+            links = normalize_links([link]) if link else None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        topics = await store.search_topics(prefix=prefix, kind=kind, links=links, text=text,
+                                           limit=max(1, min(limit or 100, 500)),
+                                           offset=max(0, offset))
+        return [_topic_summary(t) for t in topics]
 
     @router.get("/api/memory/{name:path}")
     async def get_memory(name: str, _: Principal = user) -> dict:
@@ -167,7 +187,19 @@ def admin_router(
                 version = current.version if current else None  # last write wins
             else:
                 version = expected
-            topic = MemoryTopic(name, body.description, body.content, updated_by=principal.identity)
+            sent = body.model_fields_set
+            try:
+                links = (normalize_links(body.links) if "links" in sent
+                         else (current.links if current else []))
+            except ValueError as exc:
+                raise HTTPException(422, str(exc))
+            topic = MemoryTopic(
+                name, body.description, body.content, updated_by=principal.identity,
+                kind=body.kind if "kind" in sent else (current.kind if current else None),
+                links=links or [],
+                source_untrusted=(bool(body.source_untrusted) if "source_untrusted" in sent
+                                  else bool(current and current.source_untrusted)),
+                updated_thread_key=current.updated_thread_key if current else None)
             stored = await store.put_topic(topic, version)
             if stored is not None:
                 return {**_topic_summary(stored), "content": stored.content}

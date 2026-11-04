@@ -165,6 +165,43 @@ async def test_memory_version_conflicts(domain_store, clock):
     assert await store.get_topic("a") is None
 
 
+async def test_memory_metadata_and_search(domain_store, clock):
+    store = domain_store
+    await store.put_topic(MemoryTopic("inquiries/a", "A", "Grade 304", kind="inquiry",
+                                      links=["crontal:rfq:1", "domain:acme.com"],
+                                      source_untrusted=True, updated_thread_key="mail:m:c"),
+                          None)
+    clock.advance(1)
+    await store.put_topic(MemoryTopic("companies/acme", "Acme", "net 30", kind="company",
+                                      links=["domain:acme.com"]), None)
+    clock.advance(1)
+    await store.put_topic(MemoryTopic("general", "G", "x"), None)
+    topic = await store.get_topic("inquiries/a")
+    assert topic.links == ["crontal:rfq:1", "domain:acme.com"] and topic.kind == "inquiry"
+    assert topic.source_untrusted is True and topic.updated_thread_key == "mail:m:c"
+    assert (await store.get_topic("general")).links == []
+
+    def names(topics):
+        return [t.name for t in topics]
+
+    assert names(await store.search_topics(prefix="inquiries/")) == ["inquiries/a"]
+    assert names(await store.search_topics(kind="company")) == ["companies/acme"]
+    assert names(await store.search_topics(kindless=True)) == ["general"]
+    assert names(await store.search_topics(links=["domain:acme.com"])) == [
+        "companies/acme", "inquiries/a"]
+    assert names(await store.search_topics(links=["crontal:rfq:12"])) == []
+    assert names(await store.search_topics(text="GRADE")) == ["inquiries/a"]
+    assert names(await store.search_topics(order="recent", limit=2)) == [
+        "general", "companies/acme"]
+    assert names(await store.search_topics(limit=1, offset=2)) == ["inquiries/a"]
+    assert await store.count_topics() == 3
+    updated = await store.put_topic(replace(topic, links=["crontal:rfq:1"],
+                                            source_untrusted=False), 1)
+    assert updated.version == 2
+    again = await store.get_topic("inquiries/a")
+    assert again.links == ["crontal:rfq:1"] and again.source_untrusted is False
+
+
 async def test_settings_history(domain_store, clock):
     store = domain_store
     assert await store.get_settings("persona") is None
@@ -287,3 +324,22 @@ async def test_fire_schedule_wakes_other_process(pg_dsn, clock):
     finally:
         await first.close()
         await second.close()
+
+
+async def test_memory_columns_added_to_an_existing_postgres_table(pg_dsn, clock):
+    import psycopg
+
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute("CREATE TABLE memory_topics (name TEXT PRIMARY KEY, description TEXT "
+                     "NOT NULL, content TEXT NOT NULL, version INTEGER NOT NULL, updated_by "
+                     "TEXT, updated_at TIMESTAMPTZ NOT NULL)")
+        conn.execute("INSERT INTO memory_topics VALUES ('old', 'Old', 'kept', 2, NULL, now())")
+    store = PostgresStore(pg_dsn, clock=clock)
+    try:
+        old = await store.get_topic("old")
+        assert (old.content, old.links, old.kind, old.source_untrusted) == ("kept", [], None,
+                                                                             False)
+        assert await store.put_topic(replace(old, links=["thread:x"]), 2)
+        assert [t.name for t in await store.search_topics(links=["thread:x"])] == ["old"]
+    finally:
+        await store.close()

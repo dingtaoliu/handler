@@ -65,6 +65,7 @@ class LoadedIntegrations:
     thread_types: dict[str, tuple[str, ThreadTypeSpec]] = field(default_factory=dict)
     settings_sections: dict[str, tuple[str, SettingsSection]] = field(default_factory=dict)
     prompt_fragments: list[tuple[str, PromptFragment]] = field(default_factory=list)
+    settings_defaults: dict[str, tuple[str, dict]] = field(default_factory=dict)
     ui_entries: list[tuple[str, UIManifestEntry]] = field(default_factory=list)
     configured: bool = True  # False when HANDLER_INTEGRATIONS is unset
 
@@ -219,6 +220,12 @@ class IntegrationRegistry:
                         f"{where}: settings section {section.key!r} from {n!r} duplicates "
                         f"one from {loaded.settings_sections[section.key][0]!r}")
                 loaded.settings_sections[section.key] = (n, section)
+            for section, value in integration.settings_defaults().items():
+                if section in loaded.settings_defaults:
+                    raise IntegrationError(
+                        f"{where}: default {section!r} settings from {n!r} duplicate those "
+                        f"from {loaded.settings_defaults[section][0]!r}")
+                loaded.settings_defaults[section] = (n, value)
             loaded.prompt_fragments.extend((n, f) for f in integration.prompt_fragments())
             loaded.ui_entries.extend((n, e) for e in integration.ui_entries())
         return loaded

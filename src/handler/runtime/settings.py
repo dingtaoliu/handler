@@ -153,10 +153,60 @@ class EmailSettings(Section):
         description="What the agent does with each email. Empty restores the default.")
 
 
+class MemoryKind(Section):
+    """A kind of topic the agent keeps current (docs/rebuild/memory-kinds.md)."""
+
+    name: str = Field(..., title="Name", pattern=r"^[a-z][a-z0-9_-]{0,39}$",
+                      description="Kind id, e.g. inquiry.")
+    prefix: str = Field(..., title="Topic prefix", pattern=r"^[a-z0-9][a-z0-9/_-]{0,59}/$",
+                        description="Topics of this kind are named <prefix><slug>, "
+                                    "e.g. inquiries/acme-304-pipe. Ends with '/'.")
+    description: str = Field("", title="Description",
+                             description="When to keep a topic of this kind (one per what).")
+    template: str = Field("", title="Template",
+                          description="Markdown outline each topic of this kind follows.")
+
+
+class MemorySettings(Section):
+    """Shared memory: special kinds of topics and the size of what the prompt shows."""
+
+    kinds: list[MemoryKind] = Field(
+        default_factory=list, title="Kinds",
+        description="Kinds of topics the agent maintains, each with a name prefix and a "
+                    "template. Empty: only general topics.")
+    max_topic_chars: int = Field(
+        8000, ge=500, le=200_000, title="Max topic size",
+        description="A save that makes a topic longer than this still succeeds, but tells "
+                    "the agent to rewrite the topic into a summary.")
+    index_general_limit: int = Field(
+        100, ge=0, le=1000, title="General topics in the index",
+        description="How many general (kind-less) topics the prompt's index lists.")
+    index_recent_limit: int = Field(
+        30, ge=0, le=500, title="Recent topics in the index",
+        description="How many of the most recently updated other topics the index lists.")
+    index_max_chars: int = Field(
+        4000, ge=0, le=50_000, title="Index size",
+        description="Character cap of the memory index in the prompt.")
+    relevant_max_chars: int = Field(
+        6000, ge=0, le=50_000, title="Relevant memory size",
+        description="Character cap of the topics linked to the current thread that a run "
+                    "starts with.")
+
+    @model_validator(mode="after")
+    def _unique_kinds(self) -> "MemorySettings":
+        names = [k.name for k in self.kinds]
+        prefixes = [k.prefix for k in self.kinds]
+        if len(set(names)) != len(names):
+            raise ValueError("memory kinds must have unique names")
+        if len(set(prefixes)) != len(prefixes):
+            raise ValueError("memory kinds must have unique prefixes")
+        return self
+
+
 MODELS = {
     "persona": PersonaSettings, "threads": ThreadsSettings,
     "grants": GrantsSettings, "limits": LimitsSettings,
-    "email": EmailSettings,
+    "email": EmailSettings, "memory": MemorySettings,
 }
 
 
@@ -186,10 +236,15 @@ class SettingsConflict(Exception):
 
 class SettingsService:
     def __init__(self, store: SettingsStore, defaults: InstanceDefaults | None = None,
-                 harness_defaults: HarnessDefaults | None = None) -> None:
+                 harness_defaults: HarnessDefaults | None = None,
+                 section_defaults: dict[str, dict] | None = None) -> None:
         self.store = store
         self.defaults = defaults or InstanceDefaults()
         self.harness_defaults = harness_defaults
+        # What a section holds before anything is saved, when it isn't the
+        # model's own defaults (e.g. Crontal's memory kinds; see
+        # Integration.settings_defaults). Saved versions always win.
+        self.section_defaults: dict[str, dict] = dict(section_defaults or {})
 
     async def fallback(self, harness: str) -> dict:
         """What an empty model/effort setting resolves to on `harness`.
@@ -252,7 +307,13 @@ class SettingsService:
         stored = await self.store.get_settings(section)
         if stored:
             return model.model_validate(stored.value).model_dump(mode="json"), stored.version
-        return model().model_dump(mode="json"), None
+        return self.default_value(section), None
+
+    def default_value(self, section: str) -> dict:
+        model = MODELS[section]
+        if section in self.section_defaults:
+            return model.model_validate(self.section_defaults[section]).model_dump(mode="json")
+        return model().model_dump(mode="json")
 
     async def put(
         self, section: str, value: dict, updated_by: str | None,

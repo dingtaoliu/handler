@@ -5,7 +5,7 @@ from typing import Any
 
 from .gateway.crontal_identity import identity_prompt
 from .mail.instructions import DEFAULT_EMAIL_INSTRUCTIONS
-from .memory import MemoryTools
+from .memory import SAVING_RULES, MemoryTools
 from .settings import SettingsService
 from .types import ThreadType
 
@@ -13,14 +13,13 @@ from .types import ThreadType
 async def build_instructions(
     settings: SettingsService, memory_tools: MemoryTools, *,
     speaker: str | None, thread_type: ThreadType,
-    crontal_identity: Any = None,
+    crontal_identity: Any = None, thread_key: str | None = None, events: Any = None,
 ) -> str:
     persona, _ = await settings.get("persona")
     sections = [persona[name] for name in ("system", "identity", "persona") if persona[name]]
     if crontal_identity is not None:
         sections.append(await crontal_identity_section(crontal_identity))
-    sections.append("# Memory\n" + await memory_tools.index_text()
-                    + "\nUse memory_read for details.")
+    sections.append(await memory_section(memory_tools, thread_key=thread_key, events=events))
     if speaker is not None:
         sections.append(f"You are talking with {speaker}")
     if thread_type == ThreadType.EMAIL:
@@ -44,6 +43,27 @@ async def build_instructions(
                     "(crontal_api_get /api/v1/files/merchant, newest first) before answering "
                     "from memory or searching the web.")
     return "\n\n".join(sections)
+
+
+async def memory_section(memory_tools: MemoryTools, *, thread_key: str | None = None,
+                         events: Any = None) -> str:
+    """Shared memory: what it is, its kinds, the saving rules, the index and,
+    for a live thread, the topics linked to it."""
+    parts = ["# Memory\nShared memory holds topics that outlast this thread and are seen "
+             "by every thread and user of this instance."]
+    kinds = await memory_tools.kinds_text()
+    if kinds:
+        parts.append(kinds)
+    parts.append(SAVING_RULES)
+    index = await memory_tools.index_text()
+    parts.append("## Index\n" + (index or "(no topics yet)")
+                 + "\nUse memory_read for a topic, memory_search to find more.")
+    if thread_key:
+        relevant = await memory_tools.relevant_text(thread_key, events)
+        if relevant:
+            parts.append("## Linked to this thread\nTopics linked to this thread's records "
+                         "(keep them current when you learn something new):\n\n" + relevant)
+    return "\n\n".join(parts)
 
 
 ASK_USER_GUIDANCE = (

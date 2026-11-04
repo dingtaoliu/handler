@@ -291,6 +291,19 @@ class MemoryStore(Protocol):
 
     async def delete_topic(self, name: str) -> bool: ...
 
+    async def search_topics(
+        self, *, prefix: str | None = None, kind: str | None = None,
+        kindless: bool = False, links: list[str] | None = None, text: str | None = None,
+        order: str = "name", limit: int = 50, offset: int = 0,
+    ) -> list[MemoryTopic]:
+        """Topics matching every filter given: name starts with `prefix`; `kind`
+        equals; `kindless` (no kind); has any of `links`; `text` in name,
+        description or content (case-insensitive). `order` is "name" or
+        "recent" (newest update first)."""
+        ...
+
+    async def count_topics(self) -> int: ...
+
 
 class SettingsStore(Protocol):
     async def get_settings(self, section: str) -> SettingsVersion | None:

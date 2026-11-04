@@ -10,8 +10,8 @@ Lifecycle per instance:
 2. `configure(IntegrationConfig)` reads the integration's own namespaced config
    and raises `ValueError` naming the missing variable when required config is
    absent;
-3. static hooks (`thread_types`, `settings_sections`, `prompt_fragments`,
-   `ui_entries`) are collected and checked for duplicates;
+3. static hooks (`thread_types`, `settings_sections`, `settings_defaults`,
+   `prompt_fragments`, `ui_entries`) are collected and checked for duplicates;
 4. runtime hooks (`routers`, `tool_sets`, `sinks`, `identity_provider`,
    `background_tasks`) receive an `IntegrationContext` holding the instance's
    core services.
@@ -149,6 +149,11 @@ class Integration:
 
     def prompt_fragments(self) -> list[PromptFragment]:
         return []
+
+    def settings_defaults(self) -> dict[str, dict]:
+        """Values for core settings sections before anything is saved there,
+        e.g. {"memory": {"kinds": [...]}}. A saved version always wins."""
+        return {}
 
     def ui_entries(self) -> list[UIManifestEntry]:
         return []

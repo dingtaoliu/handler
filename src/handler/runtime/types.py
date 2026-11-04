@@ -360,6 +360,15 @@ class MemoryTopic:
     version: int = 1
     updated_by: str | None = None
     updated_at: datetime = field(default_factory=utcnow)
+    # Metadata (docs/rebuild/memory-kinds.md). kind: a name from the `memory`
+    # settings' kinds, None for a general topic. links: references such as
+    # "crontal:rfq:123", "mail:<mailbox>:<conversation>", "thread:<key>",
+    # "domain:acme.com", "topic:<name>". source_untrusted: some content was
+    # saved from a thread fed by outside input (sticky until a human clears it).
+    kind: str | None = None
+    links: list[str] = field(default_factory=list)
+    source_untrusted: bool = False
+    updated_thread_key: str | None = None  # thread of the last agent write
 
 
 @dataclass

@@ -10,7 +10,8 @@ each piece turns on only when its vars are set):
 - `CrontalApiTools` (`crontal_api_*`) when URL and token are set;
 - the curated `crontal.*` MCP tools, registered by a background task once
   Crontal is reachable, when the URL is set;
-- the Crontal notification sink (`sink.py`) when URL and secret are set.
+- the Crontal notification sink (`sink.py`) when URL and secret are set;
+- default memory kinds (inquiry, company, conversation; `memory_kinds.py`).
 """
 from __future__ import annotations
 
@@ -37,6 +38,11 @@ class CrontalIntegration(Integration):
         self.crontal_url = (env.get("CRONTAL_URL") or "").strip() or None
         self.agent_token = env.get("CRONTAL_AGENT_TOKEN") or None
         self.webhook_secret = env.get("HANDLER_WEBHOOK_SECRET") or None
+
+    def settings_defaults(self) -> dict[str, dict]:
+        from .memory_kinds import CRONTAL_MEMORY_DEFAULTS
+
+        return {"memory": CRONTAL_MEMORY_DEFAULTS}
 
     def thread_types(self) -> list[ThreadTypeSpec]:
         return [ThreadTypeSpec(name="crontal", lane="background", visibility="shared",

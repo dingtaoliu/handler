@@ -13,7 +13,45 @@ from .sqlite import _insert, _timestamp, _transaction, _values
 
 
 def _topic(row: sqlite3.Row) -> MemoryTopic:
-    return MemoryTopic(**{**dict(row), "updated_at": datetime.fromisoformat(row["updated_at"])})
+    values = dict(row)
+    values.pop("snippet", None)
+    return MemoryTopic(**{
+        **values, "updated_at": datetime.fromisoformat(row["updated_at"]),
+        "links": json.loads(row["links"]) if row["links"] else [],
+        "source_untrusted": bool(row["source_untrusted"]),
+    })
+
+
+def _topic_values(topic: MemoryTopic) -> dict:
+    values = _values(topic)
+    values["links"] = json.dumps(list(topic.links or []))
+    values["source_untrusted"] = 1 if topic.source_untrusted else 0
+    return values
+
+
+def topic_filters(*, prefix: str | None, kind: str | None, kindless: bool,
+                  links: list[str] | None, text: str | None,
+                  mark: str = "?") -> tuple[list[str], list]:
+    """WHERE clauses (SQLite syntax) and parameters for search_topics."""
+    where: list[str] = []
+    params: list = []
+    if prefix:
+        where.append(f"substr(name, 1, length({mark})) = {mark}")
+        params += [prefix, prefix]
+    if kind:
+        where.append(f"kind = {mark}")
+        params.append(kind)
+    if kindless:
+        where.append("kind IS NULL")
+    if links:
+        # links is a JSON array of strings; match each as a whole JSON string.
+        where.append("(" + " OR ".join(f"instr(links, {mark}) > 0" for _ in links) + ")")
+        params += [json.dumps(link) for link in links]
+    if text:
+        where.append(f"(instr(lower(name), {mark}) > 0 OR instr(lower(description), {mark}) > 0 "
+                     f"OR instr(lower(content), {mark}) > 0)")
+        params += [text.lower()] * 3
+    return where, params
 
 
 def _settings(row: sqlite3.Row) -> SettingsVersion:
@@ -48,7 +86,7 @@ class MemoryMixin:
                 stored = replace(topic, version=(expected_version or 0) + 1,
                                  updated_at=self._clock())
                 db.execute("DELETE FROM memory_topics WHERE name = ?", (topic.name,))
-                _insert(db, "memory_topics", _values(stored))
+                _insert(db, "memory_topics", _topic_values(stored))
                 return stored
         return await self._call(write)
 
@@ -56,6 +94,25 @@ class MemoryMixin:
         return await self._call(lambda db: bool(db.execute(
             "DELETE FROM memory_topics WHERE name = ?", (name,)
         ).rowcount))
+
+    async def search_topics(
+        self, *, prefix: str | None = None, kind: str | None = None,
+        kindless: bool = False, links: list[str] | None = None, text: str | None = None,
+        order: str = "name", limit: int = 50, offset: int = 0,
+    ) -> list[MemoryTopic]:
+        where, params = topic_filters(prefix=prefix, kind=kind, kindless=kindless,
+                                      links=links, text=text)
+        query = ("SELECT * FROM memory_topics"
+                 + (" WHERE " + " AND ".join(where) if where else "")
+                 + (" ORDER BY updated_at DESC, name" if order == "recent" else " ORDER BY name")
+                 + " LIMIT ? OFFSET ?")
+        return await self._call(lambda db: [
+            _topic(row) for row in db.execute(query, (*params, max(0, limit), max(0, offset)))
+        ])
+
+    async def count_topics(self) -> int:
+        return await self._call(
+            lambda db: db.execute("SELECT COUNT(*) FROM memory_topics").fetchone()[0])
 
 
 class SettingsMixin:

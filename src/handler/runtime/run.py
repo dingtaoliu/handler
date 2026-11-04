@@ -809,7 +809,8 @@ class RunExecutor:
             speaker = thread.owner_user_id if str(thread.type) == "chat" else None
             built = await build_instructions(self.settings, self.memory_tools,
                                              speaker=speaker, thread_type=thread.type,
-                                             crontal_identity=self.crontal_identity)
+                                             crontal_identity=self.crontal_identity,
+                                             thread_key=thread.key, events=events)
             plan.instructions = "\n\n".join(p for p in (built, self.config.instructions) if p)
         return plan
 

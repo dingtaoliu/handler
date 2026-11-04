@@ -56,7 +56,7 @@ def settings_router(service: SettingsService, auth: Authenticator,
         # matches what the harness actually receives.
         speaker = principal.user_id
         text = await build_instructions(
-            service, memory_tools or MemoryTools(service.store),
+            service, memory_tools or MemoryTools(service.store, service),
             speaker=speaker if kind == ThreadType.CHAT else None, thread_type=kind,
             crontal_identity=crontal_identity)
         return {"thread_type": kind.value, "prompt": text}

@@ -204,6 +204,16 @@ def _log_file(args: argparse.Namespace) -> Path:
     return Path(args.data_dir).expanduser() / "logs" / "handler-rt.jsonl"
 
 
+def _settings_defaults(integrations: Any, legacy_crontal: bool) -> dict[str, dict]:
+    """Integration-provided values for settings sections nothing was saved to."""
+    out = {section: value for section, (_, value) in integrations.settings_defaults.items()}
+    if legacy_crontal and "memory" not in out:
+        from .integrations.crontal.memory_kinds import CRONTAL_MEMORY_DEFAULTS
+
+        out["memory"] = CRONTAL_MEMORY_DEFAULTS
+    return out
+
+
 def _crontal_identity_client(args: Any, env: Any, integrations: Any, legacy: bool) -> Any:
     """The instance's Crontal AI identity client (shared with the Crontal tools),
     or None when this instance has no Crontal URL and agent token."""
@@ -481,7 +491,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         bus = RunEventBus()
 
         settings = SettingsService(
-            store, InstanceDefaults(args.model, args.reasoning_effort))
+            store, InstanceDefaults(args.model, args.reasoning_effort),
+            section_defaults=_settings_defaults(integrations, legacy_crontal and bool(
+                args.crontal_url)))
         await settings.seed_from_files(
             Path(args.handler_yaml).expanduser() if args.handler_yaml else None,
             Path(args.agent_md).expanduser() if args.agent_md else None,
@@ -511,7 +523,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             logger.info("crontal notification sink on", extra={"url": crontal_sink.url})
         notifier = Notifier(store, bus, outbox=outbox, users_provider=lambda: users,
                             instance=instance_name)
-        memory_tools = MemoryTools(store)
+        memory_tools = MemoryTools(store, settings)
         scheduler = Scheduler(store, default_harness=settings.harness_source("automation"))
         gateway = Gateway(store, GrantPolicy(grants_cfg), emit_event=emit_event)
         questions = QuestionService(store, emit_event=emit_event, notifier=notifier)

@@ -87,7 +87,7 @@ async def test_tools_and_concurrent_append(store, ctx):
     assert (await invoke(memory, "memory_rewrite", ctx, name="missing", content="", description="")).is_error
     for spec in memory.tools():
         assert spec.action.startswith("memory.")
-        assert spec.risk == (Risk.READ if spec.name in {"memory_list", "memory_read"} else Risk.WRITE_INTERNAL)
+        assert spec.risk == (Risk.READ if spec.name in {"memory_list", "memory_read", "memory_search"} else Risk.WRITE_INTERNAL)
 
 
 @pytest.mark.parametrize("name", ["", "../a", "a..b", "Upper", "/root", "a.b", "a" * 101, "a b"])
@@ -231,7 +231,7 @@ async def test_api(store, ctx):
         headers={"Authorization": "Bearer test-admin-key"},
     ) as client:
         response = await client.get("/api/settings")
-        assert set(response.json()) == {"persona", "threads", "grants", "limits", "email"}
+        assert set(response.json()) == {"persona", "threads", "grants", "limits", "email", "memory"}
         assert response.json()["persona"]["version"] is None
         assert "schema" in response.json()["persona"]
         response = await client.put("/api/settings/persona", json={"system": "one"})

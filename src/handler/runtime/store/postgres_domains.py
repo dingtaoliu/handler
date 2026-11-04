@@ -276,23 +276,68 @@ class AuditMixin(_Rows):
         )
 
 
+def _memory_topic(row: dict[str, Any]) -> MemoryTopic:
+    values = {field.name: row[field.name] for field in fields(MemoryTopic)}
+    values["links"] = list(values["links"] or [])
+    values["source_untrusted"] = bool(values["source_untrusted"])
+    return MemoryTopic(**values)
+
+
 class MemoryMixin(_Rows):
+    async def _topics(self, query: str, parameters: Any = ()) -> list[MemoryTopic]:
+        async with self._conn() as conn:
+            cursor = await conn.execute(query, parameters)
+            return [_memory_topic(row) for row in await cursor.fetchall()]
+
     async def list_topics(self) -> list[MemoryTopic]:
-        return await self._fetch(
-            MemoryTopic, f"SELECT {_columns(MemoryTopic)} FROM memory_topics ORDER BY name",
-        )
+        return await self._topics(
+            f"SELECT {_columns(MemoryTopic)} FROM memory_topics ORDER BY name")
 
     async def get_topic(self, name: str) -> MemoryTopic | None:
-        return await self._fetch_one(
-            MemoryTopic, f"SELECT {_columns(MemoryTopic)} FROM memory_topics WHERE name = %s",
-            (name,),
-        )
+        rows = await self._topics(
+            f"SELECT {_columns(MemoryTopic)} FROM memory_topics WHERE name = %s", (name,))
+        return rows[0] if rows else None
+
+    async def search_topics(
+        self, *, prefix: str | None = None, kind: str | None = None,
+        kindless: bool = False, links: list[str] | None = None, text: str | None = None,
+        order: str = "name", limit: int = 50, offset: int = 0,
+    ) -> list[MemoryTopic]:
+        where: list[str] = []
+        params: list[Any] = []
+        if prefix:
+            where.append("left(name, length(%s)) = %s")
+            params += [prefix, prefix]
+        if kind:
+            where.append("kind = %s")
+            params.append(kind)
+        if kindless:
+            where.append("kind IS NULL")
+        if links:
+            where.append("(" + " OR ".join("links @> %s" for _ in links) + ")")
+            params += [Jsonb([link]) for link in links]
+        if text:
+            where.append("(strpos(lower(name), %s) > 0 OR strpos(lower(description), %s) > 0 "
+                         "OR strpos(lower(content), %s) > 0)")
+            params += [text.lower()] * 3
+        query = (f"SELECT {_columns(MemoryTopic)} FROM memory_topics"
+                 + (" WHERE " + " AND ".join(where) if where else "")
+                 + (" ORDER BY updated_at DESC, name" if order == "recent" else " ORDER BY name")
+                 + " LIMIT %s OFFSET %s")
+        return await self._topics(query, (*params, max(0, limit), max(0, offset)))
+
+    async def count_topics(self) -> int:
+        async with self._conn() as conn:
+            cursor = await conn.execute("SELECT COUNT(*) AS n FROM memory_topics")
+            return int((await cursor.fetchone())["n"])
 
     async def put_topic(
         self, topic: MemoryTopic, expected_version: int | None
     ) -> MemoryTopic | None:
-        stored = replace(topic, version=(expected_version or 0) + 1, updated_at=self._clock())
+        stored = replace(topic, version=(expected_version or 0) + 1, updated_at=self._clock(),
+                         links=list(topic.links or []))
         values = _row_values(stored)
+        values["links"] = Jsonb(stored.links)
         async with self._conn() as conn:
             if expected_version is None:
                 columns = ", ".join(values)
@@ -306,7 +351,10 @@ class MemoryMixin(_Rows):
                 cursor = await conn.execute(
                     "UPDATE memory_topics SET description = %(description)s, "
                     "content = %(content)s, version = %(version)s, "
-                    "updated_by = %(updated_by)s, updated_at = %(updated_at)s "
+                    "updated_by = %(updated_by)s, updated_at = %(updated_at)s, "
+                    "kind = %(kind)s, links = %(links)s, "
+                    "source_untrusted = %(source_untrusted)s, "
+                    "updated_thread_key = %(updated_thread_key)s "
                     "WHERE name = %(name)s AND version = %(expected)s", values,
                 )
             return stored if cursor.rowcount else None

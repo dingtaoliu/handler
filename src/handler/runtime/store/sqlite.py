@@ -101,6 +101,31 @@ def _transaction(db: sqlite3.Connection) -> Iterator[None]:
         raise
 
 
+# Columns added to existing tables after they shipped: SQLite has no
+# ADD COLUMN IF NOT EXISTS, so each is added at connect when missing.
+# (table, column, declaration). Postgres does the same in its schema files.
+ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    ("memory_topics", "kind", "TEXT"),
+    ("memory_topics", "links", "TEXT"),
+    ("memory_topics", "source_untrusted", "INTEGER NOT NULL DEFAULT 0"),
+    ("memory_topics", "updated_thread_key", "TEXT"),
+]
+# Indexes on added columns, created once the columns exist.
+ADDED_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS memory_topics_updated ON memory_topics(updated_at)",
+    "CREATE INDEX IF NOT EXISTS memory_topics_kind ON memory_topics(kind, updated_at)",
+]
+
+
+def _add_columns(db: sqlite3.Connection) -> None:
+    for table, column, declaration in ADDED_COLUMNS:
+        existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        if existing and column not in existing:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    for statement in ADDED_INDEXES:
+        db.execute(statement)
+
+
 class SQLiteCore:
     """Core tables (events, threads, runs, messages, steps) and DB plumbing.
 
@@ -131,6 +156,7 @@ class SQLiteCore:
                     if schema.name.startswith("schema_pg"):
                         continue
                     db.executescript(schema.read_text())
+                _add_columns(db)
             except BaseException:
                 db.close()
                 raise
