@@ -129,8 +129,14 @@ class MailboxIntegration(Integration):
 
         service, mail_store, _ = self._parts(ctx)
         workspaces_dir = ctx.workspaces_dir
-        return [MailTools(service, mail_store,
-                          workspace_for=lambda key: workspaces_dir / thread_slug(key))]
+        tools = MailTools(service, mail_store,
+                          workspace_for=lambda key: workspaces_dir / thread_slug(key))
+        # Provenance for files the agent uploads to Crontal from an email
+        # (read by CrontalApiTools, see gateway/crontal_api.py UploadSource).
+        if not ctx.extra.get("mail_upload_source"):
+            ctx.extra["mail_upload_source"] = True
+            ctx.extra.setdefault("upload_sources", []).append(tools.upload_source)
+        return [tools]
 
     def background_tasks(self, ctx: IntegrationContext) -> list[BackgroundTask]:
         _, _, poller = self._parts(ctx)

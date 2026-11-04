@@ -246,6 +246,38 @@ class MailTools:
                 result["text_truncated"] = True
         return ToolResult(result)
 
+    async def upload_source(self, ctx: RunContext, path: str) -> dict[str, Any] | None:
+        """Email details of the attachment saved at workspace *path*, else None.
+
+        Attachments live at mail/<mailbox>/<date>-<hash>/attachments/<name>
+        (saved at ingest, see MailboxService.folder_for) or
+        mail/<mailbox>/<message row id>/<name> (fetched by mail_get_attachment).
+        Used as provenance when the agent uploads the file to Crontal Files.
+        """
+        parts = [p for p in path.split("/") if p not in ("", ".")]
+        if len(parts) < 4 or parts[0] != "mail":
+            return None
+        mailbox_id = parts[1]
+        if parts[2].startswith("mm_") and len(parts) == 4:
+            row = await self.mail.get_message(parts[2])
+        elif len(parts) == 5 and parts[3] == "attachments":
+            row = await self.mail.message_by_saved_dir(mailbox_id, "/".join(parts[:3]))
+        else:
+            return None
+        if not row or row.get("account_id") != mailbox_id:
+            return None
+        mailbox = await self.mail.get_mailbox(mailbox_id)
+        detail = {
+            "mailbox": mailbox.email if mailbox else mailbox_id,
+            "mailbox_id": mailbox_id,
+            "sender": row.get("from_addr"),
+            "sender_name": row.get("from_name"),
+            "subject": row.get("subject"),
+            "message_id": row.get("message_id"),
+            "date": row.get("date"),
+        }
+        return {k: v for k, v in detail.items() if v not in (None, "")}
+
     # ── composing ──────────────────────────────────────────────────────────
 
     def _files(self, ctx: RunContext, paths: list[str],

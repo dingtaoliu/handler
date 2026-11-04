@@ -33,6 +33,10 @@ ApprovalPreview = Callable[
 # submits, messages, shares, invites...): a short reason, or None when the
 # call stays inside. See ToolSpec.outward.
 OutwardCheck = Callable[[dict[str, Any]], "str | None"]
+# Whether one call is destructive enough that a person must approve it on
+# every thread, whatever the grants say (e.g. deleting files): a short reason,
+# or None. See ToolSpec.always_ask.
+AlwaysAskCheck = Callable[[dict[str, Any]], "str | None"]
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,9 @@ class ToolSpec:
     outward: see OutwardCheck. On threads fed by outside input (email,
         crontal) an outward call always needs approval. A write_external or
         exec tool without it counts every call as outward.
+    always_ask: see AlwaysAskCheck. A call it flags needs approval on every
+        thread type: an `allow` from any grant rule (exact, glob or default)
+        becomes `ask`; `deny` stays `deny`.
     """
 
     name: str
@@ -60,6 +67,7 @@ class ToolSpec:
     explicit_allow_only: bool = False
     approval_preview: ApprovalPreview | None = field(default=None, compare=False, repr=False)
     outward: OutwardCheck | None = field(default=None, compare=False, repr=False)
+    always_ask: AlwaysAskCheck | None = field(default=None, compare=False, repr=False)
 
 
 class Policy(Protocol):

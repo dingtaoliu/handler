@@ -13,6 +13,14 @@ is also appended to 400/422 results so the agent can correct its call.
 
 File responses are saved into the thread's workspace (`downloads/`), and
 documents are converted to text (`documents.to_text`) so the agent can read them.
+
+Crontal Files: deleting or trashing files/folders (and emptying the trash)
+always needs a person's approval (`destructive_call`, a ToolSpec.always_ask
+classifier, so even `crontal_api.*: allow` cannot skip it). Uploads to
+`/api/v1/files/upload` carry provenance: `source` (`email` when the workspace
+file is a saved email attachment, else `ai_generated`) and `source_detail`
+(the thread key, plus mailbox/sender/subject/message id for email), resolved
+by the registered upload sources (see `UploadSource`).
 """
 
 from __future__ import annotations
@@ -23,8 +31,8 @@ import json
 import re
 import time
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable
+from pathlib import Path, PurePosixPath
+from typing import Any, Awaitable, Callable
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -112,6 +120,43 @@ def outward_call(args: dict[str, Any]) -> str | None:
     return None
 
 
+# ── destructive calls ─────────────────────────────────────────────────────
+# Crontal Files writes that remove files: they need approval on every thread,
+# whatever the grants. Crontal itself refuses permanent deletes to the agent;
+# moving to the trash is allowed there, but only once a person approved it.
+_FILES = ("/api/v1/files",)
+_FILES_TRASH_POSTS = re.compile(r"^/api/v1/files/bulk/trash/?$")
+_FILES_DELETE_POSTS = re.compile(r"^/api/v1/files/(bulk/delete|trash/empty)/?$")
+
+
+def destructive_call(args: dict[str, Any]) -> str | None:
+    """Why this crontal_api_call deletes Crontal files, or None."""
+    method = str(args.get("method", "")).upper()
+    path = str(args.get("path", "")).split("?", 1)[0].lower()
+    if not _under(path.rstrip("/") or path, _FILES):
+        return None
+    if method == "DELETE":
+        return "deletes Crontal files or folders (moves them to the trash)"
+    if method == "POST" and _FILES_TRASH_POSTS.match(path):
+        return "moves Crontal files or folders to the trash"
+    if method == "POST" and _FILES_DELETE_POSTS.match(path):
+        return "permanently deletes Crontal files"
+    return None
+
+
+# ── upload provenance ─────────────────────────────────────────────────────
+FILES_UPLOAD = "/api/v1/files/upload"
+# (run context, workspace-relative path) -> email details of the attachment
+# saved at that path ({mailbox, sender, subject, message_id, ...}) or None.
+UploadSource = Callable[[RunContext, str], Awaitable["dict[str, Any] | None"]]
+
+
+def _form_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
 def crontal_base_url(url: str) -> str:
     """https://host/api/v1/agent-mcp → https://host (the API's origin)."""
     parts = urlsplit(url)
@@ -164,7 +209,8 @@ class CrontalApiTools:
     def __init__(self, base_url: str, agent_token: str, *,
                  workspace_for: Callable[[str], Path],
                  client: httpx.AsyncClient | None = None,
-                 identity: CrontalIdentityClient | None = None) -> None:
+                 identity: CrontalIdentityClient | None = None,
+                 upload_sources: list[UploadSource] | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self._agent_token = agent_token
         self._workspace_for = workspace_for
@@ -176,6 +222,8 @@ class CrontalApiTools:
                         if client is not None
                         else crontal_identity(self.base_url, agent_token))
         self.identity = identity
+        # Shared list: integrations (mailbox) register resolvers into it later.
+        self._upload_sources = upload_sources if upload_sources is not None else []
         # JWTs by on-behalf-of user ("" = none); all are the AI user's.
         self._jwts: dict[str, tuple[str, float]] = {}
         self._routes: tuple[list[dict[str, Any]], float] | None = None
@@ -244,7 +292,10 @@ class CrontalApiTools:
                                   is_error=True)
             field = str(args.get("upload_field") or "file")
             kwargs["files"] = {field: (source.name, source.read_bytes())}
-            kwargs["data"] = {k: str(v) for k, v in (args.get("form") or {}).items()}
+            form = dict(args.get("form") or {})
+            if path.split("?", 1)[0].rstrip("/") == FILES_UPLOAD:
+                form = await self._with_provenance(ctx, str(upload), form)
+            kwargs["data"] = {k: _form_value(v) for k, v in form.items()}
         elif "json" in args and args["json"] is not None:
             kwargs["json"] = args["json"]
         try:
@@ -261,6 +312,36 @@ class CrontalApiTools:
                 result.content["hint"] = ("The request did not match the endpoint; "
                                           "fix it using `expected` and retry once.")
         return result
+
+    async def _email_source(self, ctx: RunContext, upload: str) -> dict[str, Any] | None:
+        relative = PurePosixPath(upload.replace("\\", "/")).as_posix()
+        for resolve in list(self._upload_sources):
+            try:
+                found = await resolve(ctx, relative)
+            except Exception:  # provenance is best effort; never block the upload
+                found = None
+            if found:
+                return found
+        return None
+
+    async def _with_provenance(self, ctx: RunContext, upload: str,
+                               form: dict[str, Any]) -> dict[str, Any]:
+        """Add source/source_detail for a Crontal Files upload (agent values win)."""
+        detail = form.get("source_detail")
+        if isinstance(detail, str):
+            try:
+                detail = json.loads(detail) if detail.strip() else None
+            except ValueError:
+                return form  # the agent's own value; Crontal validates it
+        if detail is not None and not isinstance(detail, dict):
+            return form
+        email = None if "source" in form else await self._email_source(ctx, upload)
+        if "source" not in form:
+            form["source"] = "email" if email else "ai_generated"
+        merged = {**(email or {}), **(detail or {})}
+        merged.setdefault("thread_key", ctx.thread_key)
+        form["source_detail"] = merged
+        return form
 
     async def _send(self, obo: str | None, method: str, path: str,
                     kwargs: dict[str, Any]) -> httpx.Response:
@@ -434,5 +515,5 @@ class CrontalApiTools:
                     "form": {"type": "object", "additionalProperties": True,
                              "description": "Extra multipart form fields for upload_file."}},
                  "required": ["method", "path"]},
-                self._call, outward=outward_call),
+                self._call, outward=outward_call, always_ask=destructive_call),
         ]

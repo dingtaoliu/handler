@@ -58,7 +58,8 @@ class CrontalIntegration(Integration):
 
         workspaces_dir = ctx.workspaces_dir
         return [CrontalApiTools(crontal_base_url(self.crontal_url), self.agent_token,
-                                workspace_for=lambda key: workspaces_dir / thread_slug(key))]
+                                workspace_for=lambda key: workspaces_dir / thread_slug(key),
+                                upload_sources=ctx.extra.setdefault("upload_sources", []))]
 
     def sinks(self, ctx: IntegrationContext) -> list[Any]:
         from .sink import crontal_sink_from_config
