@@ -53,6 +53,7 @@ class RuntimeContributions:
     tool_sets: list[tuple[str, Any]] = field(default_factory=list)
     sinks: list[tuple[str, Any]] = field(default_factory=list)
     background_tasks: list[tuple[str, BackgroundTask]] = field(default_factory=list)
+    email_intake_observers: list[tuple[str, Any]] = field(default_factory=list)
     identity_provider: tuple[str, Any] | None = None
 
 
@@ -117,6 +118,8 @@ class LoadedIntegrations:
                         f"duplicates one from {tasks[task.name]!r}")
                 tasks[task.name] = name
                 out.background_tasks.append((name, task))
+            out.email_intake_observers.extend(
+                (name, observer) for observer in integration.email_intake_observers(ctx))
             provider = integration.identity_provider(ctx)
             if provider is not None:
                 if out.identity_provider is not None:

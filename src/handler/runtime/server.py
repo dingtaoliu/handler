@@ -605,10 +605,12 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
                                         uploads=uploads, log_file=_log_file(args)))
         email_secret = env.get("HANDLER_EMAIL_SECRET")
+        intake_observers: list = []  # integrations add theirs below
         if email_secret:
             app.include_router(email_ingest_router(store, email_secret, settings, workspace_sync,
                                                    harness=settings.harness_source("email"),
-                                                   crontal_identity=crontal_id))
+                                                   crontal_identity=crontal_id,
+                                                   observers=intake_observers))
         else:
             logger.info("email intake off: set HANDLER_EMAIL_SECRET to enable /ingest/email")
         google_oauth = google_oauth_from_env(store, env=env)  # None unless GOOGLE_OAUTH_* are set
@@ -672,6 +674,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             gateway.register(tool_set)
         for _, sink in contributions.sinks:
             outbox.register(sink)
+        intake_observers.extend(o for _, o in contributions.email_intake_observers)
         for _, router in contributions.routers:
             app.include_router(router)
         app.state.integrations = integrations

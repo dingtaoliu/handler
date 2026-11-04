@@ -26,6 +26,7 @@ from ...gateway.gmail import _email_summary, _truncate, reply_subject
 from ...types import Risk, new_id
 from ...uploads import sanitize_filename
 from .config import Mailbox
+from .intake import INTAKE_ID, intake_mailbox
 from .message import parse_message
 from .service import MailboxService, thread_key
 from .store import MailStore
@@ -82,14 +83,36 @@ def _summary(row: dict[str, Any]) -> dict[str, Any]:
 
 class MailTools:
     def __init__(self, service: MailboxService, mail_store: MailStore, *,
-                 workspace_for: Callable[[str], Path]) -> None:
+                 workspace_for: Callable[[str], Path], intake: Any = None) -> None:
         self.service = service
         self.mail = mail_store
         self._workspace_for = workspace_for
+        # IntakeArchive (intake.py) when /ingest/email copies are filed under the
+        # read-only `intake` account; None when email intake is off.
+        self.intake = intake
 
     # ── helpers ────────────────────────────────────────────────────────────
 
+    def _intake_mailbox(self) -> Mailbox:
+        return intake_mailbox(getattr(self.intake, "address", None))
+
+    async def _read_ids(self) -> list[str]:
+        """Accounts the read tools cover: connected mailboxes, then the intake."""
+        ids = [m.id for m in await self.mail.list_mailboxes()]
+        return ids + [INTAKE_ID] if self.intake is not None else ids
+
+    @staticmethod
+    def _writable(mailbox: Mailbox) -> Mailbox:
+        if mailbox.id == INTAKE_ID:
+            raise ToolError("The email intake account is read-only: nothing can be drafted "
+                            "or sent from it. Reply from a connected mailbox (pass its "
+                            "mailbox_id and the recipients), or with gmail_* tools if you "
+                            "have them.")
+        return mailbox
+
     async def _mailbox(self, mailbox_id: str | None) -> Mailbox:
+        if mailbox_id == INTAKE_ID and self.intake is not None:
+            return self._intake_mailbox()
         if mailbox_id:
             mailbox = await self.mail.get_mailbox(mailbox_id)
             if mailbox is None:
@@ -107,7 +130,7 @@ class MailTools:
     async def _message(self, ref: str, mailbox_id: str | None = None) -> dict[str, Any]:
         row = await self.mail.get_message(ref) if ref.startswith("mm_") else None
         if row is None:
-            ids = [mailbox_id] if mailbox_id else [m.id for m in await self.mail.list_mailboxes()]
+            ids = [mailbox_id] if mailbox_id else await self._read_ids()
             for candidate in ids:
                 found = await self.mail.find_message(candidate, ref.strip("<>"))
                 if found is not None:
@@ -133,7 +156,10 @@ class MailTools:
     def _render(self, ctx: RunContext, row: dict[str, Any], limit: int) -> dict[str, Any]:
         out = _summary(row)
         out.pop("snippet", None)
-        out["thread_key"] = thread_key(row["account_id"], row["conversation_id"])
+        if row["account_id"] == INTAKE_ID:
+            out["source"] = "email intake (read-only; its thread is an email: thread)"
+        else:
+            out["thread_key"] = thread_key(row["account_id"], row["conversation_id"])
         out["cc"] = [a.get("address") for a in row.get("cc_addrs") or []]
         out["reply_to"] = [a.get("address") for a in row.get("reply_to") or []]
         out["in_reply_to"] = row.get("in_reply_to") or []
@@ -163,6 +189,13 @@ class MailTools:
                         "status": mailbox.status, "last_sync_at": mailbox.last_sync_at,
                         "last_error": mailbox.last_error,
                         "messages": await self.mail.counts(mailbox.id)})
+        if self.intake is not None:
+            intake = self._intake_mailbox()
+            out.append({"mailbox_id": INTAKE_ID, "label": intake.label, "email": intake.email,
+                        "read_only": True,
+                        "note": "Copies of mail received by the email intake; search and "
+                                "read only, no drafts or sends.",
+                        "messages": await self.mail.counts(INTAKE_ID)})
         return ToolResult({"mailboxes": out})
 
     async def _search(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
@@ -171,7 +204,7 @@ class MailTools:
         if args.get("mailbox_id"):
             ids = [(await self._mailbox(args["mailbox_id"])).id]
         else:
-            ids = [m.id for m in await self.mail.list_mailboxes()]
+            ids = await self._read_ids()
         rows = await self.mail.search(
             ids, folder=args.get("folder"), sender=args.get("from"),
             recipient=args.get("to"), subject=args.get("subject"), text=args.get("text"),
@@ -205,7 +238,8 @@ class MailTools:
             if full is not None:
                 messages.append(self._render(ctx, full, limit))
         return ToolResult({"mailbox_id": mailbox.id, "conversation_id": conversation_id,
-                           "thread_key": thread_key(mailbox.id, conversation_id),
+                           "thread_key": (None if mailbox.id == INTAKE_ID
+                                          else thread_key(mailbox.id, conversation_id)),
                            "message_count": len(messages), "messages": messages})
 
     async def _get_attachment(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
@@ -226,6 +260,10 @@ class MailTools:
         if saved and (workspace / saved).is_file():
             data = (workspace / saved).read_bytes()
         else:
+            if row["account_id"] == INTAKE_ID:
+                raise ToolError("Attachments of email intake mail are not kept in the "
+                                "mailbox store; they are in the workspace of the email "
+                                "thread that received the message.")
             mailbox = await self._mailbox(row["account_id"])
             raw = await self.service.fetch_raw(mailbox, row)
             parsed = await asyncio.to_thread(parse_message, raw)
@@ -271,7 +309,7 @@ class MailTools:
         if args.get("reply_to_message_id"):
             reply = await self._message(args["reply_to_message_id"], mailbox_id)
             mailbox_id = reply["account_id"]
-        mailbox = await self._mailbox(mailbox_id)
+        mailbox = self._writable(await self._mailbox(mailbox_id))
         to = _addresses(args.get("to"))
         subject = args.get("subject") or ""
         in_reply_to = references = conversation_id = None
@@ -328,7 +366,7 @@ class MailTools:
             draft = await self.mail.get_draft(args["draft_id"])
             if draft is None or draft.get("status") != "draft":
                 raise ToolError("draft not found (or already sent)")
-            mailbox = await self._mailbox(draft["account_id"])
+            mailbox = self._writable(await self._mailbox(draft["account_id"]))
             fields = dict(draft["fields"])
             return mailbox, fields, fields.pop("body"), list(fields.pop("attachments", []))
         mailbox, fields = await self._resolve(args)

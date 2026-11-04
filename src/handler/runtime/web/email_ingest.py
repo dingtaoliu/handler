@@ -116,9 +116,13 @@ def email_ingest_router(
     resolver: TxtResolver | None = None,
     max_bytes: int = MAX_EMAIL_BYTES,
     crontal_identity: Any = None,
+    observers: list[Any] | None = None,
 ) -> APIRouter:
+    """`observers` (filled by integrations, possibly after this call) are
+    awaited with each accepted message once it is queued."""
     router = APIRouter()
     dns = resolver
+    watchers = observers if observers is not None else []
 
     @router.post("/ingest/email")
     async def ingest(request: Request):
@@ -197,6 +201,11 @@ def email_ingest_router(
         new = await store.put(event, spec)
         logger.info("email received", extra={"thread_key": key, "duplicate": not new,
                                              "attachments": len(parsed.attachments)})
+        for observer in list(watchers):
+            try:
+                await observer(body, envelope_to=envelope_to, thread_key=key)
+            except Exception:  # noqa: BLE001 - the email is already queued
+                logger.exception("email intake observer failed", extra={"thread_key": key})
         return JSONResponse({"status": "accepted", "thread_key": key, "duplicate": not new,
                              "workspace": workspace["dir"]},
                             status_code=202 if new else 200)

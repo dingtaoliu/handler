@@ -7,6 +7,9 @@ Connects any number of password-authenticated mailboxes to one instance:
 - tools: `mail_list_mailboxes`, `mail_search`, `mail_read`, `mail_read_thread`,
   `mail_get_attachment`, `mail_draft_reply`, `mail_send` (always approved);
 - HTTP: `/api/mailboxes` admin API (Crontal proxies it);
+- email intake copies: with `/ingest/email` on (`HANDLER_EMAIL_SECRET`), each
+  accepted message is also stored under the read-only `intake` account
+  (`intake.py`; `HANDLER_EMAIL_INTAKE_ADDRESS` names it until mail arrives);
 - UI: a Connections card.
 
 Config (all optional): `HANDLER_SECRET_KEY` (falls back to `HANDLER_ADMIN_KEY`)
@@ -101,7 +104,8 @@ class MailboxIntegration(Integration):
     def prompt_fragments(self) -> list[PromptFragment]:
         return [PromptFragment("mail_tools", (
             "If you have mail_* tools: mail_search and mail_read cover the connected "
-            "mailboxes. Prepare replies with mail_draft_reply. Send (mail_send) only when "
+            "mailboxes (and, read-only, mail received by the email intake: mailbox_id "
+            "'intake', when it is listed by mail_list_mailboxes). Prepare replies with mail_draft_reply. Send (mail_send) only when "
             "the user asked for it: every send waits for a human's approval, so never say "
             "an email was sent until a result says status 'sent'."))]
 
@@ -134,6 +138,13 @@ class MailboxIntegration(Integration):
             max_wakes_per_hour=self.max_wakes_per_hour)
         poller = MailboxPoller(service, mail_store, concurrency=self.concurrency,
                                notifier=ctx.notifier)
+        # Email intake copies (intake.py), only where /ingest/email is on.
+        self.intake = None
+        if (ctx.env.get("HANDLER_EMAIL_SECRET") or "").strip():
+            from .intake import IntakeArchive
+
+            self.intake = IntakeArchive(
+                service, (ctx.env.get("HANDLER_EMAIL_INTAKE_ADDRESS") or "").strip() or None)
         self._built[key] = (service, mail_store, poller)
         self.service, self.mail_store, self.poller = service, mail_store, poller
         return self._built[key]
@@ -151,7 +162,12 @@ class MailboxIntegration(Integration):
         service, mail_store, _ = self._parts(ctx)
         workspaces_dir = ctx.workspaces_dir
         return [MailTools(service, mail_store,
-                          workspace_for=lambda key: workspaces_dir / thread_slug(key))]
+                          workspace_for=lambda key: workspaces_dir / thread_slug(key),
+                          intake=self.intake)]
+
+    def email_intake_observers(self, ctx: IntegrationContext) -> list[Any]:
+        self._parts(ctx)
+        return [self.intake] if self.intake is not None else []
 
     def background_tasks(self, ctx: IntegrationContext) -> list[BackgroundTask]:
         _, _, poller = self._parts(ctx)

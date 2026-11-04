@@ -119,6 +119,10 @@ class UIManifestEntry:
                 "path": self.path, "props": dict(self.props), "integration": integration}
 
 
+# observer(raw_bytes, *, envelope_to=..., thread_key=...) -> Awaitable
+EmailIntakeObserver = Callable[..., Awaitable[Any]]
+
+
 @dataclass(frozen=True)
 class BackgroundTask:
     """A long-running coroutine started under the instance lifespan.
@@ -173,4 +177,9 @@ class Integration:
         return None
 
     def background_tasks(self, ctx: IntegrationContext) -> list[BackgroundTask]:
+        return []
+
+    def email_intake_observers(self, ctx: IntegrationContext) -> list[EmailIntakeObserver]:
+        """Called with each message /ingest/email accepts, after it is queued
+        (e.g. to archive it). Failures are logged and never fail the intake."""
         return []
