@@ -109,12 +109,21 @@ def test_reads_stay_allowed(call_spec):
 def test_cross_thread_writes_exec_and_mail_need_approval():
     policy = GrantPolicy({"actions": {"memory.*": "allow", "automation.*": "allow",
                                       "gmail.send": "allow", "shell.*": "allow"}})
-    for action in ("memory.save", "memory.rewrite", "memory.delete", "automation.create",
+    for action in ("memory.rewrite", "memory.delete", "automation.create",
                    "automation.delete"):
         s = spec(action, Risk.WRITE_INTERNAL)
         assert policy.decide(EMAIL, s, {})[0] == Decision.ASK
         assert policy.decide(CRONTAL, s, {})[0] == Decision.ASK
         assert policy.decide(CHAT, s, {})[0] == Decision.ALLOW
+    # memory.save only appends and marks the topic source_untrusted: owner's
+    # decision, it runs unasked on untrusted threads too.
+    save = spec("memory.save", Risk.WRITE_INTERNAL)
+    for ctx in (EMAIL, CRONTAL, CHAT, MAIL):
+        assert policy.decide(ctx, save, {})[0] == Decision.ALLOW
+    assert GrantPolicy().decide(MAIL, save, {})[0] == Decision.ALLOW
+    # ...unless the instance's own rules ask for it.
+    assert GrantPolicy({"actions": {"memory.save": "ask"}}).decide(MAIL, save, {})[0] \
+        == Decision.ASK
     send = spec("gmail.send", Risk.WRITE_EXTERNAL, explicit_allow_only=True)
     assert policy.decide(EMAIL, send, {})[0] == Decision.ASK
     assert policy.decide(CHAT, send, {})[0] == Decision.ALLOW

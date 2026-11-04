@@ -4,11 +4,11 @@ Threads fed by outside input (email intake, Crontal notifications, Gmail,
 connected IMAP mailboxes) get
 a floor on top: their content is written by people outside the merchant, so
 a call that sends the merchant's data outside it (publish, submit, message,
-share, send mail...), runs code, or persists beyond the thread (memory,
-automations) never runs there without approval, whatever the instance-wide
+share, send mail...), runs code, or persists beyond the thread (memory
+rewrites and deletes, automations) never runs there without approval, whatever the instance-wide
 rules say (`crontal_api.*: allow` included). Writes that stay inside the
-merchant (draft RFQs, draft bids, listings, contacts...) follow the normal
-rules.
+merchant (draft RFQs, draft bids, listings, contacts...) and append-only
+memory saves (marked source_untrusted) follow the normal rules.
 """
 
 from __future__ import annotations
@@ -41,6 +41,12 @@ INSIDE_ACTIONS = frozenset({
     "thread.set_title", "notify.send", "question.ask", "gmail.create_draft", "gmail.update_draft",
     "mail.draft_reply",
 })
+# Persisting actions the owner allows unasked on untrusted threads. memory.save
+# only appends (nothing existing is lost), the agent is prompted to save only
+# verified facts, and the topic is marked source_untrusted so every later
+# prompt shows where it came from. memory.rewrite / memory.delete can destroy
+# what other threads rely on, so they still ask (docs/rebuild/memory-kinds.md).
+UNTRUSTED_ALLOWED_ACTIONS = frozenset({"memory.save"})
 
 
 def thread_type_of(ctx: RunContext) -> str:
@@ -63,7 +69,8 @@ def floor_reason(spec: ToolSpec, args: dict[str, Any]) -> str | None:
         return "it runs code"
     if spec.risk == Risk.WRITE_EXTERNAL:
         return "it acts outside the merchant"
-    if spec.risk == Risk.WRITE_INTERNAL and spec.action not in INSIDE_ACTIONS:
+    if (spec.risk == Risk.WRITE_INTERNAL and spec.action not in INSIDE_ACTIONS
+            and spec.action not in UNTRUSTED_ALLOWED_ACTIONS):
         return "it persists beyond this thread"
     return None
 
