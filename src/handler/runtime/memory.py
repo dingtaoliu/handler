@@ -260,13 +260,13 @@ class MemoryTools:
         per_topic = max(400, budget // len(topics))
         blocks, used = [], 0
         for topic in topics:
-            head = f"## {topic.name}" + (f" (kind: {topic.kind})" if topic.kind else "")
+            head = f"### {topic.name}" + (f" (kind: {topic.kind})" if topic.kind else "")
             if topic.source_untrusted:
                 head += f" {UNTRUSTED_MARK}"
             body = _clip(topic.content, min(per_topic, budget - used))
             block = f"{head}\n{topic.description}\n{body}"
             if used + len(block) > budget:
-                blocks.append(f"## {topic.name}: {topic.description} (memory_read for it)")
+                blocks.append(f"### {topic.name}: {topic.description} (memory_read for it)")
                 continue
             blocks.append(block)
             used += len(block)
@@ -291,14 +291,16 @@ class MemoryTools:
             raise ValueError(f"Topics of kind {kind!r} are named {match['prefix']}<slug>")
         return kind
 
-    async def _size_note(self, topic: MemoryTopic) -> dict:
+    async def _size_note(self, ctx: RunContext, topic: MemoryTopic) -> dict:
         limit = (await self.config())["max_topic_chars"]
         if len(topic.content) <= limit:
             return {}
+        asks = (" On this thread the rewrite waits for a human's approval; request it "
+                "anyway." if untrusted_thread(ctx.thread_key) else "")
         return {"size_warning": (
             f"Topic is {len(topic.content)} characters, over the {limit} limit. Rewrite it "
             "now with memory_rewrite into a concise current summary (keep the facts that "
-            "still matter, drop superseded history).")}
+            "still matter, drop superseded history)." + asks)}
 
     async def _list(self, ctx: RunContext, args: dict) -> ToolResult:
         topics = await self.store.search_topics(order="name", limit=LIST_LIMIT + 1)
@@ -361,7 +363,7 @@ class MemoryTools:
             if stored:
                 return ToolResult({"name": stored.name, "version": stored.version,
                                    "kind": stored.kind, "chars": len(stored.content),
-                                   **await self._size_note(stored)})
+                                   **await self._size_note(ctx, stored)})
         return ToolResult("Memory version conflict; retry the save", is_error=True)
 
     async def _rewrite(self, ctx: RunContext, args: dict) -> ToolResult:
@@ -390,7 +392,7 @@ class MemoryTools:
         if new_name != name:
             await self.store.delete_topic(name)
         return ToolResult({"name": stored.name, "version": stored.version, "kind": stored.kind,
-                           "chars": len(stored.content), **await self._size_note(stored)})
+                           "chars": len(stored.content), **await self._size_note(ctx, stored)})
 
     async def _delete(self, ctx: RunContext, args: dict) -> ToolResult:
         deleted = await self.store.delete_topic(self._name(args["name"]))

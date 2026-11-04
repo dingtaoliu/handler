@@ -203,6 +203,9 @@ async def test_size_warning(store):
     big = await invoke(memory, "memory_save", CHAT, name="t", description="", content="y" * 600)
     assert not big.is_error and "memory_rewrite" in big.content["size_warning"]
     assert (await store.get_topic("t")).content.endswith("y" * 600)  # still saved
+    assert "approval" not in big.content["size_warning"]
+    on_mail = await invoke(memory, "memory_save", MAIL, name="t", description="", content="z")
+    assert "approval" in on_mail.content["size_warning"]
 
 
 async def test_search_tool_paging(store):
@@ -273,7 +276,7 @@ async def test_relevant_memory_and_prompt(store, crontal_settings):
                                       links=["domain:acme.com"], source_untrusted=True), None)
     await store.put_topic(MemoryTopic("unrelated", "U", "secret stuff"), None)
     relevant = await memory.relevant_text("crontal:rfq:12")
-    assert "## inquiries/acme-304 (kind: inquiry)" in relevant and "Status: quoting" in relevant
+    assert "### inquiries/acme-304 (kind: inquiry)" in relevant and "Status: quoting" in relevant
     assert "Pays net 30" not in relevant  # one hop: names only
     assert "Related topics (memory_read if needed): companies/acme, conversations/acme-1" \
         in relevant
