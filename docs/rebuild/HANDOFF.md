@@ -4,7 +4,10 @@
 
 Request/tool-call metering, immutable user/thread attribution, admin reporting and
 console tables are documented in `docs/audits/detailed-usage-ledger-2026-11-08.md`.
-Detailed data starts at this release; older run totals remain available through the
+Released on `crontal-agent` as **v50**, runtime `745bd2b`, backup **b028**; rollback
+**v49**. Final combined suite: **1,198 passed, 2 skipped**. All three instance health
+and reporting checks passed. Detailed data starts at this release; older run totals
+remain available through the
 existing usage API. Costs are model-token estimates only: hosted/external fees are
 excluded, and hypothetical tool-context estimates are separate and non-additive.
 

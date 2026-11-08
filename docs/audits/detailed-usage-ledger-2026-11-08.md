@@ -64,10 +64,10 @@ optimization for very large histories. Per-instance database schemas isolate dat
 
 ## Validation and rollout
 
-Full runtime suite: **1,174 passed, 2 skipped**, including real SQLite/Postgres
-ledger tests and native harness metering. After adding the individual tool-call
-endpoint, all **15 reporting tests** and JavaScript syntax validation passed.
-Docker image imports/ledger contracts were checked before release.
+Final combined runtime suite: **1,198 passed, 2 skipped**, including the concurrent
+v49 changes, real SQLite/Postgres ledger tests, native harness metering and the
+individual tool-call endpoint. JavaScript syntax and Docker image imports/ledger
+contracts passed before release.
 A real, isolated native Sol request persisted exactly one provider-reported record
 with response ID, default tier, 4,851 input / 5 output tokens, and a pricing snapshot
 ($0.012176 estimated). The temporary OpenAI Conversation was deleted. No production
@@ -75,3 +75,9 @@ thread or customer conversation was modified by this smoke test.
 
 Database backup: `b028` on `hephaestus-backend-test`. Previous live release at
 rollout preparation: `v49` (rollback target). Schema changes are additive.
+
+Released as **v50** on `crontal-agent` (image `3fe31c8d12ee`, runtime commit
+`745bd2b`, including merged remote `rebuild` changes through `e29c629`). All three
+instances (`main`, `bss`, `yeup`) passed health, records, tool-calls, combined
+breakdown, tools and legacy usage endpoint checks. Missing/incorrect admin keys
+returned 401. Rollback: v49; backup: b028.
