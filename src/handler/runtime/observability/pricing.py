@@ -10,7 +10,7 @@ rate and never added again.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -112,6 +112,22 @@ class PriceTable:
             if matches:
                 return max(matches, key=lambda e: e.effective_from)
         return None
+
+    def snapshot(self, model, usage, at, *, single_request=False, service_tier=None):
+        """Freeze the selected rates and explicitly identify unsupported tiers."""
+        entry = self.lookup(model, at) if model else None
+        long = bool(entry and single_request and entry.long_context is not None
+                    and entry.long_context_above_tokens is not None
+                    and usage.input_tokens > entry.long_context_above_tokens)
+        rates = (entry.long_context if long else entry.rates) if entry else None
+        supported = service_tier in (None, "default", "standard", "auto")
+        return {"currency": "USD", "basis": "estimated_token_cost",
+                "model_pattern": entry.model if entry else None,
+                "effective_from": entry.effective_from.isoformat() if entry else None,
+                "rates_per_million": asdict(rates) if rates else {},
+                "context_tier": "long" if long else "standard",
+                "service_tier_basis": "standard_rates" if supported else "unsupported_unpriced",
+                "single_request": single_request}
 
     def cost(
         self,

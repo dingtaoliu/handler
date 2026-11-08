@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import tiktoken
 
 from ..harness.base import RunEvent, RunEventKind
 from ..store.base import Store
 from ..types import RunStep, StepKind, TokenUsage
 from .pricing import PriceTable
+from .ledger import RunAttribution, UsageRecord, ToolCallUsage
 
 
 class RawSink:
@@ -59,7 +63,13 @@ class StepRecorder:
         prices: PriceTable,
         raw_sink: RawSink,
         preview_chars: int = 500,
+        attribution: RunAttribution | None = None,
+        harness: str | None = None,
     ):
+        self.attribution = attribution
+        self.harness = harness
+        self._request_ids: set[str] = set()
+        self._tools: dict[str, ToolCallUsage] = {}
         self.store = store
         self.run_id = run_id
         self.model = model
@@ -109,6 +119,7 @@ class StepRecorder:
 
     async def _tool_started(self, ev: RunEvent) -> None:
         d = ev.data
+        await self._record_tool(ev, finished=False)
         step = self._next(
             ev,
             StepKind.TOOL_CALL,
@@ -126,6 +137,7 @@ class StepRecorder:
 
     async def _tool_finished(self, ev: RunEvent) -> None:
         d = ev.data
+        await self._record_tool(ev, finished=True)
         output = d.get("output")
         summary = {
             "output": _preview(output, self.preview_chars) if output is not None else None,
@@ -168,11 +180,63 @@ class StepRecorder:
         )
         await self.store.add_step(step)
 
+    async def _record_tool(self, ev: RunEvent, *, finished: bool):
+        if self.attribution is None or not ev.data.get("id"):
+            return
+        d, call_id = ev.data, str(ev.data["id"])
+        row = self._tools.get(call_id)
+        if row is None:
+            row = await self.store.get_tool_call_usage(self.run_id, call_id)
+        if row is None:
+            row = ToolCallUsage(
+                id=f"{self.run_id}:tool:{call_id}", run_id=self.run_id,
+                thread_key=self.attribution.thread_key, tool_call_id=call_id,
+                tool_name=str(d.get("tool", "tool")), request_id=d.get("request_id"),
+                started_at=ev.at)
+        row.request_id = row.request_id or d.get("request_id")
+        if not finished:
+            row.input_tokens_estimate = _text_metrics(d.get("input"))[0]
+        else:
+            row.ended_at = ev.at
+            row.status = str(d.get("status") or "unknown")
+            tokens, size, images = _text_metrics(d.get("output"))
+            row.output_tokens_estimate, row.output_bytes, row.output_images = tokens, size, images
+            row.single_read_context_cost_estimate_usd = self.prices.cost(
+                self.model, TokenUsage(input_tokens=tokens), ev.at, single_request=True)
+        self._tools[call_id] = row
+        await self.store.upsert_tool_call_usage(row)
+
     async def _usage_event(self, ev: RunEvent) -> None:
         usage = ev.usage or TokenUsage()
-        model = ev.data.get("model") or self.model
+        d = ev.data
+        model = d.get("model") or self.model
+        request_id = d.get("request_id")
+        if request_id and request_id in self._request_ids:
+            return
+        pricing = self.prices.snapshot(model, usage, ev.at,
+                                      single_request=bool(d.get("single_request")),
+                                      service_tier=d.get("service_tier"))
         cost = self.prices.cost(model, usage, ev.at,
                                 single_request=bool(ev.data.get("single_request")))
+        if pricing["service_tier_basis"] == "unsupported_unpriced":
+            cost = None
+        if self.attribution is not None:
+            row = UsageRecord(
+                id=f"{self.run_id}:model:{request_id or 'fallback:' + str(self._seq + 1)}",
+                run_id=self.run_id, thread_key=self.attribution.thread_key,
+                request_id=request_id, tool_call_id=d.get("tool_call_id"),
+                tool_name=d.get("tool_name"), model=model,
+                requested_model=d.get("requested_model") or self.model,
+                service_tier=d.get("service_tier"), harness=self.harness,
+                metering_quality=d.get("metering_quality", "harness_reported"),
+                status=d.get("status") or "unknown", started_at=_timestamp(d.get("started_at")),
+                ended_at=_timestamp(d.get("ended_at")) or ev.at, occurred_at=ev.at,
+                usage=usage, cost_usd=cost, pricing=pricing,
+                metadata={k: d[k] for k in ("source_request_id", "timestamp_quality") if k in d})
+            if not await self.store.add_usage_record(row):
+                return
+        if request_id:
+            self._request_ids.add(request_id)
         self._usage = self._usage + usage
         self._calls += 1
         if cost is None:
@@ -182,6 +246,7 @@ class StepRecorder:
         step = self._next(
             ev, StepKind.LLM_CALL, model or "llm_call", ended_at=ev.at,
             model=model, usage=usage, cost_usd=cost,
+            data={k: d[k] for k in ("request_id", "tool_call_id", "tool_name", "metering_quality") if k in d},
         )
         await self.store.add_step(step)
 
@@ -194,3 +259,35 @@ class StepRecorder:
             },
         )
         await self.store.add_step(step)
+
+
+def _timestamp(value):
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _text_metrics(value):
+    """Local text estimate only; image and binary data are excluded."""
+    images = 0
+    def clean(item):
+        nonlocal images
+        if isinstance(item, dict):
+            if item.get("type") in ("image", "image_url", "input_image", "output_image"):
+                images += 1
+                return "[image]"
+            return {k: clean(v) for k, v in item.items() if k not in ("base64", "b64_json")}
+        if isinstance(item, (list, tuple)):
+            return [clean(v) for v in item]
+        if isinstance(item, str) and item.startswith("data:"):
+            return "[data omitted]"
+        return item
+    if value is None:
+        return 0, 0, 0
+    content = clean(value)
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+    tokens = len(tiktoken.get_encoding("o200k_base").encode(text, disallowed_special=()))
+    return tokens, len(text.encode("utf-8")), images

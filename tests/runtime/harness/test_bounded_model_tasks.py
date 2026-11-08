@@ -47,6 +47,13 @@ async def test_bounded_helper_is_stateless_tool_free_and_metered():
     [event] = usage
     assert event.data["model"] == "gpt-6-luna-actual" and event.data["single_request"]
     assert event.usage.input_tokens == 30
+    assert event.data["tool_call_id"] == "call1"
+    assert event.data["tool_name"] == "bounded_model_task"
+    assert event.data["requested_model"] == "gpt-6-luna"
+    assert event.data["request_id"] == "resp_aux"
+    assert event.data["status"] == "completed"
+    assert event.data["started_at"] <= event.data["ended_at"]
+    assert event.at.isoformat() == event.data["ended_at"]
 
 
 async def test_bounded_helper_rejects_oversized_disabled_and_excess_calls_without_request():
@@ -169,3 +176,17 @@ async def test_mcp_error_metadata_marks_tool_result_failed():
 
     [event] = [e async for e in harness._events(Stream())]
     assert event.data["status"] == "error"
+
+
+async def test_helper_links_source_request_and_deduplicates_response_ids():
+    responses = Responses()
+    usage = []
+    seen = set()
+    tool = oa.bounded_task_tool(SimpleNamespace(responses=responses), {"classify": "cheap"},
+                               usage, call_requests={"call1": "resp_parent"}, seen_requests=seen)
+    assert "ctx" not in tool.params_json_schema["properties"]
+    await invoke(tool)
+    await invoke(tool)
+    assert len(responses.calls) == 2 and len(usage) == 1
+    assert usage[0].data["source_request_id"] == "resp_parent"
+    assert seen == {"resp_aux"}

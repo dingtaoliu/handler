@@ -121,7 +121,8 @@ async def test_new_thread_creates_a_conversation_and_maps_events(tmp_path, runne
     usage = events[5].usage
     assert (usage.input_tokens, usage.cached_input_tokens, usage.output_tokens,
             usage.reasoning_tokens) == (120, 40, 30, 5)
-    assert events[5].data == {"model": "gpt-6.1-sol"}
+    assert events[5].data["model"] == "gpt-6.1-sol"
+    assert events[5].data["metering_quality"] == "sdk_fallback"
     assert events[-1].data == {"text": "You have 1 RFQ.", "session_id": "conv_1"}
 
     call = runner.calls[0]
@@ -154,7 +155,8 @@ async def test_usage_is_reported_per_request_with_cache_writes(tmp_path, runner)
     harness = oa.OpenAIAgentsHarness("k", default_model="gpt-6.1-sol", client=FakeClient())
     usage = [e for e in await _collect(harness, _req(tmp_path)) if e.kind == RunEventKind.USAGE]
 
-    assert [e.data for e in usage] == [{"model": "gpt-6.1-sol", "single_request": True}] * 2
+    assert all(e.data["model"] == "gpt-6.1-sol" and e.data["single_request"] for e in usage)
+    assert all(e.data["metering_quality"] == "sdk_fallback" for e in usage)
     assert [e.usage for e in usage] == [TokenUsage(1000, 0, 900, 50, 20),
                                         TokenUsage(1200, 900, 250, 40, 10)]
     assert [e.raw["request"] for e in usage] == [1, 2]
@@ -171,7 +173,7 @@ async def test_resumed_thread_reuses_its_conversation(tmp_path, runner):
     assert runner.calls[0]["conversation_id"] == "conv_9"
     assert runner.calls[0]["agent"].model_settings.reasoning.effort == "high"
     assert events[-1].data["session_id"] == "conv_9"
-    assert events[-2].data == {"model": "gpt-6-luna"}
+    assert events[-2].data["model"] == "gpt-6-luna"
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n fake"

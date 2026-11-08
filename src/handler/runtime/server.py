@@ -66,6 +66,7 @@ from .tools.threads import ThreadTools
 from .types import Event, Lane, ThreadSpec
 from .uploads import UploadStore
 from .web.admin_api import admin_router
+from .web.usage_api import usage_router
 from .web.app import create_app
 from .web.email_ingest import email_ingest_router
 from .web.google_api import google_router
@@ -538,7 +539,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
 
         config = RunConfig(data_dir=data_dir, reasoning_effort=args.reasoning_effort,
                            timeout_seconds=float(limits_cfg["run_timeout_seconds"]),
-                           max_attempts=int(limits_cfg["max_attempts"]))
+                           max_attempts=int(limits_cfg["max_attempts"]),
+                           instance_name=instance_name or "main")
         local_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
         file_store = (S3FileStore.from_env(prefix=env.get("HANDLER_FILE_PREFIX", ""), env=dict(env))
                       if args.file_store == "s3" else LocalFileStore(data_dir / "files"))
@@ -601,6 +603,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         app.include_router(memory_recovery_router(gateway, store, auth))
         app.include_router(questions_router(questions, store, auth))
         app.include_router(tasks_router(store, bus, auth))
+        app.include_router(usage_router(store, auth))
         store.on_routed = lambda event, spec: publish_queued(bus, event, spec)
         app.include_router(settings_router(settings, auth, memory_tools,
                                            crontal_identity=crontal_id,

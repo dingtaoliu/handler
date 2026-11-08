@@ -12,6 +12,8 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
+from ..observability.ledger import RunAttribution, ToolCallUsage, UsageRecord
+
 from ..types import (
     Approval,
     ApprovalStatus,
@@ -150,6 +152,26 @@ class Store(EventQueue, Protocol):
     async def get_run(self, run_id: str) -> Run | None: ...
 
     async def list_runs(self, thread_key: str, limit: int = 50) -> list[Run]: ...
+
+    # --- cost ledger (observability; not fenced) ---
+    async def save_run_attribution(self, attribution: RunAttribution) -> None: ...
+    async def get_run_attribution(self, run_id: str) -> RunAttribution | None: ...
+    async def list_run_attributions(self, run_ids: list[str]) -> list[RunAttribution]: ...
+    async def add_usage_record(self, record: UsageRecord) -> bool: ...
+    async def upsert_tool_call_usage(self, call: ToolCallUsage) -> None: ...
+    async def get_tool_call_usage(self, run_id: str, tool_call_id: str) -> ToolCallUsage | None: ...
+    async def list_usage_records(
+        self, since: datetime, until: datetime | None = None, *,
+        thread_key: str | None = None, attributed_user_id: str | None = None,
+        model: str | None = None, tool_name: str | None = None,
+        run_id: str | None = None, limit: int = 200, offset: int = 0,
+    ) -> list[UsageRecord]: ...
+    async def list_tool_call_usage(
+        self, since: datetime, until: datetime | None = None, *,
+        thread_key: str | None = None, attributed_user_id: str | None = None,
+        tool_name: str | None = None, run_id: str | None = None,
+        limit: int = 200, offset: int = 0,
+    ) -> list[ToolCallUsage]: ...
 
     # --- messages (the thread's official record) ---
     async def add_messages(self, lease: Lease, messages: list[Message]) -> bool:

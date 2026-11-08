@@ -1,5 +1,13 @@
 # Handoff: handler rebuild
 
+## 2026-11-08 detailed usage ledger
+
+Request/tool-call metering, immutable user/thread attribution, admin reporting and
+console tables are documented in `docs/audits/detailed-usage-ledger-2026-11-08.md`.
+Detailed data starts at this release; older run totals remain available through the
+existing usage API. Costs are model-token estimates only: hosted/external fees are
+excluded, and hypothetical tool-context estimates are separate and non-additive.
+
 ## 2026-11-08 token efficiency update
 
 Owner-approved implementation and validation are documented in

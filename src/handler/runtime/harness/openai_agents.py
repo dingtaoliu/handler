@@ -19,6 +19,8 @@ import logging
 import mimetypes
 import os
 import re
+from datetime import datetime, timezone
+from dataclasses import fields
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
@@ -36,6 +38,7 @@ from agents import (
     function_tool,
     set_tracing_disabled,
 )
+from agents.tool_context import ToolContext
 from agents.exceptions import AgentsException, MaxTurnsExceeded
 from agents.mcp import MCPServerStreamableHttp
 from openai.types.shared import Reasoning
@@ -43,7 +46,7 @@ from openai.types.shared import Reasoning
 from .. import documents
 from ..images import sniff_file
 from ..settings import HARNESS_DEFAULT_MODELS
-from ..types import TokenUsage
+from ..types import TokenUsage, utcnow
 from .base import HarnessError, RunEvent, RunEventKind, RunRequest
 
 logger = logging.getLogger(__name__)
@@ -197,38 +200,110 @@ def _usage(usage: Any) -> TokenUsage:
                       reasoning_tokens=reasoning)
 
 
-def _usage_events(usage: Any, model: str, created: bool) -> list[RunEvent]:
-    """One USAGE event per model request, so each is priced on its own.
+def _response_usage_event(response: Any, model: str, started: datetime | None = None,
+                          **extra: Any) -> RunEvent:
+    ended = utcnow()
+    provider_start = getattr(response, "created_at", None)
+    if started is None and isinstance(provider_start, (int, float)):
+        started = datetime.fromtimestamp(provider_start, timezone.utc)
+        timing = "provider_created_at"
+    else:
+        timing = "observed" if started else "end_only"
+    data = {"model": getattr(response, "model", None) or model,
+            "requested_model": model, "single_request": True,
+            "request_id": getattr(response, "id", None),
+            "service_tier": getattr(response, "service_tier", None),
+            "status": getattr(response, "status", None),
+            "started_at": started.isoformat() if started else None,
+            "ended_at": ended.isoformat(), "timestamp_quality": timing,
+            "metering_quality": "provider_reported", **extra}
+    return RunEvent(RunEventKind.USAGE, data, usage=_usage(response.usage), at=ended,
+                    raw={"response_id": getattr(response, "id", None),
+                         "provider_request_id": getattr(response, "_request_id", None)})
 
-    Per-request entries keep the API's own token details (cache writes) and let
-    pricing apply per-request rules such as the long-context tier. The SDK's
-    summed usage drops cache writes, so it is only the fallback.
+
+class _RequestMeter:
+    """Capture paid responses immediately; reconcile SDK-only usage at run end.
+
+    The SDK can make nonstreamed compaction requests. Keep unmatched SDK entries
+    rather than silently dropping those requests when streamed responses exist.
     """
-    entries = list(getattr(usage, "request_usage_entries", None) or [])
-    if not entries:
-        return [RunEvent(RunEventKind.USAGE, {"model": model}, usage=_usage(usage),
-                         raw={"requests": usage.requests, "new_conversation": created})]
-    return [
-        RunEvent(RunEventKind.USAGE, {"model": model, "single_request": True},
-                 usage=_usage(entry),
-                 raw={"request": i, "requests": len(entries), "new_conversation": created})
-        for i, entry in enumerate(entries, 1)
-    ]
+    def __init__(self, model: str, created: bool, seen: set[str],
+                 call_requests: dict[str, str]):
+        self.model, self.created, self.seen = model, created, seen
+        self.call_requests = call_requests
+        self.starts: dict[str, datetime] = {}
+        self.captured: dict[str, TokenUsage] = {}
 
+    def response(self, data: Any) -> RunEvent | None:
+        response = getattr(data, "response", None)
+        kind = getattr(data, "type", None)
+        if response is None:
+            return None
+        request_id = getattr(response, "id", None)
+        if kind == "response.created":
+            if request_id:
+                self.starts.setdefault(request_id, utcnow())
+            return None
+        if kind not in {"response.completed", "response.incomplete", "response.failed"}:
+            return None
+        for item in getattr(response, "output", None) or []:
+            call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+            if call_id and request_id:
+                self.call_requests[call_id] = request_id
+        if getattr(response, "usage", None) is None:
+            return None
+        event = _response_usage_event(response, self.model, self.starts.get(request_id))
+        if request_id:
+            self.captured[request_id] = event.usage
+            if request_id in self.seen:
+                return None
+            self.seen.add(request_id)
+        else:
+            # An absent ID cannot be used as an idempotency key.
+            self.captured[f"unidentified:{len(self.captured)}"] = event.usage
+        return event
 
-def _failed_usage(result: Any, model: str, created: bool) -> list[RunEvent]:
-    """Usage of a run that raised; empty when it made no model request."""
-    usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
-    if usage is None or not (getattr(usage, "requests", 0)
-                             or getattr(usage, "request_usage_entries", None)):
-        return []
-    return _usage_events(usage, model, created)
+    def fallback(self, result: Any) -> list[RunEvent]:
+        usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
+        if usage is None:
+            return []
+        entries = list(getattr(usage, "request_usage_entries", None) or [])
+        captured = list(self.captured.values())
+        pending: list[tuple[TokenUsage, bool]] = []
+        if entries:
+            for entry in entries:
+                tokens = _usage(entry)
+                if tokens in captured:
+                    captured.remove(tokens)
+                else:
+                    pending.append((tokens, True))
+        elif getattr(usage, "requests", 0):
+            total = _usage(usage)
+            residual = TokenUsage(**{
+                f.name: max(0, getattr(total, f.name) - sum(getattr(u, f.name) for u in captured))
+                for f in fields(TokenUsage)})
+            if not captured or any(getattr(residual, f.name) for f in fields(TokenUsage)):
+                pending.append((residual, False))
+        ended = utcnow()
+        remaining_requests = max(0, getattr(usage, "requests", 0) - len(self.captured))
+        return [RunEvent(RunEventKind.USAGE,
+                         {"model": self.model, "requested_model": self.model,
+                          **({"single_request": True} if single else {}),
+                          "metering_quality": "sdk_fallback", "timestamp_quality": "end_only",
+                          "status": "unknown", "ended_at": ended.isoformat()}, usage=tokens, at=ended,
+                         raw={"request": i, "requests": len(pending) if entries else remaining_requests,
+                              "new_conversation": self.created})
+                for i, (tokens, single) in enumerate(pending, 1)]
 
 
 def bounded_task_tool(client: Any, models: dict[str, str], usage_events: list[RunEvent],
-                      workspace: Path | None = None):
+                      workspace: Path | None = None,
+                      call_requests: dict[str, str] | None = None,
+                      seen_requests: set[str] | None = None):
     """One tool-free request with explicit source and no shared conversation."""
     calls = 0
+    seen_requests = seen_requests if seen_requests is not None else set()
     schema = {"type": "object", "properties": {
         "result": {"type": "string"}, "needs_review": {"type": "boolean"},
         "issues": {"type": "array", "items": {"type": "string"}},
@@ -237,7 +312,7 @@ def bounded_task_tool(client: Any, models: dict[str, str], usage_events: list[Ru
         "additionalProperties": False}
 
     @function_tool
-    async def bounded_model_task(task_type: Literal["classify", "extract", "draft"],
+    async def bounded_model_task(ctx: ToolContext[Any], task_type: Literal["classify", "extract", "draft"],
                                  instructions: str, source_text: str = "",
                                  source_paths: list[str] | None = None) -> str:
         """Use a cheaper model for a bounded classification, extraction or draft.
@@ -289,6 +364,7 @@ def bounded_task_tool(client: Any, models: dict[str, str], usage_events: list[Ru
             return fallback("Source paths must be readable files inside the workspace; inspect them yourself.")
         calls += 1
         response = None
+        started = utcnow()
         try:
             # Automatic retries can incur unreported model requests after timeouts.
             api = client.with_options(max_retries=0, timeout=60) if hasattr(client, "with_options") else client
@@ -321,12 +397,17 @@ def bounded_task_tool(client: Any, models: dict[str, str], usage_events: list[Ru
             logger.warning("bounded model task failed", extra={"model": model, "error": type(exc).__name__})
             return fallback("Bounded model request failed; complete this task yourself.")
         finally:
-            if response is not None and getattr(response, "usage", None) is not None:
-                usage_events.append(RunEvent(
-                    RunEventKind.USAGE,
-                    {"model": getattr(response, "model", None) or model, "single_request": True,
-                     "bounded_task": task_type}, usage=_usage(response.usage),
-                    raw={"response_id": getattr(response, "id", None)}))
+            response_id = getattr(response, "id", None)
+            if (response is not None and getattr(response, "usage", None) is not None
+                    and (not response_id or response_id not in seen_requests)):
+                if response_id:
+                    seen_requests.add(response_id)
+                usage_events.append(_response_usage_event(
+                    response, model, started, bounded_task=task_type,
+                    tool_call_id=getattr(ctx, "tool_call_id", None),
+                    tool_name=getattr(ctx, "tool_name", "bounded_model_task"),
+                    source_request_id=(call_requests or {}).get(getattr(ctx, "tool_call_id", None))))
+
 
     # Keep the function's argument schema aligned with its bounded input contract.
     properties = bounded_model_task.params_json_schema["properties"]
@@ -466,7 +547,10 @@ class OpenAIAgentsHarness:
         reported = True  # whether `result`'s usage has been emitted
         finished = False
         auxiliary_usage: list[RunEvent] = []
-        helper = (bounded_task_tool(self.client, req.bounded_task_models, auxiliary_usage, req.workspace)
+        seen_requests: set[str] = set()
+        call_requests: dict[str, str] = {}
+        meter: _RequestMeter | None = None
+        helper = (bounded_task_tool(self.client, req.bounded_task_models, auxiliary_usage, req.workspace, call_requests, seen_requests)
                   if req.bounded_task_models else None)
         try:
             async with asyncio.timeout(req.limits.timeout_seconds):
@@ -488,11 +572,12 @@ class OpenAIAgentsHarness:
                         run_config=RunConfig(tracing_disabled=True,
                                              workflow_name=f"handler:{req.thread_key}"),
                     )
+                    meter = _RequestMeter(model, created, seen_requests, call_requests)
                     reported = False
                     self._runs[req.run_id] = result
                     progressed = False
                     try:
-                        async for event in self._events(result):
+                        async for event in self._events(result, meter):
                             while auxiliary_usage:
                                 yield auxiliary_usage.pop(0)
                             progressed = True
@@ -507,14 +592,14 @@ class OpenAIAgentsHarness:
                         if not await self._recover_conversation(exc, session_id):
                             raise
                         reported = True
-                        for usage_event in _failed_usage(result, model, created):
+                        for usage_event in meter.fallback(result):
                             yield usage_event
                         continue
                     break
                 reported = True
                 while auxiliary_usage:
                     yield auxiliary_usage.pop(0)
-                for usage_event in _usage_events(result.context_wrapper.usage, model, created):
+                for usage_event in meter.fallback(result):
                     yield usage_event
                 final = result.final_output
                 if isinstance(final, str) and final:
@@ -530,7 +615,7 @@ class OpenAIAgentsHarness:
                 yield auxiliary_usage.pop(0)
             if result is not None and not reported:
                 reported = True
-                for usage_event in _failed_usage(result, model, created):
+                for usage_event in meter.fallback(result):
                     yield usage_event
             raise
         except BaseException as exc:  # noqa: BLE001 - normalised into HarnessError
@@ -546,7 +631,7 @@ class OpenAIAgentsHarness:
             if result is not None and not reported:
                 # Failed runs still made (and paid for) their model calls.
                 reported = True
-                for usage_event in _failed_usage(result, model, created):
+                for usage_event in meter.fallback(result):
                     yield usage_event
             if missing_tool_output(exc) and session_id and not created:
                 # Leave the Conversation usable for the next turn.
@@ -584,11 +669,15 @@ class OpenAIAgentsHarness:
             return True
         return await repair_conversation(self.client, session_id) > 0
 
-    async def _events(self, result: Any) -> AsyncIterator[RunEvent]:
+    async def _events(self, result: Any, meter: _RequestMeter | None = None) -> AsyncIterator[RunEvent]:
         """The SDK run's stream as handler RunEvents."""
         # Calls by id, so each output is reported with its call's name and arguments.
         calls: dict[str, tuple[str, Any]] = {}
         async for event in result.stream_events():
+            if event.type == "raw_response_event" and meter:
+                usage_event = meter.response(getattr(event, "data", None))
+                if usage_event:
+                    yield usage_event
             if event.type != "run_item_stream_event":
                 continue
             item, raw = event.item, _raw(event.item)
@@ -599,18 +688,19 @@ class OpenAIAgentsHarness:
                 calls[str(call_id)] = (tool, args)
                 yield RunEvent(RunEventKind.TOOL_STARTED, {
                     "id": call_id, "tool": tool, "kind": raw.get("type", "function_call"),
-                    "input": args}, raw=raw)
+                    "input": args, "request_id": meter.call_requests.get(str(call_id)) if meter else None}, raw=raw)
                 if raw.get("type") in _HOSTED_TOOLS:
                     # Hosted tools run inside the model call; no output item follows.
                     yield RunEvent(RunEventKind.TOOL_FINISHED, {
                         "id": call_id, "tool": tool, "kind": raw["type"], "input": args,
-                        "output": raw.get("action"), "status": raw.get("status")}, raw=raw)
+                        "output": raw.get("action"), "status": raw.get("status"),
+                        "request_id": meter.call_requests.get(str(call_id)) if meter else None}, raw=raw)
             elif event.name == "tool_output":
                 call_id = raw.get("call_id") or raw.get("id")
                 tool, args = calls.pop(str(call_id), ("tool", None))
                 yield RunEvent(RunEventKind.TOOL_FINISHED, {
                     "id": call_id, "tool": tool, "kind": "function_call_output",
-                    "input": args,
+                    "input": args, "request_id": meter.call_requests.get(str(call_id)) if meter else None,
                     "output": _without_inline_data(getattr(item, "output", None)),
                     "status": ("error" if (getattr(item, "custom_data", None) or {}).get(
                         "handler_is_error") else "completed")}, raw=raw)

@@ -17,6 +17,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from .usage import PostgresUsage
 from .tasks import announce_routed
 from ..types import (
     ABANDONED_ERROR,
@@ -137,7 +138,7 @@ async def _put_event(
     return True
 
 
-class PostgresCore:
+class PostgresCore(PostgresUsage):
     """Core tables (events, threads, runs, messages, steps) on Postgres.
 
     Domain mixins use self._conn() for a pooled transaction, self._clock and

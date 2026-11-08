@@ -37,6 +37,7 @@ from .instructions import build_instructions
 from .mail.intake import render_email_event, resolve_act_as
 from .memory import MemoryTools
 from .observability.pricing import PriceTable
+from .observability.attribution import capture_attribution
 from .observability.recorder import RawSink, StepRecorder
 from .settings import SettingsService
 from .tasks import publish_task
@@ -75,6 +76,7 @@ class RunConfig:
     timeout_seconds: float = 900.0
     harness_env: dict[str, str] = field(default_factory=dict)
     available_tools: frozenset[str] | None = None
+    instance_name: str = "main"
 
     @property
     def workspaces_dir(self) -> Path:
@@ -438,9 +440,14 @@ class RunExecutor:
             logger.warning("lease lost before run start: %s", thread.key)
             return
 
+        acting_as = await self._acting_as(thread)
+        attribution = await capture_attribution(
+            self.store, thread, run, events, instance_name=self.config.instance_name,
+            acting_as=acting_as)
+        await self.store.save_run_attribution(attribution)
         token = set_current_run(
             RunContext(run_id=run.id, thread_key=thread.key, user_id=thread.owner_user_id,
-                       acting_as=await self._acting_as(thread))
+                       acting_as=acting_as)
         )
         self._publish(thread.key, run.id, "run_started", {"trigger_event_ids": run.trigger_event_ids})
         await self._publish_task(thread, run.id)
@@ -531,7 +538,9 @@ class RunExecutor:
             plan.model = (await harness.defaults()).get("model")
         run.model = plan.model or run.model
         recorder = _RunRecorder(self.store, run.id, model=run.model, prices=self.prices,
-                                raw_sink=self.raw_sink)
+                                raw_sink=self.raw_sink,
+                                attribution=await self.store.get_run_attribution(run.id),
+                                harness=thread.harness)
         transcript = await self._unsaved(
             thread.key, event_messages(thread.key, run.id, events, self.uploads))
         inputs = list(transcript)  # the turn's own messages, kept even if the run fails

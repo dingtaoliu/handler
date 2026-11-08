@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
+from .usage import SQLiteUsage
 from .tasks import announce_routed
 from ..types import (
     ABANDONED_ERROR,
@@ -126,7 +127,7 @@ def _add_columns(db: sqlite3.Connection) -> None:
         db.execute(statement)
 
 
-class SQLiteCore:
+class SQLiteCore(SQLiteUsage):
     """Core tables (events, threads, runs, messages, steps) and DB plumbing.
 
     Domain mixins (schedules, approvals, memory, ...) live in sqlite_<domain>.py,

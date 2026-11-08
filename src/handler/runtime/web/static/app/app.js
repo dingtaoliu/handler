@@ -964,6 +964,27 @@ function usageTable(title, rows, labelHead) {
     return `<div class="section-title">${esc(title)}</div><div class="table-wrap"><table class="data-table"><thead><tr><th>${esc(labelHead)}</th><th>Runs</th><th>Input</th><th>Output</th><th>Cost</th></tr></thead><tbody>` +
         rows.map((r) => `<tr><td class="mono">${esc(rowLabel(r))}</td><td>${fmtNum(r.runs)}</td><td>${fmtNum(r.input_tokens)}</td><td>${fmtNum(r.output_tokens)}</td><td>${fmtCost(r.cost_usd)}</td></tr>`).join("") + "</tbody></table></div>";
 }
+function ledgerTable(title, rows, dim) {
+    if (!rows.length) return "";
+    const labels = {__shared_system__: "Shared / system", __unknown__: "Unknown", __agent__: "Agent (no linked tool)"};
+    return `<div class="section-title">${esc(title)}</div><div class="table-wrap"><table class="data-table"><thead><tr><th>${esc(dim)}</th><th>Model requests</th><th>Input</th><th>Output</th><th>Known direct cost</th><th>Unpriced records</th></tr></thead><tbody>` + rows.map(r => `<tr><td class="mono">${esc(labels[r[dim]] || r[dim])}</td><td>${fmtNum(r.records)}</td><td>${fmtNum(r.input_tokens)}</td><td>${fmtNum(r.output_tokens)}</td><td>${r.priced_records ? fmtCost(r.known_cost_usd) : "unpriced"}${r.unpriced_records && r.priced_records ? " (partial)" : ""}</td><td>${fmtNum(r.unpriced_records)}</td></tr>`).join("") + "</tbody></table></div>";
+}
+async function detailedUsage(days) {
+    const [users, threads, tools] = await Promise.all([
+        apiOpt(`/api/usage/breakdown?days=${days}&group_by=user`, null),
+        apiOpt(`/api/usage/breakdown?days=${days}&group_by=thread`, null),
+        apiOpt(`/api/usage/tools?days=${days}`, null),
+    ]);
+    if (!users) return "";
+    let html = `<div class="section-title">Detailed usage ledger</div><p>New ledger records only; historical runs are not backfilled. UTC dates. Estimated model token cost is counted once across these alternate views. Hosted tool fees and external service charges are excluded. Shared/system and unknown attribution remain explicit.</p>`;
+    html += ledgerTable("Direct cost by user", users.groups || [], "user");
+    html += ledgerTable("Direct cost by thread", threads?.groups || [], "thread");
+    html += ledgerTable("Direct cost linked to tools", tools?.groups || [], "tool");
+    if (tools?.groups?.length) {
+        html += `<div class="section-title">Tool context estimates (separate from billed cost)</div><p>Text estimates assume one uncached read. They exclude repeated history and images and must not be added to model token cost.</p><div class="table-wrap"><table class="data-table"><thead><tr><th>Tool</th><th>Calls</th><th>Errors</th><th>Estimated output tokens</th><th>Hypothetical one-read cost</th></tr></thead><tbody>` + tools.groups.filter(r => r.calls).map(r => `<tr><td class="mono">${esc(r.tool)}</td><td>${fmtNum(r.calls)}</td><td>${fmtNum(r.errors)}</td><td>${fmtNum(r.output_tokens_estimate)} (${fmtNum(r.estimated_calls)}/${fmtNum(r.calls)} calls estimated)</td><td>${r.single_read_context_cost_estimate_usd == null ? "unpriced" : fmtCost(r.single_read_context_cost_estimate_usd)}</td></tr>`).join("") + "</tbody></table></div>";
+    }
+    return html;
+}
 async function loadUsage() {
     const days = $("usage-days").value;
     const u = await apiOpt(API.usage(days), null);
@@ -982,6 +1003,7 @@ async function loadUsage() {
         }).join("") + "</div>";
     }
     html += usageTable("By model", asRows(u.by_model), "Model") + usageTable("Top threads", asRows(u.by_thread), "Thread");
+    html += await detailedUsage(days);
     box.innerHTML = html;
 }
 $("usage-days").addEventListener("change", () => loadUsage().catch(fail));
