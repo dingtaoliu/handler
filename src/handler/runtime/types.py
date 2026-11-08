@@ -133,6 +133,9 @@ class Thread:
     lease_version: int
     summary: str | None
     created_at: datetime
+    # Records a chat was opened from (e.g. crontal:rfq:123), newest last; the
+    # chat link source feeds them to run-start memory. None until any arrive.
+    context_links: list[str] | None = None
 
 
 @dataclass(frozen=True)

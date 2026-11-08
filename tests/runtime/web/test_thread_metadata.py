@@ -94,3 +94,37 @@ async def test_list_activity_order_shared_threads_and_api_auth(db):
         assert not (await client.get("/api/threads?user_id=one")).json()[0]["unread"]
         assert (await client.post("/api/threads/chat:one:old/read", json={"last_message_at": "2026-10-18T00:00:00"})).status_code == 422
         assert (await client.post("/api/threads/chat:one:old/read", json={}, headers={"Authorization": "Bearer admin"})).status_code == 400
+
+
+async def test_chat_context_links_accumulate_and_are_listed(db):
+    _, token = await db.create_token("one")
+    app = create_app(db, RunEventBus(), Authenticator(db, "admin-key-for-tests"))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {token}"}) as client:
+        first = await client.post("/api/chat", json={
+            "text": "about this RFQ", "conversation_id": "c1",
+            "context_links": ["crontal:rfq:12", " crontal:rfq:12"]})
+        assert first.status_code == 200
+        assert first.json()["context_links"] == ["crontal:rfq:12"]
+        key = first.json()["thread_key"]
+        event = (await db.pending_events(key))[0]
+        assert event.payload["context_links"] == ["crontal:rfq:12"]
+        second = await client.post("/api/chat", json={
+            "text": "and the bid", "conversation_id": "c1",
+            "context_links": ["crontal:bid:4", "domain:Acme.com"]})
+        assert second.json()["context_links"] == [
+            "crontal:rfq:12", "crontal:bid:4", "domain:acme.com"]
+        plain = await client.post("/api/chat", json={"text": "x", "conversation_id": "c1"})
+        assert "context_links" not in plain.json()
+        listed = next(t for t in (await client.get("/api/threads")).json() if t["key"] == key)
+        assert listed["context_links"] == ["crontal:rfq:12", "crontal:bid:4", "domain:acme.com"]
+        got = (await client.get(f"/api/threads/{key}")).json()["thread"]
+        assert got["context_links"] == listed["context_links"]
+        for bad in (["thread:chat:one:c1"], ["crontal:notification:1"], ["nope"],
+                    [f"crontal:rfq:{n}" for n in range(6)]):
+            r = await client.post("/api/chat", json={"text": "x", "context_links": bad})
+            assert r.status_code == 422, bad
+        fresh = await client.post("/api/chat", json={"text": "new"})
+        fresh_key = fresh.json()["thread_key"]
+        row = next(t for t in (await client.get("/api/threads")).json() if t["key"] == fresh_key)
+        assert row["context_links"] is None

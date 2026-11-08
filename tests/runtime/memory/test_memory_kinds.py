@@ -17,13 +17,15 @@ from handler.runtime.integrations.registry import IntegrationRegistry
 from handler.runtime.memory import (
     UNTRUSTED_MARK,
     MemoryTools,
+    context_line,
+    normalize_context_link,
     normalize_link,
     thread_links,
 )
 from handler.runtime.settings import SettingsService
-from handler.runtime.store.sqlite import SQLiteCore
+from handler.runtime.store.sqlite import SQLiteCore, SQLiteStore
 from handler.runtime.store.sqlite_memory import MemoryMixin, NotificationMixin, SettingsMixin
-from handler.runtime.types import Event, MemoryTopic, ThreadType
+from handler.runtime.types import Event, Lane, MemoryTopic, ThreadSpec, ThreadType
 
 
 class _Store(MemoryMixin, SettingsMixin, NotificationMixin, SQLiteCore):
@@ -420,3 +422,59 @@ async def test_prompt_keeps_static_prefix_when_memory_changes(store, crontal_set
     first_dynamic = next(i for i, c in enumerate(after) if c.dynamic)
     assert all(c.dynamic for c in after[first_dynamic:])
     assert "New preference" in render_components(after) and "Bob" in render_components(after)
+
+
+def test_context_links_validated():
+    assert normalize_context_link(" crontal:rfq:123 ") == "crontal:rfq:123"
+    assert normalize_context_link("domain:@Acme.com") == "domain:acme.com"
+    for bad in ("thread:chat:a:1", "topic:x", "mail:m:c", "crontal:rfq", "crontal:rfq:1 2",
+                "crontal:notification:5", "domain:gmail.com", "domain:localhost", 5):
+        with pytest.raises(ValueError):
+            normalize_context_link(bad)
+
+
+async def test_chat_thread_links_from_context_links():
+    message = Event(type="chat.message", source="web", idempotency_key="k",
+                    payload={"text": "hi", "context_links": ["crontal:rfq:7", "bogus:1"]})
+    assert thread_links("chat:alice:1", [{"context_links": ["crontal:bid:3"]}, message]) == [
+        "thread:chat:alice:1", "crontal:bid:3", "crontal:rfq:7"]
+    assert context_line(["crontal:rfq:7"]) == (
+        "The user opened this chat from Crontal record crontal:rfq:7; "
+        "link topics about it with that link.")
+    assert "records crontal:bid:3, crontal:rfq:7 (newest last)" in context_line(
+        ["crontal:bid:3", "crontal:rfq:7", "domain:acme.com"])
+    assert context_line([]) == ""
+
+
+async def test_chat_context_links_load_linked_memory(tmp_path):
+    db = SQLiteStore(tmp_path / "full.db")
+    try:
+        key = "chat:alice:c1"
+        await db.put(Event(type="chat.message", source="web", payload={"text": "hi"},
+                           idempotency_key="m1"),
+                     ThreadSpec(key=key, type=ThreadType.CHAT, lane=Lane.INTERACTIVE,
+                                owner_user_id="alice", harness="codex"))
+        memory = MemoryTools(db, SettingsService(db))
+        assert await memory.relevant_text(key) == ""
+        await db.add_thread_context_links(key, ["crontal:rfq:12"])
+        # No topics yet: the prompt still names the record.
+        assert await memory.relevant_text(key) == (
+            "The user opened this chat from Crontal record crontal:rfq:12; "
+            "link topics about it with that link.")
+        await db.put_topic(MemoryTopic("inquiries/acme", "Acme RFQ", "Status: quoting",
+                                       links=["crontal:rfq:12"]), None)
+        await db.put_topic(MemoryTopic("other", "O", "unrelated", links=["crontal:rfq:99"]),
+                           None)
+        relevant = await memory.relevant_text(key)
+        assert relevant.startswith("The user opened this chat from Crontal record crontal:rfq:12")
+        assert "### inquiries/acme" in relevant and "Status: quoting" in relevant
+        assert "unrelated" not in relevant
+        # Links on a pending message count before they are stored.
+        pending = Event(type="chat.message", source="web", idempotency_key="m2",
+                        payload={"text": "and this", "context_links": ["crontal:rfq:99"]})
+        assert "unrelated" in await memory.relevant_text(key, [pending])
+        prompt = await build_instructions(SettingsService(db), memory, speaker=None,
+                                          thread_type=ThreadType.CHAT, thread_key=key)
+        assert "## Linked to this thread" in prompt and "crontal:rfq:12" in prompt
+    finally:
+        await db.close()

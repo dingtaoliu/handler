@@ -35,7 +35,8 @@ from ..types import (
 )
 
 T = TypeVar("T")
-_JSON_FIELDS = {"payload", "blocks", "raw", "data", "usage", "trigger_event_ids"}
+_JSON_FIELDS = {"payload", "blocks", "raw", "data", "usage", "trigger_event_ids",
+                "context_links"}
 _TIME_FIELDS = {
     "received_at", "created_at", "pending_since", "available_at", "lease_until",
     "started_at", "finished_at", "ended_at",
@@ -109,6 +110,7 @@ ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("memory_topics", "links", "TEXT"),
     ("memory_topics", "source_untrusted", "INTEGER NOT NULL DEFAULT 0"),
     ("memory_topics", "updated_thread_key", "TEXT"),
+    ("threads", "context_links", "TEXT"),
 ]
 # Indexes on added columns, created once the columns exist.
 ADDED_INDEXES = [

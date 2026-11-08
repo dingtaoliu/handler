@@ -99,7 +99,22 @@ A thread's links come from `memory.thread_links`:
 - `mail:*` threads (registered by the mailbox integration): the conversation (the key itself) and `domain:<sender domain>` from the `mail.received` events;
 - `email:*` intake threads: `domain:` of the accepted sender and of a forwarded original.
 
+- `chat:*` threads: the thread's **context links** (below) and those on its pending messages.
+
 Free-mail domains (gmail.com, qq.com, 163.com, …) are skipped so they don't tie unrelated senders together. Integrations register more link sources with `memory.register_link_source(thread_type, fn)`.
+
+## Chat context links
+
+When a user starts a chat from a record page, Crontal sends what they are looking at:
+
+```
+POST /api/chat {"text": "...", "conversation_id": "...", "context_links": ["crontal:rfq:123"]}
+```
+
+- `context_links` is optional, at most 5 per message (`memory.MAX_CONTEXT_LINKS`). Each must be `crontal:<entity>:<id>` (not `crontal:notification:…`) or `domain:<domain>` (not a free-mail domain), checked by `memory.normalize_context_link`. Anything else is a 422.
+- They accumulate on the thread in `threads.context_links` (JSON, nullable; SQLite `ADDED_COLUMNS`, Postgres `schema_pg_thread_context.sql`): deduped, newest last (a link sent again moves to the end), the newest 20 kept. The message's payload carries them too, so a run that starts before the write still sees them.
+- The chat response includes `context_links` (the thread's full list) when the message sent any. `GET /api/threads` rows and `GET /api/threads/{key}` (`thread`) include `context_links` (`null` until any arrive).
+- The `chat` link source (`memory.chat_context_links`) adds them to the thread's links, so run-start memory loads matching topics. "Linked to this thread" starts with one line, e.g. "The user opened this chat from Crontal record crontal:rfq:123; link topics about it with that link.", shown even when no topic matches yet (and even when `relevant_max_chars` is 0).
 
 ## Admin memory API
 
