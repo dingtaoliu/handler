@@ -85,7 +85,7 @@ class ThreadSettings(Section):
 class ThreadsSettings(Section):
     chat: ThreadSettings = Field(default_factory=ThreadSettings, title="Chat",
                                  description="Conversations with users.")
-    gmail: ThreadSettings = Field(default_factory=ThreadSettings, title="Email",
+    gmail: ThreadSettings = Field(default_factory=ThreadSettings, title="Gmail",
                                   description="Incoming Gmail threads.")
     automation: ThreadSettings = Field(default_factory=ThreadSettings, title="Automations",
                                        description="Scheduled jobs.")
