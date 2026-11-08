@@ -14,7 +14,12 @@ and resuming Conversations. A live test through the new tool used a 12.2 MB,
 listing and a follow-up both succeeded. No original customer documents were used.
 Validation: **1,216 passed, 2 skipped**, including 8 new PDF transport cases;
 PDF preparation/upload modules pass Pyright. The harness has existing unrelated
-type errors. Deployment details follow after release.
+type errors. Released as **v53** on `crontal-agent`, runtime **105f335** on `main`,
+image **517ff8a5e633**, backup **b031**, rollback **v52**. Container smoke verified
+the actual native tool preserves 15 PDF pages and returns an `input_file` reference.
+Main/BSS/Yeup health and authenticated settings returned 200; unauthenticated
+settings returned 401 on all three instances. Existing inline-image conversation
+items are not rewritten by this release.
 
 ## 2026-11-08 document-reader refactor
 
