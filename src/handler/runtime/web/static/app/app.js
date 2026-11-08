@@ -967,7 +967,7 @@ function usageTable(title, rows, labelHead) {
 function ledgerTable(title, rows, dim) {
     if (!rows.length) return "";
     const labels = {__shared_system__: "Shared / system", __unknown__: "Unknown", __agent__: "Agent (no linked tool)"};
-    return `<div class="section-title">${esc(title)}</div><div class="table-wrap"><table class="data-table"><thead><tr><th>${esc(dim)}</th><th>Model requests</th><th>Input</th><th>Output</th><th>Known direct cost</th><th>Unpriced records</th></tr></thead><tbody>` + rows.map(r => `<tr><td class="mono">${esc(labels[r[dim]] || r[dim])}</td><td>${fmtNum(r.records)}</td><td>${fmtNum(r.input_tokens)}</td><td>${fmtNum(r.output_tokens)}</td><td>${r.priced_records ? fmtCost(r.known_cost_usd) : "unpriced"}${r.unpriced_records && r.priced_records ? " (partial)" : ""}</td><td>${fmtNum(r.unpriced_records)}</td></tr>`).join("") + "</tbody></table></div>";
+    return `<div class="section-title">${esc(title)}</div><div class="table-wrap"><table class="data-table"><thead><tr><th>${esc(dim)}</th><th>Model requests</th><th>Input</th><th>Output</th><th>Known direct cost</th><th>Unpriced records</th></tr></thead><tbody>` + rows.map(r => `<tr><td class="mono">${esc(labels[r[dim]] || r[dim])}</td><td>${fmtNum(r.records)}</td><td>${fmtNum(r.input_tokens)}</td><td>${fmtNum(r.output_tokens)}</td><td>${r.records === 0 ? "$0.00 (no model call)" : r.priced_records ? fmtCost(r.known_cost_usd) : "unpriced"}${r.unpriced_records && r.priced_records ? " (partial)" : ""}</td><td>${fmtNum(r.unpriced_records)}</td></tr>`).join("") + "</tbody></table></div>";
 }
 async function detailedUsage(days) {
     const [users, threads, tools] = await Promise.all([
