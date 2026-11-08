@@ -212,7 +212,22 @@ Measured on a Heroku dyno: same uid as Handler, `unprivileged_userns_clone=0` so
 - Rotate the OpenAI key (`OPENAI_API_KEY` on Crontal, `CODEX_API_KEY` on `crontal-agent`) and the Bucketeer keys.
 - Send a test email to `contact@crontal.ai` to confirm the Gmail copy still arrives.
 
+**Deployed 2026-11-08 11:23–11:26 UTC:** Handler **v47** (`rebuild` @ 524422d) and Crontal **v118** (`main` @ 594539d). Backup b025 first; migration `z0f1i2l3e4s5` (files drive) applied. Rollback targets: Handler v46, Crontal v117.
+- Handler:
+  - `GET /api/threads?type=&exclude_type=`;
+  - memory kinds, links, `memory_search`, run-start memory, and `memory.save` unasked on untrusted threads (`memory-kinds.md`);
+  - `contact@` intake copies under the read-only `intake` account;
+  - Crontal file deletes always need approval (`always_ask`), and uploads carry provenance.
+- Crontal:
+  - agent panel split into Conversations / Inbox / Tasks, and tool calls ordered after the user message;
+  - "Saved RFQs" renamed to Inquiries (default tab), with a quote button per inquiry;
+  - Drive-style Files: `folder_path` and folder rows on `file`, provenance, trash; agent tokens can only trash.
+- Verified: all instance health checks, cross-instance 401, the bss chat filter, Crontal health, the file backfill (29 rows, none lost).
+- bss lost memory saves recovered: 45 expired and 6 denied, executed via `/api/admin/memory-saves/recover`. The resulting topics have duplicate names (e.g. five topics for ZM Tubes PO 30595); merging them is pending owner approval.
+- Not deployed yet: Crontal `fix/inquiry-background-extraction` (Read RFQ reads in the background; migration `a1i2n3q4r5x6`). The cause: extraction took more than 30 s, and the browser and Heroku cut the request off.
+
 **Backlog:**
+- **Mail intake: keep everything, wake less.** Plan in `mail-intake-plan.md` (owner review 2026-11-08, not started).
 - Paginate Crontal's notification list (see §6).
 - Encrypt the secrets in Crontal's `HandlerInstance` registry.
 - `/api/runs/{id}` still returns steps to non-admins; make them admin-only.
