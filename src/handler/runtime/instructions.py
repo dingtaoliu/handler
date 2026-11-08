@@ -146,11 +146,11 @@ CRONTAL_DISCOVERY_GUIDANCE = (
     "call crontal_api_describe before a write you haven't made in this thread. "
     + _CRONTAL_ERRORS)
 CRONTAL_CATALOG_GUIDANCE = (
-    "If you have crontal_api_* tools: the Crontal API catalog below lists every endpoint, "
-    "with full contracts for common ones. Call endpoints directly from it. Use "
-    "crontal_api_routes or crontal_api_describe only for details it doesn't show, e.g. "
-    "before a write whose contract isn't listed and that you haven't made in this thread. "
-    + _CRONTAL_ERRORS)
+    "If you have crontal_api_* tools: the Crontal API catalog below lists the endpoints "
+    "of common resources (paths without the /api/v1 prefix: always prepend it), with full "
+    "contracts for a few. Call endpoints directly from it. For any other resource, search "
+    "crontal_api_routes. Call crontal_api_describe before a write whose contract isn't "
+    "listed and that you haven't made in this thread. " + _CRONTAL_ERRORS)
 CATALOG_UNAVAILABLE_HINT = " (The API catalog is unavailable right now.)"
 
 
@@ -159,7 +159,8 @@ async def crontal_route_catalog_text(catalog: Any, efficiency: dict) -> str | No
     try:
         return await catalog.prompt_text(
             max_chars=int(efficiency["route_catalog_max_chars"]),
-            full_specs=list(efficiency["route_catalog_full_specs"]))
+            full_specs=list(efficiency["route_catalog_full_specs"]),
+            resources=list(efficiency["route_catalog_resources"]))
     except Exception:  # noqa: BLE001 - the prompt must not fail on Crontal
         return None
 

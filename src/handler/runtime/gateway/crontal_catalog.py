@@ -6,10 +6,13 @@ instance (Crontal URL + agent token). `crontal_api_routes`/`describe` read
 through it, and `prompt_text()` renders a compact catalog for the stable part
 of the instructions so agents don't spend a model round trip on discovery:
 
-- one line per route (`METHOD path — summary`), grouped by resource;
+- one line per route under the configured resource prefixes (`METHOD path —
+  summary`, paths shown without the `/api/v1` prefix, which the header tells
+  the agent to prepend), grouped by resource; other routes stay discoverable
+  through crontal_api_routes;
 - full contracts for a configured list of common routes, in that priority
-  order, while they fit `max_chars` (all route lines are always kept; when the
-  lines alone exceed the cap the catalog is left out).
+  order, while they fit `max_chars` (all selected route lines are always
+  kept; when the lines alone exceed the cap the catalog is left out).
 
 The text is byte-stable while Crontal is unchanged (sorted, compact sorted
 JSON, no timestamps), so it stays in the cached prompt prefix. It is rendered
@@ -39,7 +42,8 @@ SPEC_TTL_SECONDS = 600
 PROMPT_TTL_SECONDS = 3600
 PROMPT_WAIT_SECONDS = 3.0
 FAILURE_RETRY_SECONDS = 60
-SUMMARY_CHARS = 120
+SUMMARY_CHARS = 48
+API_PREFIX = "/api/v1"
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 # Never reachable by the agent (refused, and left out of the catalog):
 # its own plumbing and site-admin tools.
@@ -49,29 +53,46 @@ HIDDEN_PREFIXES = ("/api/v1/agent-access", "/api/v1/agent-mcp", "/api/v1/handler
 _HEADING_KEYS = ("method", "path", "summary", "has_schema")
 _PARAM = re.compile(r"<(?:\w+(?:\([^)]*\))?:)?(\w+)>")
 
-# Default full contracts, most important first (fewer fit a smaller cap):
-# what agents use most, i.e. received/own RFQs, quotes, files, line items,
-# contacts and notifications.
+# Resources whose routes get catalog lines, from BSS usage since Oct 25
+# (received RFQs and files dominate; operations, RFQs, bids follow).
+DEFAULT_RESOURCES = [
+    "/api/v1/rfq/received", "/api/v1/rfq", "/api/v1/bid", "/api/v1/files",
+    "/api/v1/operations", "/api/v1/notification", "/api/v1/contact",
+    "/api/v1/demand_listing",
+]
+# Default full contracts, most important first (fewer fit a smaller cap).
 DEFAULT_FULL_SPECS = [
     "GET /api/v1/rfq/received",
-    "GET /api/v1/rfq/received/<int:rfq_id>",
     "POST /api/v1/rfq/received",
-    "GET /api/v1/rfq",
-    "GET /api/v1/rfq/<int:rfq_id>",
-    "GET /api/v1/bid/merchant/<int:merchant_id>",
-    "GET /api/v1/files/browse",
-    "GET /api/v1/files/search",
     "POST /api/v1/files/upload",
-    "PATCH /api/v1/files/<int:file_id>",
-    "POST /api/v1/demand_listing",
-    "GET /api/v1/contact",
-    "GET /api/v1/notification",
+    "GET /api/v1/files/browse",
 ]
+# Summary words that add nothing to a route's method and path.
+_GENERIC = set("""get list all create new update delete remove a an the by id for of
+specific one its your their this that to in on with and or from existing authenticated
+merchant caller calling owning owner only can user belonging""".split())
+_WORDS = re.compile(r"[a-z0-9]+")
+_TRAILING = {"a", "an", "the", "for", "of", "to", "by", "with", "and", "or", "in", "on",
+             "from", "its", "your", "their", "are", "is", "be", "that", "which", "so",
+             "you", "can", "calling", "authenticated", "one"}
 
 
 def hidden(path: str) -> bool:
     # A plain prefix test (not per segment): over-hiding is the safe side.
     return path.lower().startswith(HIDDEN_PREFIXES)
+
+
+def resource_prefix(entry: str) -> str | None:
+    """A normalized `/api/v1/...` path prefix; None when malformed."""
+    entry = entry.strip().rstrip("/")
+    if (not entry.startswith(API_PREFIX + "/") or any(c.isspace() for c in entry)
+            or "<" in entry or "{" in entry):
+        return None
+    return entry
+
+
+def _under(path: str, prefixes: Iterable[str]) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in prefixes)
 
 
 def spec_key(entry: str) -> tuple[str, str] | None:
@@ -84,15 +105,43 @@ def spec_key(entry: str) -> tuple[str, str] | None:
 
 
 def _summary(text: str) -> str:
-    """Crontal's summary, cut at a word boundary to SUMMARY_CHARS characters."""
+    """The first sentence of Crontal's summary, cut at a word boundary to
+    SUMMARY_CHARS characters (no dangling article/preposition, no period)."""
     text = " ".join((text or "").split())
+    text = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].rstrip(".")
     if len(text) <= SUMMARY_CHARS:
         return text
-    return text[:SUMMARY_CHARS].rsplit(" ", 1)[0].rstrip(",;:—-") + "…"
+    words = text[:SUMMARY_CHARS + 1].split(" ")[:-1]
+    text = " ".join(words)
+    if text.count("(") > text.count(")"):  # don't leave a parenthesis open
+        text = text[:text.rindex("(")].rstrip()
+    words = text.split(" ")
+    while words and words[-1].lower().strip(",;:—-") in _TRAILING:
+        words.pop()
+    return " ".join(words).rstrip(",;:—-")
+
+
+def _stem(word: str) -> str:
+    return word[:-1] if word.endswith("s") and len(word) > 3 else word
+
+
+def _informative(path: str, summary: str) -> bool:
+    """Whether the summary says more than the method and path: a word that is
+    neither generic nor (a form of) a path word. "Get a bid by ID" on
+    GET /bid/{bid_id} says nothing more; "Lock and submit a bid" does."""
+    path_words = {_stem(w) for w in _WORDS.findall(path.lower().replace("_", " "))}
+    for word in map(_stem, _WORDS.findall(summary.lower())):
+        if word in _GENERIC or word in path_words:
+            continue
+        if any(len(p) >= 4 and (word.startswith(p) or p.startswith(word)) for p in path_words):
+            continue
+        return True
+    return False
 
 
 def _display(path: str) -> str:
-    return _PARAM.sub(r"{\1}", path)
+    """`/api/v1/rfq/<int:rfq_id>` -> `/rfq/{rfq_id}` (the header says to prepend)."""
+    return _PARAM.sub(r"{\1}", path).removeprefix(API_PREFIX)
 
 
 def _group(path: str) -> str:
@@ -100,8 +149,11 @@ def _group(path: str) -> str:
     return parts[0] or "other"
 
 
-def render_route_lines(routes: Iterable[dict[str, Any]]) -> str:
-    """Route lines grouped by resource; deterministic for the same routes."""
+def render_route_lines(routes: Iterable[dict[str, Any]],
+                       resources: Iterable[str] | None = None) -> str:
+    """Route lines grouped by resource; deterministic for the same routes.
+    With `resources`, only routes under those path prefixes."""
+    prefixes = None if resources is None else [p for p in map(resource_prefix, resources) if p]
     groups: dict[str, list[str]] = {}
     for route in sorted(routes, key=lambda r: (str(r.get("path", "")),
                                                list(r.get("methods") or []))):
@@ -109,7 +161,11 @@ def render_route_lines(routes: Iterable[dict[str, Any]]) -> str:
         methods = [m for m in route.get("methods") or [] if m in METHODS]
         if not methods or not path.startswith("/api/v1/") or hidden(path):
             continue
+        if prefixes is not None and not _under(path, prefixes):
+            continue
         summary = _summary(str(route.get("summary") or ""))
+        if not _informative(path, summary):
+            summary = ""
         line = f"{','.join(sorted(methods))} {_display(path)}" + (f" — {summary}" if summary else "")
         groups.setdefault(_group(path), []).append(line)
     return "\n".join(f"[{name}]\n" + "\n".join(lines) for name, lines in sorted(groups.items()))
@@ -124,17 +180,17 @@ def render_spec(method: str, path: str, spec: dict[str, Any]) -> str:
 
 
 CATALOG_HEADER = (
-    "# Crontal API catalog\n"
-    "Every endpoint you can call with crontal_api_get/crontal_api_call, grouped by "
-    "resource. Fill {name} path parameters with ids. Contracts below are exactly what "
-    "crontal_api_describe returns (minus method/path/summary; success_status 200 "
-    "unless shown).")
+    "# Crontal API catalog (common resources)\n"
+    "Paths omit the /api/v1 prefix: always prepend it, e.g. /rfq/received is "
+    "/api/v1/rfq/received. Fill {name} with ids. Contracts are crontal_api_describe "
+    "output minus method/path/summary (success_status 200 unless shown).")
 
 
 def render_catalog(routes: list[dict[str, Any]], specs: dict[tuple[str, str], Any],
-                   full_specs: Iterable[str], max_chars: int) -> str | None:
+                   full_specs: Iterable[str], max_chars: int,
+                   resources: Iterable[str] | None = None) -> str | None:
     """The prompt text; None when even the route lines exceed `max_chars`."""
-    text = CATALOG_HEADER + "\n\n" + render_route_lines(routes)
+    text = CATALOG_HEADER + "\n\n" + render_route_lines(routes, resources)
     if len(text) > max_chars:
         return None
     blocks: list[str] = []
@@ -214,15 +270,16 @@ class CrontalRouteCatalog:
 
     # ── prompt ──────────────────────────────────────────────────────────────
 
-    async def _render(self, max_chars: int, full_specs: tuple[str, ...]
-                      ) -> tuple[str | None, bool]:
+    async def _render(self, max_chars: int, full_specs: tuple[str, ...],
+                      resources: tuple[str, ...] | None) -> tuple[str | None, bool]:
         """(text, complete); incomplete when a wanted contract failed to load."""
         routes = await self.routes()
         listed = {(m, str(r.get("path"))) for r in routes for m in r.get("methods") or []}
         wanted = [k for k in dict.fromkeys(filter(None, map(spec_key, full_specs)))
                   if k in listed and not hidden(k[1])]
         results = await asyncio.gather(*(self.spec(m, p) for m, p in wanted))
-        text = render_catalog(routes, dict(zip(wanted, results)), full_specs, max_chars)
+        text = render_catalog(routes, dict(zip(wanted, results)), full_specs, max_chars,
+                              resources)
         if text is None:
             logger.warning("crontal route catalog omitted: route lines exceed max_chars",
                            extra={"max_chars": max_chars})
@@ -259,14 +316,16 @@ class CrontalRouteCatalog:
             self._refreshing[key] = task
         return task
 
-    async def prompt_text(self, *, max_chars: int, full_specs: Iterable[str]) -> str | None:
+    async def prompt_text(self, *, max_chars: int, full_specs: Iterable[str],
+                          resources: Iterable[str] | None = None) -> str | None:
         """The rendered catalog, or None when unavailable (never raises).
 
         Fresh copy: returned as is. Stale copy: returned while a background
         refresh runs. None yet: waits up to `wait_seconds` for the first fetch
         (it keeps running for later runs), except shortly after a failure.
         """
-        key = (int(max_chars), tuple(full_specs))
+        key = (int(max_chars), tuple(full_specs),
+               None if resources is None else tuple(resources))
         cached = self._prompts.get(key)
         now = time.time()
         if cached is not None:

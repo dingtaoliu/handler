@@ -17,12 +17,20 @@ The owner approved the six audit recommendations, with an explicit requirement t
 
 Measured on BSS since November 1: `crontal_api_routes` 48 and `crontal_api_describe` 47 calls in a week, often each its own model round trip (~100k resent context). Instances whose crontal_api tools are available now get Crontal's API catalog as the **last stable instruction component** (`crontal_route_catalog`, before memory rules/index, so a Crontal change invalidates only what follows it):
 
-- One line per route (`METHOD /api/v1/path — summary`, summaries cut at 120 characters, `{param}` placeholders), grouped by resource, hidden routes excluded; then full contracts (exactly the describe output minus method/path/summary/has_schema, compact sorted JSON) for `route_catalog_full_specs` in priority order while they fit the cap. All route lines are kept; if they alone exceed the cap the catalog is omitted.
+- One line per route **under `route_catalog_resources`** (default: received RFQs, RFQs, bids, files, operations, notifications, contacts, demand listings, chosen from BSS usage since Oct 25), grouped by resource. Paths are shown without `/api/v1` (the catalog header and guidance say to prepend it; the tools still require full paths, so a miss is refused, never misrouted or misclassified). A summary is shown only when it adds a word beyond the method and path (first sentence, at most 48 characters). Then full contracts (describe output minus method/path/summary/has_schema, compact sorted JSON) for `route_catalog_full_specs` in priority order while they fit the cap. All selected route lines are kept; if they alone exceed the cap the catalog is omitted. Other resources stay discoverable via `crontal_api_routes` (one guidance line says so).
 - `gateway/crontal_catalog.py` (`CrontalRouteCatalog`) is shared per instance with the crontal_api tools (same route/spec caches). The rendered text is cached for 1 h, refreshed in the background while the stale copy is served; a run waits at most 3 s for a first fetch, and after a failure falls back immediately for 60 s. Fallback is today's discovery guidance plus "(The API catalog is unavailable right now.)". The text is byte-stable while Crontal is unchanged.
-- Guidance: use the catalog directly; call `crontal_api_routes`/`describe` only for routes or details it doesn't show. Both tools stay available. The default email instructions' discovery step says the same.
+- Guidance: use the catalog directly; `crontal_api_routes` for other resources, `crontal_api_describe` before an unlisted write. Both tools stay available. The default email instructions' discovery step says the same.
 - Prompt preview (`GET /api/settings/prompt`) and the console token table show `crontal_route_catalog` as its own component.
 
-Measured on a fixture of Crontal `main` @ 594539d (176 routes; `tests/runtime/fixtures/crontal/route_catalog.json`), local o200k fallback encoding: route lines alone **14,105 chars / 3,706 tokens**; with the 13 default contracts **36,250 chars / 8,962 tokens** (94% of a minimal chat prompt's instructions). Cap examples: 16k chars → 2 contracts / 4,134 tokens; 24k → 6 / 6,014; 32k → 12 / 7,924. This is a cost trade-off to watch: the catalog is cache-read on warm requests but cache-written on cold ones; compare discovery calls and cost per run after rollout and lower `route_catalog_max_chars` (or the list) if cold writes dominate.
+Sizing follows BSS usage since Oct 25 (only 49 of 368 runs used crontal_api; top routes GET/POST `/rfq/received` 34/21, files, operations registers), so the catalog must cost less than the discovery round trips it saves (a first 9k-token version cost ~5x more). Measured on a fixture of Crontal `main` @ 594539d (176 routes, 103 under the default resources; `tests/runtime/fixtures/crontal/route_catalog.json`), local o200k fallback encoding:
+
+| Configuration | Chars | Tokens |
+| --- | ---: | ---: |
+| Default (cap 7,000: route lines + `GET /rfq/received` contract) | 6,538 | 1,703 |
+| Route lines only (`route_catalog_full_specs: []`, or cap 6,000) | 5,062 | 1,359 |
+| All four default contracts (cap 15,000) | 13,318 | 3,325 |
+
+Contract sizes: `GET /rfq/received` 340, `POST /rfq/received` 915, `POST /files/upload` 269, `GET /files/browse` 427 tokens. Raise `route_catalog_max_chars` only if discovery calls and cost per run after rollout show it pays.
 
 ## Controls and rollback
 
@@ -35,8 +43,9 @@ Settings → `efficiency` exposes:
 | classification_model | gpt-6-luna | Classification helper |
 | drafting_model | gpt-6.1-terra | Extraction/drafting helper |
 | route_catalog | true | Crontal API catalog in the stable prompt prefix (follow-up branch) |
-| route_catalog_max_chars | 40000 | Catalog cap; route lines always kept, contracts added while they fit |
-| route_catalog_full_specs | 13 routes | Full contracts, priority order: received RFQs (list/get/create), RFQs (list/get), quotes by merchant, files (browse/search/upload/patch), demand listing create, contacts, notifications |
+| route_catalog_resources | 8 prefixes | Resources whose routes are listed (rfq/received, rfq, bid, files, operations, notification, contact, demand_listing) |
+| route_catalog_max_chars | 7000 | Catalog cap; listed route lines always kept, contracts added while they fit |
+| route_catalog_full_specs | 4 routes | Full contracts, priority order: GET/POST /rfq/received, POST /files/upload, GET /files/browse |
 
 These are live settings; disabling helpers leaves the main workflow on its existing model. Email summaries remain opt-in by the agent after full reads. No original messages or audit logs are removed. New mail tables use `CREATE TABLE IF NOT EXISTS` and are compatible with rolling back runtime code.
 
