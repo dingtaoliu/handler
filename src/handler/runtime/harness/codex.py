@@ -41,7 +41,7 @@ SHELL_ENV_EXCLUDE = (
 
 def file_tools_note() -> str:
     """How Codex reads office files and PDFs: handler's own reader, so both
-    harnesses see the same text (documents.py). Images: Codex's view_image."""
+    harnesses see the same text (the documents package). Images: Codex's view_image."""
     import sys
 
     script = Path(sys.executable).parent / "handler-read"

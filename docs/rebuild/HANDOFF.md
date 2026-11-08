@@ -1,5 +1,15 @@
 # Handoff: handler rebuild
 
+## 2026-11-08 document-reader refactor
+
+The shared reader is now a `documents/` package starting with an explicit file-type
+router and separate text, converted-document, spreadsheet, PDF, image and archive
+readers. Existing `documents.read`, `to_text`, `handler-read`, tool schema and output
+behavior are preserved. See `docs/rebuild/document-reader.md` for module boundaries,
+extension routing, preview semantics and validation. Scans still use model vision.
+Validation: **1,208 passed, 2 skipped**, 35 focused reader tests, zero Pyright errors,
+and 86 differential cases identical to the old implementation.
+
 ## 2026-11-08 detailed usage ledger
 
 Request/tool-call metering, immutable user/thread attribution, admin reporting and

@@ -1,4 +1,4 @@
-"""The shared file reader (documents.py) and the native harness's read_file."""
+"""The shared file reader (documents package) and the native harness's read_file."""
 
 from __future__ import annotations
 
