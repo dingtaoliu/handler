@@ -23,6 +23,14 @@ main model's verification. Live `efficiency` settings can disable fresh sessions
 helpers. Released on `crontal-agent` as **v48**, runtime commit `17324c3`, after backup **b026**; rollback **v47**. Main/BSS persona version 3 corrects stale identity wording. All three Crontal instance health/tool/settings checks passed. The main model remains Sol. Legacy Handler and the personal deployment are
 unchanged. Read the implementation document before changing these contracts.
 
+**Follow-up (branch `feat/route-catalog-in-prompt`, not merged or deployed):** a compact Crontal
+API route catalog (routes of common resources, paths without `/api/v1`, plus full contracts that
+fit the cap) is now the last stable prompt component, `crontal_route_catalog`, cached per instance
+for 1 h with lazy refresh and a non-blocking fallback to discovery tools. Settings
+`efficiency.route_catalog`, `route_catalog_resources`, `route_catalog_max_chars` (7000) and
+`route_catalog_full_specs`. Default ~1,703 tokens on a realistic fixture (1,359 lines only). This
+supersedes the 2026-10-25 (2b) "pull on demand only" decision below; see the implementation document.
+
 Updated 2026-10-18 by the driver (Claude Code), for whoever picks this up next. Read this first, then `docs/agent-runtime-design.md` (the design) and the package briefs in `docs/rebuild/` (`phase1.md` … `phase4-ui.md`). Known problems are in `docs/rebuild/known-issues.md`.
 
 ## 1. What this project is
@@ -212,7 +220,28 @@ Measured on a Heroku dyno: same uid as Handler, `unprivileged_userns_clone=0` so
 - Rotate the OpenAI key (`OPENAI_API_KEY` on Crontal, `CODEX_API_KEY` on `crontal-agent`) and the Bucketeer keys.
 - Send a test email to `contact@crontal.ai` to confirm the Gmail copy still arrives.
 
+**Deployed 2026-11-08 11:23–11:26 UTC:** Handler **v47** (`rebuild` @ 524422d) and Crontal **v118** (`main` @ 594539d). Backup b025 first; migration `z0f1i2l3e4s5` (files drive) applied. Rollback targets: Handler v46, Crontal v117.
+- Handler:
+  - `GET /api/threads?type=&exclude_type=`;
+  - memory kinds, links, `memory_search`, run-start memory, and `memory.save` unasked on untrusted threads (`memory-kinds.md`);
+  - `contact@` intake copies under the read-only `intake` account;
+  - Crontal file deletes always need approval (`always_ask`), and uploads carry provenance.
+- Crontal:
+  - agent panel split into Conversations / Inbox / Tasks, and tool calls ordered after the user message;
+  - "Saved RFQs" renamed to Inquiries (default tab), with a quote button per inquiry;
+  - Drive-style Files: `folder_path` and folder rows on `file`, provenance, trash; agent tokens can only trash.
+- Verified: all instance health checks, cross-instance 401, the bss chat filter, Crontal health, the file backfill (29 rows, none lost).
+- bss lost memory saves recovered: 45 expired and 6 denied, executed via `/api/admin/memory-saves/recover`. The resulting topics have duplicate names (e.g. five topics for ZM Tubes PO 30595); merging them is pending owner approval.
+- Not deployed yet: Crontal `fix/inquiry-background-extraction` (Read RFQ reads in the background; migration `a1i2n3q4r5x6`). The cause: extraction took more than 30 s, and the browser and Heroku cut the request off.
+
+**Deployed 2026-11-08 12:56–13:05 UTC:** Handler **v49** (`rebuild` @ 19c1450) and Crontal **v119** (`main` @ 0cb7c11). Backup b027 first; Crontal migration `a1i2n3q4r5x6` (inquiry background extraction) applied; `GUNICORN_THREADS=16` set on Crontal. Rollback targets: Handler v48, Crontal v118.
+- Handler: compact Crontal route catalog in the stable prompt (`efficiency.route_catalog*`, ~1.7k tokens; only 13% of bss runs call Crontal, so keep it small); chat `context_links` (page context -> run-start memory); mail-intake plan doc (`mail-intake-plan.md`, not built).
+- Crontal: Read RFQ reads in the background (`intake_status` extracting/extraction_failed, retry, line editor); Files My files/Trash tabs; grouped tool calls in chat; bounded DB pool (2+2 per process; with Handler's 12 the 20-connection DB is exactly full: no headroom for extra processes), streams release DB sessions and drop dead clients within ~15 s; cached thread list; page context chip for new chats.
+- bss memory tidied by hand (46 -> 36 topics, 26 linked); backup in the session scratchpad only.
+- Verified: Handler instance health/404, catalog present in prompt; Crontal health, new bundle served, DB 17/20 after restart.
+
 **Backlog:**
+- **Mail intake: keep everything, wake less.** Plan in `mail-intake-plan.md` (owner review 2026-11-08, not started).
 - Paginate Crontal's notification list (see §6).
 - Encrypt the secrets in Crontal's `HandlerInstance` registry.
 - `/api/runs/{id}` still returns steps to non-admins; make them admin-only.

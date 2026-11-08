@@ -106,6 +106,13 @@ class Store(EventQueue, Protocol):
 
     async def set_thread_title(self, key: str, title: str, *, manual: bool = True) -> bool: ...
 
+    async def thread_context_links(self, key: str) -> list[str]: ...
+
+    async def add_thread_context_links(self, key: str, links: list[str], *,
+                                       limit: int = 20) -> list[str]:
+        """Merge into the thread's context links (newest last, capped); returns them."""
+        ...
+
     async def mark_thread_read(self, key: str, user_id: str, last_message_at: datetime | None): ...
 
     async def list_threads(

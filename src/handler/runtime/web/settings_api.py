@@ -25,7 +25,7 @@ class RollbackRequest(BaseModel):
 
 def settings_router(service: SettingsService, auth: Authenticator,
                     memory_tools: MemoryTools | None = None, *,
-                    crontal_identity: Any = None,
+                    crontal_identity: Any = None, crontal_catalog: Any = None,
                     available_tools: set[str] | Callable[[], set[str]] | None = None) -> APIRouter:
     router = APIRouter()
     user = Depends(auth.require_principal)
@@ -63,7 +63,7 @@ def settings_router(service: SettingsService, auth: Authenticator,
         components = await build_instruction_components(
             service, memory_tools or MemoryTools(service.store, service),
             speaker=speaker if kind == ThreadType.CHAT else None, thread_type=kind,
-            crontal_identity=crontal_identity,
+            crontal_identity=crontal_identity, crontal_catalog=crontal_catalog,
             available_tools=available_tools() if callable(available_tools) else available_tools,
             harness=effective.get("harness"))
         return {"thread_type": kind.value, "prompt": render_components(components),
