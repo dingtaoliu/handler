@@ -1,5 +1,20 @@
 # Handoff: handler rebuild
 
+## 2026-11-08 token efficiency update
+
+Owner-approved implementation and validation are documented in
+`docs/audits/token-efficiency-implementation-2026-11-08.md`; the baseline audit is
+`docs/audits/token-efficiency-2026-11-08.md` and component measurements are in
+`docs/audits/prompt-components-2026-11-08.md`.
+
+The rebuilt runtime now supports full-read-gated email summaries (never automatically
+mark historical mail read), paged/batched mail reads, fresh automation firings with
+memory checkpoints, stable prompt components with token/% preview, compact results,
+opt-in terminal approval receipts, and bounded Luna/Terra helpers under the existing
+main model's verification. Live `efficiency` settings can disable fresh sessions or
+helpers. The main model remains Sol. Legacy Handler and the personal deployment are
+unchanged. Read the implementation document before changing these contracts.
+
 Updated 2026-10-18 by the driver (Claude Code), for whoever picks this up next. Read this first, then `docs/agent-runtime-design.md` (the design) and the package briefs in `docs/rebuild/` (`phase1.md` … `phase4-ui.md`). Known problems are in `docs/rebuild/known-issues.md`.
 
 ## 1. What this project is

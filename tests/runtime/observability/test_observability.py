@@ -119,7 +119,7 @@ def test_shipped_prices_cover_every_selectable_model():
     t = PriceTable.from_yaml()
     models = {m.value for m in ModelName} | {m for m in HARNESS_DEFAULT_MODELS.values() if m}
     for model in models:
-        entry = t.lookup(model, SHIPPED_AT)
+        entry = t.lookup(model, date(2026, 11, 8))  # includes newly selectable Terra
         assert entry is not None, model
         for rates in (entry.rates, entry.long_context):
             assert rates is not None, model

@@ -157,6 +157,25 @@ def _form_value(value: Any) -> str:
     return str(value)
 
 
+def _project(value: Any, fields: list[str]) -> Any:
+    """Select explicit dot paths, applying the same selection to array items."""
+    if isinstance(value, list):
+        return [_project(item, fields) for item in value]
+    if not isinstance(value, dict):
+        return value
+    selected: dict[str, Any] = {}
+    for field in fields:
+        head, _, tail = field.partition(".")
+        if head not in value:
+            continue
+        if not tail:
+            selected[head] = value[head]
+        elif head not in fields:
+            children = [f.partition(".")[2] for f in fields if f.startswith(head + ".")]
+            selected[head] = _project(value[head], children)
+    return selected
+
+
 def crontal_base_url(url: str) -> str:
     """https://host/api/v1/agent-mcp → https://host (the API's origin)."""
     parts = urlsplit(url)
@@ -304,7 +323,7 @@ class CrontalApiTools:
             return ToolResult(str(exc), is_error=True)
         except httpx.HTTPError as exc:
             return ToolResult(f"Crontal request failed: {exc}", is_error=True)
-        result = await self._result(response, path, workspace)
+        result = await self._result(response, path, workspace, options=args)
         if response.status_code in SPEC_ON_STATUS and isinstance(result.content, dict):
             spec = await self._spec(method, path)
             if isinstance(spec, dict):
@@ -355,7 +374,8 @@ class CrontalApiTools:
         return response
 
     async def _result(self, response: httpx.Response, path: str,
-                      workspace: Path) -> ToolResult:
+                      workspace: Path, *, options: dict[str, Any] | None = None) -> ToolResult:
+        options = options or {}
         status = response.status_code
         ctype = response.headers.get("content-type", "").split(";")[0].strip()
         if ctype == "application/json" or (not response.content and status < 400):
@@ -363,24 +383,36 @@ class CrontalApiTools:
                 body = response.json() if response.content else None
             except ValueError:
                 body = response.text
-            text = json.dumps(body, ensure_ascii=False, default=str)
-            if len(text) > MAX_JSON_CHARS:
+            original_text = json.dumps(body, ensure_ascii=False, separators=(",", ":"), default=str)
+            metadata: dict[str, Any] = {}
+            # Never hide validation errors or other failure details through projection.
+            if status < 400 and (fields := options.get("response_fields")):
+                metadata = {"projected": True, "full_response_saved_to": self._save(
+                    workspace, "response.json", original_text.encode(), path)}
+                body = _project(body, fields)
+            text = json.dumps(body, ensure_ascii=False, separators=(",", ":"), default=str)
+            budget = max(1000, min(MAX_JSON_CHARS, int(options.get("max_output_chars", MAX_JSON_CHARS))))
+            if len(text) > budget:
                 saved = self._save(workspace, "response.json", text.encode(), path)
                 return ToolResult({"status": status, "truncated": True,
+                                   **metadata,
                                    "saved_to": saved,
-                                   "preview": text[:MAX_JSON_CHARS]}, is_error=status >= 400)
-            return ToolResult({"status": status, "body": body}, is_error=status >= 400)
+                                   "preview": text[:budget]}, is_error=status >= 400)
+            return ToolResult({"status": status, "body": body, **metadata}, is_error=status >= 400)
         if status >= 400:
             return ToolResult({"status": status, "body": response.text[:2000]}, is_error=True)
         # A file or other non-JSON payload: keep it where the agent can work on it.
         saved = self._save(workspace, _filename(response, path), response.content, path)
-        text = await asyncio.to_thread(documents.to_text, workspace / saved,
-                                       max_chars=MAX_TEXT_CHARS + 1)
         result: dict[str, Any] = {"status": status, "content_type": ctype,
                                   "size": len(response.content), "saved_to": saved}
+        if not options.get("include_text", True):
+            return ToolResult(result)
+        budget = max(1000, min(MAX_TEXT_CHARS, int(options.get("max_output_chars", MAX_TEXT_CHARS))))
+        text = await asyncio.to_thread(documents.to_text, workspace / saved,
+                                       max_chars=budget + 1)
         if text:
-            result["text"] = text[:MAX_TEXT_CHARS]
-            if len(text) > MAX_TEXT_CHARS:
+            result["text"] = text[:budget]
+            if len(text) > budget:
                 result["text_truncated"] = True
         return ToolResult(result)
 
@@ -390,7 +422,7 @@ class CrontalApiTools:
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / name
         if target.exists():
-            target = target_dir / f"{int(time.time())}-{name}"
+            target = target_dir / f"{time.time_ns()}-{name}"
         target.write_bytes(data)
         return str(target.relative_to(workspace))
 
@@ -411,6 +443,23 @@ class CrontalApiTools:
         routes = [r for r in routes if not _hidden(str(r.get("path", "")).lower())]
         if words := set(_WORD.findall((args.get("search") or "").lower())):
             routes = _rank(routes, words)
+        if args.get("include_specs"):
+            limit = max(1, min(3, int(args.get("limit", 3))))
+            matches = [(route, method) for route in routes for method in route["methods"]
+                       if method in ("GET", "POST", "PUT", "PATCH", "DELETE")]
+            selected = matches[:limit]
+            specs = await asyncio.gather(*(self._spec(method, route["path"])
+                                           for route, method in selected))
+            content = {"routes": [{"method": method, "path": route["path"], "spec": spec}
+                                  for (route, method), spec in zip(selected, specs)],
+                       "has_more": len(matches) > limit}
+            text = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+            if len(text) > MAX_JSON_CHARS:
+                saved = self._save(self._workspace_for(ctx.thread_key), "route-specs.json",
+                                   text.encode(), "routes")
+                return ToolResult({"truncated": True, "saved_to": saved,
+                                   "preview": text[:MAX_JSON_CHARS]})
+            return ToolResult(content)
         return ToolResult([f"{','.join(r['methods'])} {r['path']}"
                            + (f" — {r['summary']}" if r.get("summary") else "")
                            for r in routes])
@@ -463,16 +512,31 @@ class CrontalApiTools:
                 "with path parameters filled in (e.g. /api/v1/rfq/12)."}
         query = {"type": "object", "description": "Query-string parameters.",
                  "additionalProperties": True}
+        output_options = {
+            "response_fields": {"type": "array", "items": {"type": "string"},
+                                "maxItems": 50,
+                                "description": "Optional JSON body fields (dot paths; applies to arrays). "
+                                "Full response is saved to a workspace file. Errors are not projected."},
+            "include_text": {"type": "boolean", "description": "Include extracted text for file "
+                             "downloads (default true); false saves the file for targeted reading."},
+            "max_output_chars": {"type": "integer", "minimum": 1000, "maximum": MAX_JSON_CHARS,
+                                 "description": "Optional smaller output budget; files cap at 20000 chars. "
+                                 "Truncation is explicit and the complete content remains in a file."},
+        }
         return [
             ToolSpec(
                 "crontal_api_routes", "crontal_api.routes", Risk.READ,
                 "List Crontal's REST API endpoints (methods, path, summary). Use it to find "
-                "the endpoint for a task, then crontal_api_describe for its exact contract.",
+                "the endpoint for a task. Set include_specs to get up to 3 matching endpoint "
+                "contracts in the same call; use a specific search to narrow results.",
                 {"type": "object", "properties": {
                     "search": {"type": "string",
                                "description": "Optional words to look for in path or "
                                "summary (any word matches, best matches first); omit "
-                               "for the whole catalogue."}}},
+                               "for the whole catalogue."},
+                    "include_specs": {"type": "boolean", "description": "Include endpoint contracts (default false)."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 3,
+                              "description": "Maximum contracts when include_specs=true (default 3)."}}},
                 self._list_routes),
             ToolSpec(
                 "crontal_api_describe", "crontal_api.describe", Risk.READ,
@@ -490,22 +554,22 @@ class CrontalApiTools:
                 self._describe),
             ToolSpec(
                 "crontal_api_get", "crontal_api.get", Risk.READ,
-                "GET any Crontal API endpoint as the user you work for (same data and "
-                "permissions they have in the Crontal UI). JSON comes back directly; files "
+                "GET any Crontal API endpoint as the instance's AI identity with its "
+                "Crontal permissions. JSON comes back directly; files "
                 "are saved under downloads/ in your workspace, with document text included.",
-                {"type": "object", "properties": {"path": path, "query": query},
+                {"type": "object", "properties": {"path": path, "query": query, **output_options},
                  "required": ["path"]},
                 self._get),
             ToolSpec(
                 "crontal_api_call", "crontal_api.call", Risk.WRITE_EXTERNAL,
-                "POST/PUT/PATCH/DELETE a Crontal API endpoint as the user you work for. "
+                "POST/PUT/PATCH/DELETE a Crontal API endpoint as the instance's AI identity. "
                 "Send a JSON body with `json` shaped exactly as crontal_api_describe shows "
                 "(unknown fields may be rejected), or upload a workspace file as multipart "
                 "(`upload_file`, its field name in `upload_field`, plus extra `form` "
                 "fields). A 400/422 result includes the endpoint's spec as `expected`.",
                 {"type": "object", "properties": {
                     "method": {"type": "string", "enum": ["POST", "PUT", "PATCH", "DELETE"]},
-                    "path": path, "query": query,
+                    "path": path, "query": query, **output_options,
                     "json": {"type": ["object", "array"], "description": "JSON request body."},
                     "upload_file": {"type": "string",
                                     "description": "Workspace-relative file to upload."},

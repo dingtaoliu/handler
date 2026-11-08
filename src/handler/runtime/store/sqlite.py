@@ -522,6 +522,15 @@ class SQLiteCore:
             RunStep, "SELECT * FROM run_steps WHERE run_id = ? ORDER BY seq", (run_id,),
         )
 
+    async def list_llm_steps(self, run_ids: list[str]) -> list[RunStep]:
+        rows = []
+        for start in range(0, len(run_ids), 500):
+            batch = run_ids[start:start + 500]
+            rows.extend(await self._list(
+                RunStep, f"SELECT * FROM run_steps WHERE kind='llm_call' AND run_id IN "
+                f"({','.join('?' for _ in batch)}) ORDER BY run_id,seq", tuple(batch)))
+        return rows
+
     def _close_connection(self) -> None:
         if self._db is not None:
             self._db.close()

@@ -1,5 +1,6 @@
 """Runtime settings and notifications endpoints."""
 
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
@@ -7,7 +8,8 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..auth import Authenticator, Principal
-from ..instructions import build_instructions
+from ..instructions import build_instruction_components
+from ..observability.prompt_tokens import prompt_token_breakdown, render_components
 from ..memory import MemoryTools
 from ..settings import (
     MODELS, ModelName, ReasoningEffort, SettingsConflict, SettingsService,
@@ -23,7 +25,8 @@ class RollbackRequest(BaseModel):
 
 def settings_router(service: SettingsService, auth: Authenticator,
                     memory_tools: MemoryTools | None = None, *,
-                    crontal_identity: Any = None) -> APIRouter:
+                    crontal_identity: Any = None,
+                    available_tools: set[str] | Callable[[], set[str]] | None = None) -> APIRouter:
     router = APIRouter()
     user = Depends(auth.require_principal)
     admin = Depends(auth.require_admin)
@@ -55,11 +58,16 @@ def settings_router(service: SettingsService, auth: Authenticator,
         # Same speaker as a live chat run (the owner's user id), so the preview
         # matches what the harness actually receives.
         speaker = principal.user_id
-        text = await build_instructions(
+        threads, _ = await service.get("threads")
+        effective = await service.resolve_thread(threads.get(kind.value) or {})
+        components = await build_instruction_components(
             service, memory_tools or MemoryTools(service.store, service),
             speaker=speaker if kind == ThreadType.CHAT else None, thread_type=kind,
-            crontal_identity=crontal_identity)
-        return {"thread_type": kind.value, "prompt": text}
+            crontal_identity=crontal_identity,
+            available_tools=available_tools() if callable(available_tools) else available_tools,
+            harness=effective.get("harness"))
+        return {"thread_type": kind.value, "prompt": render_components(components),
+                "token_breakdown": prompt_token_breakdown(components, model=effective.get("model"))}
 
     @router.get("/api/chat/options")
     async def chat_options(thread_key: str | None = None, principal: Principal = user) -> dict:

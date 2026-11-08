@@ -19,6 +19,18 @@
 # rate that is null, yields cost_usd = None (unpriced). effective_from is the
 # date these rates were verified, not the vendor's launch date.
 prices:
+  - model: "gpt-6.1-terra"
+    effective_from: 2026-11-08
+    input_per_mtok: 1.0
+    cached_input_per_mtok: 0.05
+    cache_write_per_mtok: 1.25
+    output_per_mtok: 5.0
+    long_context:
+      above_input_tokens: 272000
+      input_per_mtok: 2.0
+      cached_input_per_mtok: 0.1
+      cache_write_per_mtok: 2.5
+      output_per_mtok: 10.0
   - model: "gpt-6.1-sol"
     effective_from: 2026-10-18
     input_per_mtok: 2.0

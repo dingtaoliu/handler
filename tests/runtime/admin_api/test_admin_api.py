@@ -169,7 +169,8 @@ async def test_usage_aggregation_and_visibility(client, world):
     alice = (await client.get("/api/usage", headers=world.h("alice"))).json()
     assert alice["totals"] == {
         "input_tokens": 110, "cached_input_tokens": 40, "output_tokens": 11,
-        "reasoning_tokens": 4, "cost_usd": 0.75, "runs": 2}
+        "reasoning_tokens": 4, "cost_usd": 0.75, "runs": 2,
+        "cache_write_tokens": 0, "priced_runs": 2, "unpriced_runs": 0}
     assert {t["thread_key"] for t in alice["by_thread"]} == {"chat:alice:c", "gmail:inbox"}
     assert [m["model"] for m in alice["by_model"]] == ["m1"]
     assert len(alice["by_day"]) == 1 and alice["by_day"][0]["runs"] == 2
@@ -184,6 +185,25 @@ async def test_usage_aggregation_and_visibility(client, world):
 
 
 # ---- tools / connections -----------------------------------------------------
+
+
+async def test_usage_models_use_request_steps_and_preserve_visibility(client, world):
+    from handler.runtime.types import RunStep, StepKind
+
+    await add_run(world.store, "chat:alice:mixed", "alice", "mixed",
+                  TokenUsage(input_tokens=130), 0.3, "main")
+    for seq, model, tokens, cost in [(1, "main", 100, .2), (2, "cheap", 30, .1)]:
+        await world.store.add_step(RunStep(
+            "mixed", seq, StepKind.LLM_CALL, model, "stream", model=model,
+            usage=TokenUsage(input_tokens=tokens), cost_usd=cost))
+    result = (await client.get("/api/usage", headers=world.h("alice"))).json()
+    assert result["totals"]["input_tokens"] == 130
+    models = {x["model"]: x for x in result["by_model"]}
+    assert models["main"]["input_tokens"] == 100
+    assert models["cheap"]["input_tokens"] == 30
+    assert sum(x["cost_usd"] for x in models.values()) == pytest.approx(.3)
+    other = (await client.get("/api/usage", headers=world.h("bob"))).json()
+    assert other["by_model"] == []
 
 async def test_tools_decisions(client, world):
     tools = {t["name"]: t for t in (await client.get("/api/tools", headers=world.h("alice"))).json()}

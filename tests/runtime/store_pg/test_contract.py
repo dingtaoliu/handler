@@ -12,6 +12,18 @@ from handler.runtime.types import (
 )
 
 
+async def test_batched_usage_steps_only_include_requested_llm_records(store, running):
+    _, run = running
+    llm = RunStep(run.id, 1, StepKind.LLM_CALL, "cheap", "stream", model="cheap",
+                  usage=TokenUsage(input_tokens=10))
+    tool = RunStep(run.id, 2, StepKind.TOOL_CALL, "read", "stream")
+    await store.add_step(llm)
+    await store.add_step(tool)
+    assert await store.list_llm_steps([]) == []
+    assert await store.list_llm_steps(["another"]) == []
+    assert await store.list_llm_steps([run.id]) == [llm]
+
+
 async def test_put_is_idempotent_without_rerouting(store, clock, spec, event):
     original = event("same", payload={"nested": [1, True, None, "你好"]})
     assert await store.put(original, spec)

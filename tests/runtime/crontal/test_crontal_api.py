@@ -218,6 +218,53 @@ async def test_files_are_saved_to_the_workspace_with_text(setup):
     assert "pipe" in result.content["text"]
 
 
+async def test_optional_projection_keeps_full_response_and_errors(setup):
+    _, tools, ctx, workspace = setup
+    result = await tools["crontal_api_get"].handler(ctx, {
+        "path": "/api/v1/rfq", "response_fields": ["rfqs.id"]})
+    assert result.content["body"] == {"rfqs": [{"id": 1}]}
+    original = json.loads((workspace / result.content["full_response_saved_to"]).read_text())
+    assert original == {"rfqs": [{"id": 1}], "q": {}}
+    error = await tools["crontal_api_call"].handler(ctx, {
+        "method": "POST", "path": "/api/v1/rfq", "json": {}, "response_fields": ["id"]})
+    assert error.is_error
+    assert "error" in error.content["body"] and "expected" in error.content
+
+
+async def test_file_download_can_defer_extraction(setup, monkeypatch):
+    from handler.runtime.gateway import crontal_api
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Extraction must not run")
+
+    monkeypatch.setattr(crontal_api.documents, "to_text", forbidden)
+    _, tools, ctx, workspace = setup
+    result = await tools["crontal_api_get"].handler(ctx, {
+        "path": "/api/v1/files/7", "include_text": False})
+    assert "text" not in result.content
+    assert (workspace / result.content["saved_to"]).read_bytes() == b"name,qty\npipe,4\n"
+
+
+async def test_output_budget_preserves_complete_projected_and_original_results(tmp_path):
+    tools = CrontalApiTools("https://crontal.test", AGENT, workspace_for=lambda _: tmp_path)
+    body = {"items": [{"text": "中" * 2000, "other": "retained"}]}
+    result = await tools._result(httpx.Response(200, json=body), "/api/v1/rfq", tmp_path,
+                                 options={"response_fields": ["items.text"], "max_output_chars": 1000})
+    assert result.content["truncated"] and len(result.content["preview"]) == 1000
+    assert json.loads((tmp_path / result.content["full_response_saved_to"]).read_text()) == body
+    assert json.loads((tmp_path / result.content["saved_to"]).read_text()) == {
+        "items": [{"text": "中" * 2000}]}
+
+
+async def test_route_search_can_include_bounded_contracts(setup):
+    fake, tools, ctx, _ = setup
+    result = await tools["crontal_api_routes"].handler(ctx, {
+        "search": "rfq", "include_specs": True, "limit": 1})
+    assert len(result.content["routes"]) == 1 and result.content["has_more"]
+    assert result.content["routes"][0]["spec"]["has_schema"]
+    assert fake.described == 1
+
+
 async def test_call_sends_json_and_uploads_files(setup):
     _, tools, ctx, workspace = setup
     patched = await tools["crontal_api_call"].handler(

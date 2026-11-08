@@ -1290,15 +1290,41 @@ function renderPromptPreview(section) {
     sel.value = promptType;
     const pre = document.createElement("pre");
     pre.className = "prompt-preview"; pre.textContent = "Loading...";
+    const accounting = document.createElement("div");
+    let request = 0;
     const load = async () => {
         promptType = sel.value;
-        try { const r = await api(API.prompt(sel.value)); pre.textContent = r.prompt; }
-        catch (e) { pre.textContent = "Could not load prompt: " + e.message; }
+        const current = ++request;
+        accounting.replaceChildren();
+        pre.textContent = "Loading...";
+        try {
+            const r = await api(API.prompt(sel.value));
+            if (current !== request) return;
+            pre.textContent = r.prompt;
+            const b = r.token_breakdown;
+            if (b) {
+                const summary = document.createElement("p");
+                summary.textContent = `${b.total_tokens.toLocaleString()} instruction tokens (${b.encoding}${b.encoding_source === "fallback" ? ", fallback encoding" : ""}). Percentages are of instructions only; tools, conversation history, current input and provider overhead are excluded. These are local counts, not billed usage.`;
+                const table = document.createElement("table");
+                const head = table.createTHead().insertRow();
+                for (const label of ["Component", "Tokens", "% of instructions"]) {
+                    const th = document.createElement("th"); th.textContent = label; head.appendChild(th);
+                }
+                const body = table.createTBody();
+                for (const c of b.components) {
+                    const row = body.insertRow();
+                    for (const value of [c.name + (c.dynamic ? " (changes per run)" : ""), c.tokens.toLocaleString(), c.percent.toFixed(2) + "%"]) {
+                        row.insertCell().textContent = value;
+                    }
+                }
+                accounting.append(summary, table);
+            }
+        } catch (e) { if (current === request) pre.textContent = "Could not load prompt: " + e.message; }
     };
     sel.addEventListener("change", load);
     const note = document.createElement("span");
     note.className = "help"; note.textContent = "Read-only: saved persona plus memory index, as the agent sees it (unsaved edits not included).";
-    box.append(title, sel, note, pre);
+    box.append(title, sel, note, accounting, pre);
     load();
 }
 actions["sett-open"] = (el) => openSection(el.dataset.name);

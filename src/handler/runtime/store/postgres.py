@@ -533,6 +533,13 @@ class PostgresCore:
             "WHERE run_id = %s ORDER BY seq", (run_id,),
         )
 
+    async def list_llm_steps(self, run_ids: list[str]) -> list[RunStep]:
+        if not run_ids:
+            return []
+        return await self._list(
+            RunStep, f"SELECT {_columns(RunStep)} FROM run_steps "
+            "WHERE kind='llm_call' AND run_id=ANY(%s) ORDER BY run_id,seq", (run_ids,))
+
     async def close(self) -> None:
         if self._closed:
             return

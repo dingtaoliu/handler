@@ -15,7 +15,7 @@ import asyncio
 import json
 from typing import Any
 
-from ...types import utcnow
+from ...types import new_id, utcnow
 from .config import Mailbox, mailbox_from_row
 
 SCHEMA = """
@@ -100,6 +100,32 @@ CREATE TABLE IF NOT EXISTS mail_drafts (
     created_by TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mail_body_reads (
+    thread_key TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    start_char INTEGER NOT NULL,
+    end_char INTEGER NOT NULL,
+    PRIMARY KEY (thread_key, run_id, message_id, body_sha256, start_char, end_char)
+);
+CREATE TABLE IF NOT EXISTS mail_body_summaries (
+    thread_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    source_run_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (thread_key, message_id)
+);
+CREATE TABLE IF NOT EXISTS mail_full_read_receipts (
+    thread_key TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    receipt TEXT NOT NULL,
+    PRIMARY KEY (thread_key, run_id, message_id, body_sha256)
 );
 """
 
@@ -210,6 +236,54 @@ class MailStore:
                 for query, params in statements:
                     await conn.execute(query.replace("?", "%s"), params)
 
+    async def record_body_read(self, thread_key: str, run_id: str, message_id: str,
+                               digest: str, start: int, end: int) -> None:
+        await self._execute(
+            "INSERT INTO mail_body_reads VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+            (thread_key, run_id, message_id, digest, start, end))
+
+    async def body_read_in_full(self, thread_key: str, run_id: str, message_id: str,
+                                digest: str, length: int) -> bool:
+        rows = await self._query(
+            "SELECT start_char,end_char FROM mail_body_reads WHERE thread_key=? AND "
+            "run_id=? AND message_id=? AND body_sha256=? ORDER BY start_char,end_char",
+            (thread_key, run_id, message_id, digest))
+        covered = 0
+        for row in rows:
+            if row["start_char"] > covered:
+                return False
+            covered = max(covered, row["end_char"])
+        return bool(rows) and covered >= length
+
+    async def save_body_summary(self, thread_key: str, message_id: str, digest: str,
+                                summary: str, run_id: str) -> None:
+        await self._execute(
+            "INSERT INTO mail_body_summaries VALUES (?,?,?,?,?,?) ON CONFLICT "
+            "(thread_key,message_id) DO UPDATE SET body_sha256=excluded.body_sha256, "
+            "summary=excluded.summary,source_run_id=excluded.source_run_id, "
+            "updated_at=excluded.updated_at",
+            (thread_key, message_id, digest, summary, run_id, _now()))
+
+    async def full_read_receipt(self, thread_key: str, run_id: str, message_id: str,
+                                digest: str, *, create: bool = False) -> str | None:
+        if create:
+            await self._execute(
+                "INSERT INTO mail_full_read_receipts VALUES (?,?,?,?,?) "
+                "ON CONFLICT DO NOTHING",
+                (thread_key, run_id, message_id, digest, new_id("mailread")))
+        rows = await self._query(
+            "SELECT receipt FROM mail_full_read_receipts WHERE thread_key=? AND "
+            "run_id=? AND message_id=? AND body_sha256=?",
+            (thread_key, run_id, message_id, digest))
+        return rows[0]["receipt"] if rows else None
+
+    async def get_body_summary(self, thread_key: str, message_id: str,
+                               digest: str) -> dict[str, Any] | None:
+        rows = await self._query(
+            "SELECT summary,source_run_id FROM mail_body_summaries WHERE thread_key=? "
+            "AND message_id=? AND body_sha256=?", (thread_key, message_id, digest))
+        return rows[0] if rows else None
+
     # ── accounts ───────────────────────────────────────────────────────────
 
     async def put_mailbox(self, mailbox: Mailbox) -> None:
@@ -248,7 +322,11 @@ class MailStore:
                 else (status, synced, now, mailbox_id))
 
     async def delete_mailbox(self, mailbox_id: str) -> None:
-        await self._script([(f"DELETE FROM {table} WHERE account_id = ?", (mailbox_id,))
+        await self._script([(f"DELETE FROM {table} WHERE message_id IN "
+                             "(SELECT id FROM mail_messages WHERE account_id=?)", (mailbox_id,))
+                            for table in ("mail_body_reads", "mail_body_summaries",
+                                          "mail_full_read_receipts")]
+                           + [(f"DELETE FROM {table} WHERE account_id = ?", (mailbox_id,))
                             for table in ("mail_messages", "mail_refs", "mail_conversations",
                                           "mail_folders", "mail_drafts")]
                            + [("DELETE FROM mail_accounts WHERE id = ?", (mailbox_id,))])

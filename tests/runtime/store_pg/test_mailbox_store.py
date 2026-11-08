@@ -60,3 +60,21 @@ async def test_mail_store_round_trip(domain_store):
     await store.delete_mailbox("mbx_1")
     assert await store.get_mailbox("mbx_1") is None
     assert await store.search(["mbx_1"]) == []
+
+
+async def test_full_read_coverage_receipt_and_summary_on_each_backend(domain_store):
+    store = MailStore(domain_store)
+    args = ("chat:user:one", "run1", "message1", "digest1")
+    await store.record_body_read(*args, 0, 4)
+    assert not await store.body_read_in_full(*args, 10)
+    await store.record_body_read(*args, 5, 10)
+    assert not await store.body_read_in_full(*args, 10)  # gap still unread
+    await store.record_body_read(*args, 4, 5)
+    assert await store.body_read_in_full(*args, 10)
+    receipt = await store.full_read_receipt(*args, create=True)
+    assert receipt and receipt == await store.full_read_receipt(*args)
+    await store.save_body_summary(args[0], args[2], args[3], "修订：316L，10吨，12月交付", args[1])
+    saved = await MailStore(domain_store).get_body_summary(args[0], args[2], args[3])
+    assert saved["summary"] == "修订：316L，10吨，12月交付"
+    assert await store.get_body_summary("another-thread", args[2], args[3]) is None
+    assert await store.get_body_summary(args[0], args[2], "changed-digest") is None

@@ -286,11 +286,15 @@ async def test_relevant_memory_and_prompt(store, crontal_settings):
     prompt = await build_instructions(crontal_settings, memory, speaker=None,
                                       thread_type=ThreadType.CRONTAL,
                                       thread_key="crontal:rfq:12")
-    for fragment in ("Kinds of topics to keep", "inquiry (`inquiries/…`)", "**Status:**",
+    for fragment in ("Kinds of topics to keep", "inquiry (`inquiries/…`)", "call memory_kinds",
                      "Never save raw email text", "## Index", "## Linked to this thread",
                      "Status: quoting", "unrelated: U"):
         assert fragment in prompt, fragment
     assert "secret stuff" not in prompt
+    assert "**Status:**" not in prompt  # templates are retrieved only when needed
+    kinds = (await invoke(memory, "memory_kinds", CHAT, kind="inquiry")).content["kinds"]
+    assert len(kinds) == 1 and "**Status:**" in kinds[0]["template"]
+    assert "**Status:**" in await memory.kinds_text()  # compatibility for other callers
     # Without kinds (core default) the prompt still has the rules but no kinds.
     bare = await build_instructions(SettingsService(store), MemoryTools(store), speaker=None,
                                     thread_type=ThreadType.CHAT)
@@ -393,3 +397,26 @@ async def test_admin_memory_api_preserves_metadata(store, tmp_path):
         found = (await client.get("/api/memory", params={"link": "domain:A.com"})).json()
         assert [t["name"] for t in found] == ["inquiries/a"]
         assert (await client.get("/api/memory", params={"kind": "company"})).json() == []
+
+
+async def test_prompt_keeps_static_prefix_when_memory_changes(store, crontal_settings):
+    from handler.runtime.instructions import build_instruction_components
+    from handler.runtime.observability.prompt_tokens import render_components
+
+    persona = {"system": "Custom business rules remain verbatim."}
+    await crontal_settings.put("persona", persona, "test", None)
+    memory = MemoryTools(store, crontal_settings)
+    before = await build_instruction_components(
+        crontal_settings, memory, speaker="Alice", thread_type=ThreadType.CHAT,
+        available_tools={"memory_read", "memory_kinds"})
+    await store.put_topic(MemoryTopic("policies", "New preference", "Use metric."), None)
+    after = await build_instruction_components(
+        crontal_settings, memory, speaker="Bob", thread_type=ThreadType.CHAT,
+        available_tools={"memory_read", "memory_kinds"})
+    assert [c for c in before if not c.dynamic] == [c for c in after if not c.dynamic]
+    assert render_components(after).startswith(persona["system"])
+    assert "gmail_tool_guidance" not in {c.name for c in after}
+    assert "crontal_tool_guidance" not in {c.name for c in after}
+    first_dynamic = next(i for i, c in enumerate(after) if c.dynamic)
+    assert all(c.dynamic for c in after[first_dynamic:])
+    assert "New preference" in render_components(after) and "Bob" in render_components(after)

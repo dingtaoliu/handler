@@ -44,6 +44,7 @@ from .store.base import Store
 from .uploads import UploadedFile, UploadStore
 from .types import (
     Approval,
+    ApprovalStatus,
     Event,
     Lease,
     Message,
@@ -73,6 +74,7 @@ class RunConfig:
     reasoning_effort: str | None = None
     timeout_seconds: float = 900.0
     harness_env: dict[str, str] = field(default_factory=dict)
+    available_tools: frozenset[str] | None = None
 
     @property
     def workspaces_dir(self) -> Path:
@@ -341,6 +343,8 @@ class RunPlan:
     reasoning_effort: str | None
     timeout_seconds: float
     max_attempts: int
+    fresh_session: bool = False
+    bounded_task_models: dict[str, str] = field(default_factory=dict)
 
 
 class _RunRecorder(StepRecorder):
@@ -523,11 +527,44 @@ class RunExecutor:
                    repair: bool = False) -> None:
         harness = self.harnesses.get(thread.harness)
         plan = await self._plan(thread, events)
+        if plan.model is None and harness is not None and hasattr(harness, "defaults"):
+            plan.model = (await harness.defaults()).get("model")
+        run.model = plan.model or run.model
         recorder = _RunRecorder(self.store, run.id, model=run.model, prices=self.prices,
                                 raw_sink=self.raw_sink)
         transcript = await self._unsaved(
             thread.key, event_messages(thread.key, run.id, events, self.uploads))
         inputs = list(transcript)  # the turn's own messages, kept even if the run fails
+        receipt_events = []
+        for event in events:
+            if (event.type != "approval.resolved" or event.source != "gateway"
+                    or event.payload.get("resume_model") is not False
+                    or event.payload.get("status") != "executed"):
+                continue
+            approval = await self.store.get_approval(event.payload.get("approval_id", ""))
+            if (approval and approval.thread_key == thread.key
+                    and approval.status == ApprovalStatus.EXECUTED
+                    and (approval.result or {}).get("handler_receipt_only") is True):
+                receipt_events.append(event)
+        if receipt_events and len(receipt_events) == len(events):
+            # These flags are set by the gateway only after an explicit terminal
+            # continuation contract, not inferred from the email/user's text.
+            receipt = "\n".join(
+                f"Approved {e.payload.get('tool', 'action')} completed. "
+                f"{e.payload.get('result_preview', '')}" for e in receipt_events)
+            transcript.append(Message(thread.key, Role.ASSISTANT,
+                                      [{"type": "text", "text": receipt}], run_id=run.id,
+                                      raw={"deterministic_receipt": True}))
+            run.status, run.finished_at, run.cost_usd = RunStatus.COMPLETED, utcnow(), 0.0
+            if not (await self.store.add_messages(lease, transcript)
+                    and await self.store.finish_run(lease, run)
+                    and await self.store.complete(lease, run.id, run.trigger_event_ids)):
+                raise LeaseLost(thread.key)
+            self._publish(thread.key, run.id, "run_finished",
+                          {"status": "completed", "text": receipt, "cost_usd": 0.0,
+                           "usage": run.usage.__dict__, "deterministic_receipt": True})
+            await self._publish_task(thread, run.id)
+            return
         slug = thread_slug(thread.key)
         mcp_token: str | None = None
         try:
@@ -564,13 +601,15 @@ class RunExecutor:
                 prompt=prompt,
                 images=images,
                 instructions=plan.instructions,
-                session_id=thread.session_id or None,
+                session_id=None if plan.fresh_session else thread.session_id or None,
                 model=plan.model,
                 reasoning_effort=plan.reasoning_effort,
                 mcp_servers=mcp_servers,
                 env=dict(self.config.harness_env),
                 limits=RunLimits(timeout_seconds=plan.timeout_seconds),
-                repair_session=repair,
+                repair_session=repair and not plan.fresh_session,
+                fresh_session=plan.fresh_session,
+                bounded_task_models=plan.bounded_task_models,
             )
             try:
                 final_text = await self._stream(
@@ -662,9 +701,25 @@ class RunExecutor:
         req: RunRequest, recorder: _RunRecorder, transcript: list[Message],
     ) -> str:
         input_count = len(transcript)
+        if req.session_id:
+            # Receipts bypassed the model; carry them into its next real turn.
+            # Stop at the latest ordinary assistant response to avoid replaying
+            # receipts the model has already consumed. No raw tool history here.
+            receipts = []
+            for message in reversed(await self.store.list_messages(thread.key, limit=100,
+                                                                    newest=True)):
+                if message.role == Role.ASSISTANT:
+                    if not (message.raw or {}).get("deterministic_receipt"):
+                        break
+                    receipts.append("\n".join(str(b.get("text", "")) for b in message.blocks))
+            if receipts:
+                req = replace(req, prompt="Completed approval receipts since your last response:\n"
+                              + "\n".join(reversed(receipts))
+                              + "\n\nCurrent turn:\n" + req.prompt)
         # This turn's own messages may already be saved by a failed attempt.
         current = set(run.trigger_event_ids)
-        if not req.session_id and await self.store.list_messages(thread.key, limit=1):
+        if (not req.session_id and not req.fresh_session
+                and await self.store.list_messages(thread.key, limit=1)):
             # History without a harness session (e.g. imported from another
             # system): give the fresh session the thread's record as context.
             recap = await self._recap(
@@ -798,19 +853,36 @@ class RunExecutor:
             return plan
         threads, _ = await self.settings.get("threads")
         per_type = threads.get(str(thread.type), {}) or {}
-        plan.model = thread.model or per_type.get("model")
+        resolved = await self.settings.resolve_thread(
+            per_type, harness=thread.harness, thread_model=thread.model)
+        plan.model = resolved.get("model")
         plan.reasoning_effort = per_type.get("reasoning_effort") or plan.reasoning_effort
         plan.model = override_model or plan.model
         plan.reasoning_effort = override_effort or plan.reasoning_effort
         limits, _ = await self.settings.get("limits")
         plan.timeout_seconds = float(limits.get("run_timeout_seconds", plan.timeout_seconds))
         plan.max_attempts = int(limits.get("max_attempts", plan.max_attempts))
+        efficiency, _ = await self.settings.get("efficiency")
+        plan.fresh_session = bool(efficiency["fresh_automation_sessions"]
+                                  and str(thread.type) == "automation"
+                                  and any(e.type == "automation.fired" for e in events or [])
+                                  and all(e.type == "automation.fired" for e in events or []))
+        if plan.fresh_session and await self.store.list_approvals(
+                ApprovalStatus.PENDING, limit=1, thread_key=thread.key):
+            plan.fresh_session = False  # pending work still owns the current session
+        if efficiency["bounded_model_tasks"] and thread.harness == "openai_agents":
+            plan.bounded_task_models = {
+                "classify": efficiency["classification_model"],
+                "extract": efficiency["drafting_model"],
+                "draft": efficiency["drafting_model"],
+            }
         if self.memory_tools is not None:
             speaker = thread.owner_user_id if str(thread.type) == "chat" else None
             built = await build_instructions(self.settings, self.memory_tools,
                                              speaker=speaker, thread_type=thread.type,
                                              crontal_identity=self.crontal_identity,
-                                             thread_key=thread.key, events=events)
+                                             thread_key=thread.key, events=events,
+                                             available_tools=self.config.available_tools, harness=thread.harness)
             plan.instructions = "\n\n".join(p for p in (built, self.config.instructions) if p)
         return plan
 

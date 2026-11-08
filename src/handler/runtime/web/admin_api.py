@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from ..memory import MemoryTools, normalize_links
 from ..scheduler import Scheduler, parse_spec
 from ..settings import resolve_harness
 from ..store.base import Store
-from ..types import Event, Lane, MemoryTopic, Run, Schedule, ThreadSpec, ThreadType, TokenUsage
+from ..types import Event, Lane, MemoryTopic, Run, RunStep, Schedule, ThreadSpec, ThreadType, TokenUsage
 from ..uploads import (
     MAX_FILE_BYTES,
     MAX_FILES_PER_REQUEST,
@@ -95,7 +96,8 @@ def _tail(path: Path, max_lines: int) -> list[str]:
     return lines[-max_lines:]
 
 
-def aggregate_usage(runs: list[Run], thread_of: dict[str, str], days: int) -> dict[str, Any]:
+def aggregate_usage(runs: list[Run], thread_of: dict[str, str], days: int,
+                    llm_steps: list[RunStep] | None = None) -> dict[str, Any]:
     """Totals and breakdowns by day, model and thread for already filtered runs."""
 
     def bucket() -> dict[str, Any]:
@@ -111,20 +113,38 @@ def aggregate_usage(runs: list[Run], thread_of: dict[str, str], days: int) -> di
     def render(b: dict[str, Any], **extra: Any) -> dict[str, Any]:
         u: TokenUsage = b["usage"]
         return {**extra, "input_tokens": u.input_tokens, "cached_input_tokens": u.cached_input_tokens,
+                "cache_write_tokens": u.cache_write_tokens,
                 "output_tokens": u.output_tokens, "reasoning_tokens": u.reasoning_tokens,
-                "cost_usd": b["cost"] if b["priced"] else None, "runs": b["runs"]}
+                "cost_usd": b["cost"] if b["priced"] else None, "runs": b["runs"],
+                "priced_runs": b["priced"], "unpriced_runs": b["runs"] - b["priced"]}
 
     total, by_day, by_model, by_thread = bucket(), defaultdict(bucket), defaultdict(bucket), defaultdict(bucket)
+    requests = defaultdict(list)
+    for step in llm_steps or []:
+        requests[step.run_id].append(step)
     for run in runs:
         add(total, run)
         add(by_day[run.started_at.astimezone(timezone.utc).date().isoformat()], run)
-        add(by_model[run.model or "unknown"], run)
+        if requests[run.id]:
+            models = defaultdict(list)
+            for step in requests[run.id]:
+                models[step.model or step.name or "unknown"].append(step)
+            for model, steps in models.items():
+                usage = TokenUsage()
+                for step in steps:
+                    usage += step.usage or TokenUsage()
+                cost = (sum(step.cost_usd for step in steps)
+                        if all(step.cost_usd is not None for step in steps) else None)
+                add(by_model[model], replace(run, model=model, usage=usage, cost_usd=cost))
+        else:
+            add(by_model[run.model or "unknown"], run)
         add(by_thread[run.thread_key], run)
     top = sorted(by_thread.items(),
                  key=lambda kv: (kv[1]["usage"].input_tokens + kv[1]["usage"].output_tokens),
                  reverse=True)[:50]
     return {
         "days": days,
+        "model_breakdown_basis": "request_steps_when_available_else_run",
         "totals": render(total),
         "by_day": [render(b, day=d) for d, b in sorted(by_day.items())],
         "by_model": [render(b, model=m) for m, b in sorted(
@@ -319,7 +339,8 @@ def admin_router(
             for run in await store.list_runs(thread.key, limit=RUN_SCAN_LIMIT):
                 if run.started_at >= since:
                     runs.append(run)
-        return aggregate_usage(runs, {t.key: str(t.type) for t in threads}, days)
+        llm_steps = await store.list_llm_steps([r.id for r in runs])
+        return aggregate_usage(runs, {t.key: str(t.type) for t in threads}, days, llm_steps)
 
     # ---- tools -----------------------------------------------------------
 

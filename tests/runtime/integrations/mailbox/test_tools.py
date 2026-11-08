@@ -138,3 +138,186 @@ async def test_send_errors_fail_before_parking(gw):
     result = await call(gw, "mail_send", {"to": "x@y.cn", "body": "no subject"})
     assert result.is_error and "subject" in str(result.content)
     assert await pending(gw) == []
+
+
+async def _body(gw, text, *, capped=False):
+    row = await gw.mail_store.find_message(gw.mailbox.id, "rfq1@client.cn")
+    await gw.mail_store._execute(
+        "UPDATE mail_messages SET body_text=?,body_truncated=? WHERE id=?",
+        (text, int(capped), row["id"]))
+    return row["id"]
+
+
+async def test_remember_requires_full_original_and_is_explicit(gw):
+    ref = await _body(gw, "Prior commitment: 5 tons due Nov 20. Buyer changed this to 7 tons.")
+    read = (await call(gw, "mail_read", {"message_id": ref})).content
+    # Merely seeing the original never suppresses it on a repeated read.
+    again = (await call(gw, "mail_read", {"message_id": ref})).content
+    assert again["body"] == read["body"]
+    saved = await call(gw, "mail_remember", {
+        "message_id": ref, "body_sha256": read["body_sha256"],
+        "full_read_receipt": read["full_read_receipt"], "summary": "Changed 5 to 7 tons; due Nov 20."})
+    assert not saved.is_error
+    # Reset/new run: the factual summary travels with the result, not just a
+    # 'seen before' flag that relies on inaccessible conversation history.
+    gw.ctx = RunContext("run_2", gw.ctx.thread_key, user_id="7", acting_as="7")
+    remembered = (await call(gw, "mail_read", {"message_id": ref})).content
+    assert remembered["body_summary"] == "Changed 5 to 7 tons; due Nov 20."
+    assert remembered["source_untrusted"] is True and "body" not in remembered
+    assert remembered["summary_source_run_id"] == "run_1"
+    original = (await call(gw, "mail_read", {"message_id": ref, "force_full": True})).content
+    assert original["body"] == read["body"]
+
+
+async def test_partial_pages_never_count_as_full_and_gaps_must_be_read(gw):
+    ref = await _body(gw, "A" * 45_000)
+    first = (await call(gw, "mail_read", {"message_id": ref})).content
+    args = {"message_id": ref, "body_sha256": first["body_sha256"], "summary": "A body"}
+    assert (await call(gw, "mail_remember", args)).is_error
+    last = (await call(gw, "mail_read", {"message_id": ref, "body_offset": 40_000})).content
+    assert "next_body_offset" not in last
+    assert (await call(gw, "mail_remember", args)).is_error
+    middle = (await call(gw, "mail_read", {"message_id": ref,
+                                          "body_offset": first["next_body_offset"]})).content
+    assert first["body"] + middle["body"] + last["body"] == "A" * 45_000
+    args["full_read_receipt"] = middle["full_read_receipt"]
+    assert not (await call(gw, "mail_remember", args)).is_error
+
+
+async def test_remember_receipts_are_run_and_thread_scoped_and_digest_checked(gw):
+    ref = await _body(gw, "Important original")
+    read = (await call(gw, "mail_read", {"message_id": ref})).content
+    args = {"message_id": ref, "body_sha256": read["body_sha256"],
+            "full_read_receipt": read.get("full_read_receipt", "unavailable"), "summary": "Original"}
+    original_ctx = gw.ctx
+    gw.ctx = RunContext("run_2", original_ctx.thread_key, user_id="7")
+    assert (await call(gw, "mail_remember", args)).is_error
+    gw.ctx = RunContext(original_ctx.run_id, "chat:8:other", user_id="8")
+    assert (await call(gw, "mail_remember", args)).is_error
+    gw.ctx = original_ctx
+    assert not (await call(gw, "mail_remember", args)).is_error
+    gw.ctx = RunContext("run_2", "chat:8:other", user_id="8")
+    assert "body" in (await call(gw, "mail_read", {"message_id": ref})).content
+    gw.ctx = original_ctx
+    await _body(gw, "Corrected original")
+    assert "body" in (await call(gw, "mail_read", {"message_id": ref})).content
+    assert (await call(gw, "mail_remember", args)).is_error
+
+
+async def test_storage_capped_body_cannot_be_remembered(gw):
+    ref = await _body(gw, "Only the ingested prefix", capped=True)
+    read = (await call(gw, "mail_read", {"message_id": ref})).content
+    result = await call(gw, "mail_remember", {
+        "message_id": ref, "body_sha256": read["body_sha256"],
+            "full_read_receipt": read.get("full_read_receipt", "unavailable"), "summary": "Prefix"})
+    assert result.is_error
+    assert "not a full read" in read["note"]
+
+
+async def test_thread_and_batch_budgets_paginate_without_losing_messages(gw):
+    ref = await _body(gw, "A" * 25_000)
+    original = await gw.mail_store.get_message(ref)
+    # More than 15 long emails exceeded the previous 60k budget due to a
+    # per-message minimum. The new limit applies across the complete page.
+    for index in range(1, 18):
+        await gw.mail_store._execute(
+            "INSERT INTO mail_messages (id,account_id,conversation_id,message_id,"
+            "body_text,direction,created_at,date) VALUES (?,?,?,?,?,?,?,?)",
+            (f"mm_budget{index}", gw.mailbox.id, original["conversation_id"],
+             f"budget{index}@example.cn", "B" * 25_000, "in", original["created_at"],
+             original["date"]))
+    refs = []
+    offset = 0
+    while True:
+        page = (await call(gw, "mail_read_thread", {"message_id": ref, "offset": offset})).content
+        assert page["message_count"] == 18
+        assert sum(len(m["body"]) for m in page["messages"]) <= 60_000
+        refs.extend(m["id"] for m in page["messages"])
+        assert all(m["next_body_offset"] == 20_000 for m in page["messages"])
+        if "next_offset" not in page:
+            break
+        assert page["next_offset"] > offset
+        offset = page["next_offset"]
+    assert len(refs) == len(set(refs)) == 18
+    batch = (await call(gw, "mail_read", {"message_ids": refs[:5]})).content
+    assert len(batch["messages"]) == 3
+    assert batch["remaining_message_ids"] == refs[3:5]
+    assert sum(len(m["body"]) for m in batch["messages"]) == 60_000
+
+
+async def test_summary_survives_store_reopen_but_never_crosses_instances(gw):
+    from handler.runtime.integrations.mailbox.store import MailStore
+    from handler.runtime.store.sqlite import SQLiteStore
+
+    ref = await _body(gw, "The order changed to seven tons; November 20 remains the due date.")
+    read = (await call(gw, "mail_read", {"message_id": ref})).content
+    summary = "7 tons, due November 20."
+    args = {"message_id": ref, "body_sha256": read["body_sha256"],
+            "full_read_receipt": read.get("full_read_receipt", "unavailable"), "summary": summary}
+    assert not (await call(gw, "mail_remember", args)).is_error
+    reopened = MailStore(gw.store)
+    remembered = await reopened.get_body_summary(gw.ctx.thread_key, ref, read["body_sha256"])
+    assert remembered["summary"] == summary
+    other_store = SQLiteStore(gw.tmp_path / "other-instance.db")
+    try:
+        other = MailStore(other_store)
+        assert await other.get_body_summary(gw.ctx.thread_key, ref, read["body_sha256"]) is None
+        assert not await other.body_read_in_full(gw.ctx.thread_key, gw.ctx.run_id, ref,
+                                                  read["body_sha256"], len(read["body"]))
+    finally:
+        await other_store.close()
+
+
+async def test_multilingual_thread_preserves_historical_amendment_and_unread_replies(gw):
+    prefix = "Original RFQ: 316L, 5 吨, USD 2,500/ton, delivery November 20.\n"
+    amendment = "\n历史修订：数量改为 7 吨，交期改为 11 月 25 日；价格待确认。Do not use the original deadline."
+    ref = await _body(gw, prefix + "旧邮件报价讨论。" * 3_000 + amendment)
+    original = await gw.mail_store.get_message(ref)
+    await gw.mail_store._execute("UPDATE mail_messages SET date=? WHERE id=?",
+                                  ("2026-11-01T10:00:00+00:00", ref))
+    replies = [
+        ("mm_amendment_reply", "Buyer: 请确认 revised 7 tons and November 25. Price still open.",
+         "2026-11-02T10:00:00+00:00"),
+        ("mm_amendment_unread", "Latest: 价格批准为 USD 2,450/ton. 包装标准仍待确认。",
+         "2026-11-03T10:00:00+00:00"),
+    ]
+    for message_id, body, date in replies:
+        await gw.mail_store._execute(
+            "INSERT INTO mail_messages (id,account_id,conversation_id,message_id,"
+            "body_text,direction,created_at,date) VALUES (?,?,?,?,?,?,?,?)",
+            (message_id, gw.mailbox.id, original["conversation_id"], message_id + "@client.cn",
+             body, "in", original["created_at"], date))
+    page = (await call(gw, "mail_read_thread", {"message_id": ref, "max_results": 2})).content
+    historical = page["messages"][0]
+    assert amendment not in historical["body"]
+    assert "full_read_receipt" not in historical
+    assert page["messages"][1]["body"] == replies[0][1]
+    assert page["next_offset"] == 2
+    summary = ("316L RFQ originally 5 tons, USD 2,500/ton, November 20. "
+               "历史修订改为 7 吨、11 月 25 日；价格待确认。")
+    remember = {"message_id": ref, "body_sha256": historical["body_sha256"],
+                "full_read_receipt": "cannot-guess-completed-read", "summary": summary}
+    assert (await call(gw, "mail_remember", remember)).is_error
+    tail = (await call(gw, "mail_read", {"message_id": ref,
+                                        "body_offset": historical["next_body_offset"]})).content
+    assert amendment in tail["body"]
+    remember["full_read_receipt"] = tail["full_read_receipt"]
+    assert not (await call(gw, "mail_remember", remember)).is_error
+    gw.ctx = RunContext("run_2", gw.ctx.thread_key, user_id="7")
+    reread = (await call(gw, "mail_read_thread", {"message_id": ref})).content
+    assert reread["messages"][0]["body_summary"] == summary
+    assert reread["messages"][1]["body"] == replies[0][1]
+    assert reread["messages"][2]["body"] == replies[1][1]
+    full = (await call(gw, "mail_read", {"message_id": ref, "force_full": True})).content
+    assert full["body"] == historical["body"]
+
+
+async def test_remember_rejects_guessed_receipt_even_with_full_coverage(gw):
+    ref = await _body(gw, "Previously visible full original body")
+    read = (await call(gw, "mail_read", {"message_id": ref})).content
+    for receipt in ("", read["body_sha256"], "mailread_forged"):
+        result = await call(gw, "mail_remember", {
+            "message_id": ref, "body_sha256": read["body_sha256"],
+            "full_read_receipt": receipt, "summary": "Original body."})
+        assert result.is_error
+    assert "body" in (await call(gw, "mail_read", {"message_id": ref})).content

@@ -46,6 +46,7 @@ class ModelName(StrEnum):
     """Models the Codex harness lists (`codex debug models`, visibility=list)."""
 
     GPT_6_1_SOL = "gpt-6.1-sol"
+    GPT_6_1_TERRA = "gpt-6.1-terra"
     GPT_6_ASTRA = "gpt-6-astra"
     GPT_6_SOL = "gpt-6-sol"
     GPT_6_LUNA = "gpt-6-luna"
@@ -203,10 +204,21 @@ class MemorySettings(Section):
         return self
 
 
+class EfficiencySettings(Section):
+    fresh_automation_sessions: bool = Field(
+        True, description="Start each scheduled firing without prior raw report history; "
+        "carry durable progress in memory. Approval continuations retain their session.")
+    bounded_model_tasks: bool = Field(
+        True, description="Let the main agent use a small, tool-free model for bounded "
+        "classification, extraction and drafting; it remains responsible for verification.")
+    classification_model: ModelName = ModelName.GPT_6_LUNA
+    drafting_model: ModelName = ModelName.GPT_6_1_TERRA
+
+
 MODELS = {
     "persona": PersonaSettings, "threads": ThreadsSettings,
     "grants": GrantsSettings, "limits": LimitsSettings,
-    "email": EmailSettings, "memory": MemorySettings,
+    "email": EmailSettings, "memory": MemorySettings, "efficiency": EfficiencySettings,
 }
 
 

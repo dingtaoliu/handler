@@ -74,6 +74,8 @@ class RunRequest:
     # The thread's previous run never finished (worker died or lost its lease):
     # the harness should repair its session before sending this turn.
     repair_session: bool = False
+    fresh_session: bool = False  # deliberate rotation; never replay old raw transcript
+    bounded_task_models: dict[str, str] = field(default_factory=dict)
 
 
 class HarnessError(Exception):

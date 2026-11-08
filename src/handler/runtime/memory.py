@@ -212,18 +212,21 @@ class MemoryTools:
                          "by prefix, kind, link or text.)")
         return "\n".join(lines)[:max(0, cap)]
 
-    async def kinds_text(self) -> str:
+    async def kinds_text(self, *, include_templates: bool = True) -> str:
         kinds = (await self.config())["kinds"]
         if not kinds:
             return ""
         parts = ["Kinds of topics to keep (pass `kind` to memory_save; name each "
-                 "<prefix><short-slug>, one topic per subject, and follow the template):"]
+                 "<prefix><short-slug>, one topic per subject, and follow the template):"
+                 if include_templates else
+                 "Kinds of topics to keep (name <prefix><short-slug>, one per subject; "
+                 "call memory_kinds for the template before creating a topic):"]
         for kind in kinds:
             head = f"- {kind['name']} (`{kind['prefix']}…`)"
             if kind.get("description"):
                 head += f": {kind['description']}"
             parts.append(head)
-            if kind.get("template"):
+            if include_templates and kind.get("template"):
                 template = "\n".join("    " + line for line in kind["template"].strip().splitlines())
                 parts.append("  Template:\n" + template)
         parts.append("Topics without a kind are general: lasting preferences, policies, "
@@ -398,6 +401,12 @@ class MemoryTools:
         deleted = await self.store.delete_topic(self._name(args["name"]))
         return ToolResult({"deleted": deleted})
 
+    async def _kinds(self, ctx: RunContext, args: dict) -> ToolResult:
+        kinds = (await self.config())["kinds"]
+        if args.get("kind"):
+            kinds = [kind for kind in kinds if kind["name"] == args["kind"]]
+        return ToolResult({"kinds": kinds})
+
     def tools(self) -> list[ToolSpec]:
         name = {"type": "string", "description": "Topic name, e.g. 'people/danny' or "
                 "'suppliers/acme'. Lowercase letters, digits, '/', '_', '-'."}
@@ -417,6 +426,10 @@ class MemoryTools:
                     "additionalProperties": False}
 
         return [
+            ToolSpec("memory_kinds", "memory.kinds", Risk.READ,
+                     "Read memory kind descriptions, name prefixes and templates before creating a topic.",
+                     obj({"kind": {"type": "string", "description": "Optional kind name."}}, []),
+                     self._kinds),
             ToolSpec("memory_list", "memory.list", Risk.READ,
                      "List shared memory topics as 'name: description' (the first "
                      f"{LIST_LIMIT} by name; memory_search for more).",

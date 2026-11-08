@@ -31,7 +31,8 @@ PENDING_MESSAGE = (
 
 def result_text(result: ToolResult) -> str:
     content = result.content
-    return content if isinstance(content, str) else json.dumps(content, default=str)
+    return content if isinstance(content, str) else json.dumps(
+        content, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def _digest(args: dict[str, Any]) -> str:
@@ -252,6 +253,8 @@ class Gateway:
             result = await self._execute(ctx, spec, approval.args, Decision.ASK, approval.id)
         final = ApprovalStatus.FAILED if result.is_error else ApprovalStatus.EXECUTED
         stored = {"content": result.content, "is_error": result.is_error}
+        if (approval.result or {}).get("handler_receipt_only") is True:
+            stored["handler_receipt_only"] = True
         await self._store.transition_approval(
             approval_id, ApprovalStatus.APPROVED, final, result=stored
         )
@@ -322,6 +325,8 @@ class Gateway:
                 "approval_id": approval.id, "tool": approval.tool,
                 "action": approval.action, "status": approval.status.value,
                 "decided_by": decided_by, "result_preview": preview[:500],
+                "resume_model": not (approval.status == ApprovalStatus.EXECUTED
+                                     and (approval.result or {}).get("handler_receipt_only") is True),
             },
             idempotency_key=f"approval:{approval.id}:resolved",
             thread_key=approval.thread_key, received_at=self._clock(),

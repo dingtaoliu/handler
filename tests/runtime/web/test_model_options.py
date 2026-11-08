@@ -124,6 +124,12 @@ async def test_prompt_endpoint(store, user_token):
         r = await c.get("/api/settings/prompt", params={"thread_type": "chat"})
         assert r.status_code == 200 and r.json()["thread_type"] == "chat"
         text = r.json()["prompt"]
+        breakdown = r.json()["token_breakdown"]
+        assert breakdown["denominator"] == "rendered_instructions"
+        assert breakdown["total_tokens"] == sum(c["tokens"] for c in breakdown["components"])
+        assert abs(sum(c["percent"] for c in breakdown["components"]) - 100) < 0.1
+        assert "conversation_history" in breakdown["excludes"]
+        assert [c["name"] for c in breakdown["components"]][:2] == ["persona.system", "persona.persona"]
         assert "SYS-TEXT" in text and "PERSONA-TEXT" in text
         assert "You are talking with u1" in text and "Reply to the user." in text
         r = await c.get("/api/settings/prompt", params={"thread_type": "automation"})
@@ -271,3 +277,27 @@ async def test_no_override_keeps_existing_resolution(store, tmp_path):
 async def test_no_override_no_settings(store, tmp_path):
     (req,) = await run_chat(store, tmp_path, [{"text": "a"}])
     assert req.model is None and req.reasoning_effort == "low"
+
+
+async def test_prompt_preview_includes_enabled_runtime_guidance(store, user_token):
+    service = SettingsService(store)
+    await service.put("threads", {"chat": {"harness": "openai_agents"},
+                                  "automation": {"harness": "openai_agents"}}, "t", None)
+    auth = Authenticator(store, ADMIN)
+    app = create_app(store, RunEventBus(), auth)
+    tools = {"mail_remember", "approval_set_continuation"}
+    app.include_router(settings_router(service, auth, available_tools=lambda: tools))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {user_token}"}) as client:
+        body = (await client.get("/api/settings/prompt", params={"thread_type": "automation"})).json()
+        rows = body["token_breakdown"]["components"]
+        names = [row["name"] for row in rows]
+        for name in ("bounded_model_guidance", "scheduled_checkpoint_guidance",
+                     "mail_summary_guidance", "approval_continuation_guidance"):
+            assert name in names and names.index(name) < names.index("memory_index")
+        await service.put("efficiency", {"bounded_model_tasks": False,
+                                         "fresh_automation_sessions": False}, "t", None)
+        body = (await client.get("/api/settings/prompt", params={"thread_type": "automation"})).json()
+        names = {row["name"] for row in body["token_breakdown"]["components"]}
+        assert "bounded_model_guidance" not in names
+        assert "scheduled_checkpoint_guidance" not in names

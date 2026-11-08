@@ -528,7 +528,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         scheduler = Scheduler(store, default_harness=settings.harness_source("automation"))
         gateway = Gateway(store, GrantPolicy(grants_cfg), emit_event=emit_event)
         questions = QuestionService(store, emit_event=emit_event, notifier=notifier)
+        from .tools.approvals import ApprovalContinuationTools
         for provider in (memory_tools, AutomationTools(store, scheduler), ThreadTools(store, bus),
+                         ApprovalContinuationTools(store),
                          NotifyTools(store, bus, notifier=notifier), QuestionTools(questions)):
             gateway.register(provider)
         tokens = RunTokens()
@@ -601,7 +603,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         app.include_router(tasks_router(store, bus, auth))
         store.on_routed = lambda event, spec: publish_queued(bus, event, spec)
         app.include_router(settings_router(settings, auth, memory_tools,
-                                           crontal_identity=crontal_id))
+                                           crontal_identity=crontal_id,
+                                           available_tools=lambda: {s.name for s in gateway.specs()}))
         app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
                                         uploads=uploads, log_file=_log_file(args)))
         email_secret = env.get("HANDLER_EMAIL_SECRET")
@@ -672,6 +675,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             reserved_tools={spec.name for spec in gateway.specs()})
         for _, tool_set in contributions.tool_sets:
             gateway.register(tool_set)
+        config.available_tools = frozenset(s.name for s in gateway.specs())
         for _, sink in contributions.sinks:
             outbox.register(sink)
         intake_observers.extend(o for _, o in contributions.email_intake_observers)

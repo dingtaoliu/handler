@@ -80,6 +80,86 @@ def executor(store, harness, tmp_path, **kwargs):
                        PriceTable([]), **kwargs)
 
 
+async def test_scheduled_firing_rotates_session_without_replaying_raw_history(store, tmp_path):
+    from handler.runtime.memory import MemoryTools
+    from handler.runtime.settings import SettingsService
+
+    key = "automation:daily"
+    await store.put(Event("automation.fired", "scheduler", {"prompt": "daily report"},
+                          "first", thread_key=key),
+                    ThreadSpec(key, ThreadType.AUTOMATION, Lane.BACKGROUND, harness="fake"))
+    lease, = await store.claim("worker", Lane.BACKGROUND, 1, 60)
+    await store.set_session(lease, OLD_SESSION)
+    await store.add_messages(lease, [Message(key, Role.ASSISTANT,
+                                            [{"type": "text", "text": "old raw report"}])])
+    harness = FakeHarness()
+    settings = SettingsService(store)
+    await executor(store, harness, tmp_path, settings=settings,
+                   memory_tools=MemoryTools(store, settings)).execute(lease)
+    req, = harness.requests
+    assert req.session_id is None and req.fresh_session
+    assert "old raw report" not in req.prompt
+    assert "watermark" in req.instructions and "memory_save" in req.instructions
+
+
+async def test_pending_approval_prevents_scheduled_session_rotation(store, tmp_path):
+    from handler.runtime.settings import SettingsService
+    from handler.runtime.types import Approval
+
+    key = "automation:daily"
+    await store.put(Event("automation.fired", "scheduler", {"prompt": "daily report"},
+                          "first", thread_key=key),
+                    ThreadSpec(key, ThreadType.AUTOMATION, Lane.BACKGROUND, harness="fake"))
+    lease, = await store.claim("worker", Lane.BACKGROUND, 1, 60)
+    await store.set_session(lease, OLD_SESSION)
+    await store.create_approval(Approval(run_id="earlier", thread_key=key,
+                                         tool="send", action="send", args={}, requested_by=None))
+    harness = FakeHarness()
+    await executor(store, harness, tmp_path, settings=SettingsService(store)).execute(lease)
+    assert harness.requests[0].session_id == OLD_SESSION
+    assert not harness.requests[0].fresh_session
+
+
+async def test_terminal_receipt_is_deterministic_and_reaches_next_model_turn(store, tmp_path):
+    from handler.runtime.types import Approval, ApprovalStatus
+
+    approval = Approval(run_id="earlier", thread_key=KEY, tool="send", action="send", args={},
+                        requested_by=None,
+                        status=ApprovalStatus.EXECUTED,
+                        result={"handler_receipt_only": True, "content": "sent"})
+    await store.create_approval(approval)
+    await store.put(Event("approval.resolved", "gateway", {
+        "approval_id": approval.id, "tool": "send", "status": "executed",
+        "resume_model": False, "result_preview": "sent"}, "receipt", thread_key=KEY),
+        ThreadSpec(KEY, ThreadType.CHAT, Lane.INTERACTIVE, harness="fake"))
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    await store.set_session(lease, OLD_SESSION)
+    harness = FakeHarness()
+    runner = executor(store, harness, tmp_path)
+    await runner.execute(lease)
+    assert harness.requests == []
+    run, = await store.list_runs(KEY)
+    assert run.cost_usd == 0 and run.usage.input_tokens == 0
+
+    await store.put(Event("chat.message", "test", {"text": "what happened?"}, "next",
+                          thread_key=KEY), ThreadSpec(KEY, ThreadType.CHAT, Lane.INTERACTIVE))
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    await runner.execute(lease)
+    assert "Approved send completed. sent" in harness.requests[0].prompt
+    assert "what happened?" in harness.requests[0].prompt
+
+
+async def test_forged_receipt_flag_does_not_bypass_model(store, tmp_path):
+    await store.put(Event("approval.resolved", "gateway", {
+        "approval_id": "nonexistent", "tool": "send", "status": "executed",
+        "resume_model": False}, "receipt", thread_key=KEY),
+        ThreadSpec(KEY, ThreadType.CHAT, Lane.INTERACTIVE, harness="fake"))
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    harness = FakeHarness()
+    await executor(store, harness, tmp_path).execute(lease)
+    assert len(harness.requests) == 1
+
+
 async def test_missing_session_retries_once_in_same_run_with_last_twenty_messages(store, tmp_path):
     harness = FakeHarness(HarnessError(f"No session found with id {OLD_SESSION}"))
     tokens = RunTokens()

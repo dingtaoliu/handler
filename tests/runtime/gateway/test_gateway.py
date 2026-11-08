@@ -8,6 +8,57 @@ from handler.runtime.types import ApprovalStatus, Decision
 CTX = RunContext(run_id="run1", thread_key="chat:u:1", user_id="u1", acting_as="u1")
 
 
+async def test_terminal_contract_keeps_approval_and_only_skips_success(gateway, store, emitted):
+    from handler.runtime.tools.approvals import ApprovalContinuationTools
+
+    gateway.register(ApprovalContinuationTools(store))
+    pending = (await gateway.call(CTX, "send_it", {"text": "mail"})).content
+    args = {"approval_id": pending["approval_id"], "receipt_only": True}
+    wrong = await gateway.call(RunContext("other", CTX.thread_key),
+                               "approval_set_continuation", args)
+    assert wrong.is_error
+    saved = await gateway.call(CTX, "approval_set_continuation", args)
+    assert saved.content["saved"]
+    assert (await store.get_approval(args["approval_id"])).status == ApprovalStatus.PENDING
+    await gateway.approve(args["approval_id"], "boss")
+    assert emitted[-1].payload["resume_model"] is False
+
+    pending = (await gateway.call(CTX, "send_it", {"text": "mail2"})).content
+    await gateway.call(CTX, "approval_set_continuation",
+                       {"approval_id": pending["approval_id"], "receipt_only": True})
+    await gateway.deny(pending["approval_id"], "boss")
+    assert emitted[-1].payload["resume_model"] is True
+
+
+async def test_terminal_contract_failed_execution_still_resumes(gateway, store, emitted):
+    from handler.runtime.tools.approvals import ApprovalContinuationTools
+    from handler.runtime.gateway.base import ToolSpec
+    from handler.runtime.types import Risk
+
+    async def fail(ctx, args):
+        raise RuntimeError("failed")
+
+    gateway.register(ApprovalContinuationTools(store))
+    gateway.register(ToolSpec("failing_send", "failing.send", Risk.WRITE_EXTERNAL, "test",
+                              {"type": "object", "properties": {}}, fail))
+    pending = (await gateway.call(CTX, "failing_send", {})).content
+    await gateway.call(CTX, "approval_set_continuation",
+                       {"approval_id": pending["approval_id"], "receipt_only": True})
+    await gateway.approve(pending["approval_id"], "boss")
+    assert emitted[-1].payload["status"] == "failed"
+    assert emitted[-1].payload["resume_model"] is True
+
+
+def test_model_facing_json_keeps_unicode_and_round_trips():
+    from handler.runtime.gateway.base import ToolResult
+    from handler.runtime.gateway.gateway import result_text
+
+    body = {"name": "不锈钢", "values": [1, 2], "text": "a\nb"}
+    text = result_text(ToolResult(body))
+    assert "不锈钢" in text and ": " not in text
+    assert json.loads(text) == body
+
+
 async def test_allow_runs_handler_and_audits(gateway, store, tools):
     result = await gateway.call(CTX, "echo", {"text": "hi"})
     assert not result.is_error and result.content["echo"] == "hi"
