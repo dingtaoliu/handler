@@ -12,7 +12,7 @@ mark historical mail read), paged/batched mail reads, fresh automation firings w
 memory checkpoints, stable prompt components with token/% preview, compact results,
 opt-in terminal approval receipts, and bounded Luna/Terra helpers under the existing
 main model's verification. Live `efficiency` settings can disable fresh sessions or
-helpers. The main model remains Sol. Legacy Handler and the personal deployment are
+helpers. Released on `crontal-agent` as **v48**, runtime commit `17324c3`, after backup **b026**; rollback **v47**. Main/BSS persona version 3 corrects stale identity wording. All three Crontal instance health/tool/settings checks passed. The main model remains Sol. Legacy Handler and the personal deployment are
 unchanged. Read the implementation document before changing these contracts.
 
 Updated 2026-10-18 by the driver (Claude Code), for whoever picks this up next. Read this first, then `docs/agent-runtime-design.md` (the design) and the package briefs in `docs/rebuild/` (`phase1.md` … `phase4-ui.md`). Known problems are in `docs/rebuild/known-issues.md`.
