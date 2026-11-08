@@ -8,7 +8,11 @@ readers. Existing `documents.read`, `to_text`, `handler-read`, tool schema and o
 behavior are preserved. See `docs/rebuild/document-reader.md` for module boundaries,
 extension routing, preview semantics and validation. Scans still use model vision.
 Validation: **1,208 passed, 2 skipped**, 35 focused reader tests, zero Pyright errors,
-and 86 differential cases identical to the old implementation.
+and 86 differential cases identical to the old implementation. Released as **v51**
+on `crontal-agent`, runtime `b6cc927` on `main`, image `efe7caf5b8fe`, backup **b029**;
+rollback **v50**. Main/BSS/Yeup health, authenticated tools/reporting and 401 checks
+passed. The image also passed native CSV/image/scanned-PDF, workspace boundary and
+installed `handler-read` smoke tests.
 
 ## 2026-11-08 detailed usage ledger
 

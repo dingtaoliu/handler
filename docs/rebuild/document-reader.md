@@ -60,3 +60,8 @@ also passes Pyright with zero errors/warnings. A one-off comparison against the 
 PDF text/pages/scans, images, archives, errors, previews and pagination. Returned
 text, image bytes and errors were identical. Full runtime and deployment results
 are recorded in HANDOFF.md.
+
+Released as **v51** on `crontal-agent`, runtime `b6cc927` on `main`, after backup
+**b029**; rollback **v50**. All three instance health/tools/reporting checks passed.
+The deployed image passed native CSV, image and scanned-PDF reads, workspace
+confinement, package/server imports and installed CLI execution.
