@@ -5,8 +5,8 @@ API key. A thread's session is an OpenAI Conversation: the conversation id is
 the session id, so a turn sends only the new input and resumes server-side
 history. Tools are handler's MCP gateway (memory, automations, connectors)
 plus OpenAI's hosted web search and file tools confined to the workspace.
-read_file goes through `documents`, so it reads office files, PDFs and images
-(returned to the model as image input). There is deliberately no shell.
+read_file uses `documents` for office files and images, and uploads intact PDFs
+as file references. There is deliberately no shell.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ from ..images import sniff_file
 from ..settings import HARNESS_DEFAULT_MODELS
 from ..types import TokenUsage, utcnow
 from .base import HarnessError, RunEvent, RunEventKind, RunRequest
+from .pdf_files import PDFFiles
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,11 @@ def _confined(workspace: Path, path: str) -> Path:
     return target
 
 
-def workspace_tools(workspace: Path) -> list:
+def workspace_tools(workspace: Path, *, client: openai.AsyncOpenAI | None = None,
+                    home: Path | None = None) -> list:
     """read/write/list files under the run's workspace (e.g. attachments/)."""
+
+    pdf_files = PDFFiles(client, home) if client is not None else None
 
     @function_tool
     def list_files(path: str = ".") -> str:
@@ -97,16 +101,17 @@ def workspace_tools(workspace: Path) -> list:
         return "\n".join(files[:500]) or "(empty)"
 
     @function_tool
-    def read_file(path: str, offset: int = 0, sheet: str | None = None,
-                  cells: str | None = None, pages: str | None = None,
-                  as_images: bool = False) -> Any:
+    async def read_file(path: str, offset: int = 0, sheet: str | None = None,
+                        cells: str | None = None, pages: str | None = None,
+                        as_images: bool = False) -> Any:
         """Read any workspace file: text, Excel/CSV, Word, PDF, PowerPoint, HTML,
         EPUB, Outlook .msg, ZIP, JSON/XML, and images (which you see as images).
 
-        Output is capped; when more remains, a note at the end says exactly how
+        Text output is capped; when more remains, a note at the end says how
         to call read_file for the next part. Spreadsheets list every sheet and
         show cells as Markdown tables with Excel column letters and row numbers.
-        A scanned PDF (no text layer) comes back as page images.
+        PDFs are supplied intact, including scanned pages and visual content.
+        All PDF pages are included unless you select pages explicitly.
 
         Args:
             path: File path relative to the workspace, e.g. downloads/quote.xlsx.
@@ -115,15 +120,24 @@ def workspace_tools(workspace: Path) -> list:
             cells: Spreadsheets only: an A1 range such as "A1:H200", "500:900"
                 (rows) or "C:F" (columns).
             pages: PDFs only: pages to read, such as "3", "2-5" or "1,4,7-9".
-            as_images: PDFs only: show the pages as images (drawings, stamps,
-                signatures, layout) instead of their text.
+            as_images: Legacy option; PDFs always retain their original visual content.
         """
         try:
             target = _confined(workspace, path)
-            reading = documents.read(target, display=path, offset=offset, sheet=sheet,
-                                     cells=cells, pages=pages, as_images=as_images)
+            if not target.is_file():
+                raise documents.ReadError(f"not a file: {path}")
+            if target.suffix.lower() == ".pdf":
+                if pdf_files is None:
+                    raise documents.ReadError("PDF upload service is unavailable")
+                return await pdf_files.read(target, display=path, pages=pages)
+            reading = await asyncio.to_thread(
+                documents.read, target, display=path, offset=offset, sheet=sheet,
+                cells=cells, pages=pages, as_images=as_images)
         except (documents.ReadError, ValueError, OSError) as exc:
             return f"error: {exc}"
+        except openai.APIError as exc:
+            logger.warning("PDF upload failed", exc_info=True)
+            return f"error: PDF upload failed ({type(exc).__name__}); retry read_file"
         if not reading.images:
             return reading.text
         parts: list[Any] = [ToolOutputText(text=reading.text)]
@@ -524,7 +538,7 @@ class OpenAIAgentsHarness:
                                       "compact_threshold": self.compact_threshold}]
                                     if self.compact_threshold else None),
             ),
-            tools=[WebSearchTool(), *workspace_tools(req.workspace),
+            tools=[WebSearchTool(), *workspace_tools(req.workspace, client=self.client, home=req.home),
                    *([bounded_tool] if bounded_tool else [])],
             mcp_servers=mcp_servers,
         )

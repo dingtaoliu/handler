@@ -32,6 +32,22 @@ adds paging instructions to the preview.
 
 ## Shared behavior
 
+The native OpenAI harness uses a separate PDF transport adapter:
+`harness/pdf_files.py` calls `pdf.prepare_input`, uploads the original PDF with
+purpose `user_data`, and returns `ToolOutputFileContent(file_id=...)`. It includes
+every page by default. A `pages` selection copies those pages into another PDF
+without rasterizing them, with source-page provenance in the accompanying text.
+The legacy `as_images` argument remains accepted but never converts native PDF
+outputs into inline images. OpenAI handles the PDF's text and visual content.
+
+Uploads are reused by content and API credential/project scope. References live
+in `openai-pdf-files.json` in the thread's isolated, durably synced harness home,
+outside the agent-writable workspace. Files remain available for later conversation
+turns; they are not deleted at run completion. Upload failures return a tool error
+without an inline-image fallback. PDFs at or above 50 MB require page selection.
+This changes transport, not the model's token billing for reading PDF pages.
+Existing inline-image history is not rewritten by this change.
+
 - `types.py`: `ReadOptions`, `Reading`, `Image`, `ReadError` and text limits.
 - `conversion.py`: local MarkItDown conversion and conversion-error messages.
 - `cache.py`: 16-entry conversion cache keyed by path, size and modification time.
@@ -44,7 +60,7 @@ To support another format, put its logic in the appropriate reader and register
 its extension/family in the router; use the same result/options types.
 
 Output limits remain 20,000 text characters per read, 500 characters per spreadsheet
-cell, four PDF page images per call, and 2048-pixel / 4-MB vision images. Read
+cell, four PDF page images per CLI call, and 2048-pixel / 4-MB vision images. Read
 continuation messages, cached formula values, sheet/range behavior and supported
 formats are preserved. Large documents can still be converted locally in full
 before paging the result; this refactor changes organization rather than that

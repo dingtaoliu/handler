@@ -1,5 +1,21 @@
 # Handoff: handler rebuild
 
+## 2026-11-08 native PDF file transport
+
+Native OpenAI `read_file` now uploads intact PDFs and returns file references,
+including all pages by default. Explicit page selections remain PDFs; legacy
+`as_images=true` no longer produces inline PNGs for PDFs. Upload references are
+content/API-scope cached in the isolated, synced harness home. CLI PDF rendering
+is unchanged. See `document-reader.md` for transport and retention details.
+
+Reason: large inline PNG tool outputs reproduced provider HTTP 500s when listing
+and resuming Conversations. A live test through the new tool used a 12.2 MB,
+15-page scanned PDF: every amount and the total were correct; stored history
+listing and a follow-up both succeeded. No original customer documents were used.
+Validation: **1,216 passed, 2 skipped**, including 8 new PDF transport cases;
+PDF preparation/upload modules pass Pyright. The harness has existing unrelated
+type errors. Deployment details follow after release.
+
 ## 2026-11-08 document-reader refactor
 
 The shared reader is now a `documents/` package starting with an explicit file-type

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import dataclass
 from typing import cast
 
 from . import converted
@@ -14,6 +15,42 @@ PAGE_DPI = 110
 SCANNED_CHARS_PER_PAGE = 40
 SCAN_SAMPLE_PAGES = 12
 _PRINTER_MARKS = {"C", "M", "Y", "K", "CM", "MY", "CY", "CMY", "CMYK"}
+
+
+@dataclass(frozen=True)
+class PDFInput:
+    data: bytes
+    description: str
+
+
+def prepare_input(path: Path, *, display: str, pages: str | None = None) -> PDFInput:
+    """Keep the original PDF, or copy selected pages without rasterizing them."""
+    import fitz
+
+    original = path.read_bytes()
+    try:
+        with fitz.open(stream=original, filetype="pdf") as source:
+            if source.needs_pass:
+                raise ReadError(f"{display} is password-protected")
+            if not source.page_count:
+                raise ReadError(f"{display} has no pages")
+            wanted = _parse_pages(pages, source.page_count)
+            data = original
+            if pages:
+                with fitz.open() as selected:
+                    for index in wanted:
+                        selected.insert_pdf(source, from_page=index, to_page=index)
+                    data = selected.tobytes(garbage=4, deflate=True, no_new_id=True)
+            description = (f"{display}: original pages {_ranges(wanted)} of "
+                           f"{source.page_count}, supplied as a PDF. "
+                           "Read all supplied pages, including tables and scanned content.")
+    except ReadError:
+        raise
+    except Exception as exc:
+        raise ReadError(f"could not open {display} as a PDF: {exc}") from exc
+    if len(data) >= 50_000_000:
+        raise ReadError(f"{display} exceeds the 50 MB PDF input limit; select fewer pages")
+    return PDFInput(data, description)
 
 
 def read(path: Path, options: ReadOptions) -> Reading:
