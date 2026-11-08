@@ -30,3 +30,21 @@ async def test_metadata_title_watermark_and_activity(domain_store, spec, event, 
     assert await store.mark_thread_read(spec.key, "u", first.created_at) == second.created_at
     assert await store.thread_metadata([], "u") == {}
     assert not await store.set_thread_title("missing", "Missing")
+
+
+async def test_thread_context_links_merge_dedupe_and_cap(domain_store, spec, event):
+    store = domain_store
+    await store.put(event("first"), spec)
+    assert await store.thread_context_links(spec.key) == []
+    assert (await store.get_thread(spec.key)).context_links is None
+    assert await store.add_thread_context_links(spec.key, ["crontal:rfq:1", "crontal:bid:2"]) \
+        == ["crontal:rfq:1", "crontal:bid:2"]
+    # Sent again: moves to the end (newest last), no duplicate.
+    assert await store.add_thread_context_links(spec.key, ["crontal:rfq:1"]) \
+        == ["crontal:bid:2", "crontal:rfq:1"]
+    assert await store.add_thread_context_links(
+        spec.key, [f"crontal:rfq:{n}" for n in range(10, 14)], limit=3) \
+        == ["crontal:rfq:11", "crontal:rfq:12", "crontal:rfq:13"]
+    assert (await store.get_thread(spec.key)).context_links == [
+        "crontal:rfq:11", "crontal:rfq:12", "crontal:rfq:13"]
+    assert await store.add_thread_context_links("missing", ["crontal:rfq:1"]) == []

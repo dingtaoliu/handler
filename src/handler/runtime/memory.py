@@ -59,6 +59,24 @@ def normalize_links(links: Iterable[str] | None) -> list[str]:
     return list(dict.fromkeys(normalize_link(link) for link in links or []))
 
 
+# Links a caller may attach to a chat (POST /api/chat `context_links`): the
+# Crontal record the user opened the chat from, or a company domain.
+MAX_CONTEXT_LINKS = 5  # per message
+MAX_THREAD_CONTEXT_LINKS = 20  # kept on a thread, newest last
+_CONTEXT_LINK = re.compile(r"crontal:[a-z][a-z0-9_]{0,40}:[A-Za-z0-9_.-]{1,100}"
+                           r"|domain:[a-z0-9-]+(\.[a-z0-9-]+)+")
+
+
+def normalize_context_link(link: str) -> str:
+    link = normalize_link(link)
+    if not _CONTEXT_LINK.fullmatch(link) or link.startswith("crontal:notification:"):
+        raise ValueError(f"Context link {link!r} must be 'crontal:<entity>:<id>' or "
+                         "'domain:<domain>'")
+    if link.removeprefix("domain:") in FREE_MAIL_DOMAINS:
+        raise ValueError(f"Context link {link!r} is a free-mail domain")
+    return link
+
+
 def email_domain(address: str | None) -> str | None:
     if not address or "@" not in address:
         return None
@@ -112,8 +130,40 @@ def _email_intake_links(thread_key: str, events: list[Any]) -> list[str]:
     return links
 
 
+def chat_context_links(thread_key: str, events: list[Any]) -> list[str]:
+    """Context links of a chat: those stored on the thread (relevant_text passes
+    them as a payload) and those on its pending messages."""
+    links = []
+    for payload in _payloads(events):
+        for link in payload.get("context_links") or []:
+            try:
+                links.append(normalize_context_link(link))
+            except ValueError:
+                continue
+    return list(dict.fromkeys(links))
+
+
 register_link_source("crontal", _crontal_links)
 register_link_source("email", _email_intake_links)
+register_link_source("chat", chat_context_links)
+
+
+def context_line(links: list[str]) -> str:
+    """One prompt line naming what the user opened the chat from."""
+    records = [link for link in links if link.startswith("crontal:")]
+    domains = [link for link in links if link.startswith("domain:")]
+    parts = []
+    if records:
+        if len(records) == 1:
+            parts.append(f"The user opened this chat from Crontal record {records[0]}; "
+                         "link topics about it with that link.")
+        else:
+            parts.append("The user opened this chat from Crontal records "
+                         f"{', '.join(records)} (newest last); link topics about one "
+                         "with its link.")
+    if domains:
+        parts.append(f"Related company domains: {', '.join(domains)}.")
+    return " ".join(parts)
 
 
 def thread_links(thread_key: str, events: Iterable[Any] | None = None) -> list[str]:
@@ -238,12 +288,19 @@ class MemoryTools:
         neighbours (names only)."""
         config = await self.config()
         budget = config["relevant_max_chars"]
+        events = list(events or [])
+        context = ""
+        if thread_key.partition(":")[0] == "chat":
+            stored = getattr(self.store, "thread_context_links", None)
+            if stored is not None:
+                events.insert(0, {"context_links": await stored(thread_key)})
+            context = context_line(chat_context_links(thread_key, events))
         if budget <= 0:
-            return ""
+            return context
         links = thread_links(thread_key, events)
         topics = await self.store.search_topics(links=links, order="recent", limit=10)
         if not topics:
-            return ""
+            return context
         shown = {t.name for t in topics}
         hop_links: list[str] = []
         named: list[str] = []
@@ -276,7 +333,7 @@ class MemoryTools:
         text = "\n\n".join(blocks)
         if neighbours:
             text += "\n\nRelated topics (memory_read if needed): " + ", ".join(neighbours)
-        return text
+        return f"{context}\n\n{text}" if context else text
 
     # ── tools ──────────────────────────────────────────────────────────────
 

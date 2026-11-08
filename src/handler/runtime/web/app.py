@@ -20,6 +20,7 @@ from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
 from ..bus import BusMessage, RunEventBus
 from ..store.base import Store
 from ..images import MAX_IMAGES_PER_MESSAGE, VISION_TYPES
+from ..memory import MAX_CONTEXT_LINKS, MAX_THREAD_CONTEXT_LINKS, normalize_context_link
 from ..uploads import UploadStore
 from ..run import fill_tool_inputs
 from ..settings import HarnessSource, ModelName, ReasoningEffort, resolve_harness
@@ -83,6 +84,9 @@ class ChatRequest(BaseModel):
     client_message_id: str | None = None
     model: ModelName | None = None  # per-message override; validated against the enum
     reasoning_effort: ReasoningEffort | None = None
+    # Records the user is looking at, e.g. ["crontal:rfq:123"]; they accumulate
+    # on the thread and feed run-start memory (docs/rebuild/memory-kinds.md).
+    context_links: list[str] = []
 
 
 class ThreadTitleRequest(BaseModel):
@@ -160,6 +164,15 @@ def create_app(
         if user_id is None:
             raise HTTPException(400, f"{ACT_AS_HEADER} is required for admin-key chat")
         payload: dict[str, Any] = {"text": body.text}
+        if len(body.context_links) > MAX_CONTEXT_LINKS:
+            raise HTTPException(422, f"At most {MAX_CONTEXT_LINKS} context_links per message")
+        try:
+            context_links = list(dict.fromkeys(
+                normalize_context_link(link) for link in body.context_links))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if context_links:
+            payload["context_links"] = context_links
         if body.model is not None:
             payload["model"] = body.model.value
         if body.reasoning_effort is not None:
@@ -195,6 +208,10 @@ def create_app(
             harness=await resolve_harness(default_harness),
         )
         stored = await store.put(event, spec)
+        if context_links:
+            # The message carries them too, so a run that starts first sees them.
+            context_links = await store.add_thread_context_links(
+                key, context_links, limit=MAX_THREAD_CONTEXT_LINKS)
         if stored:
             bus.publish(
                 BusMessage(
@@ -209,6 +226,7 @@ def create_app(
             "thread_key": key,
             "conversation_id": conversation_id,
             "duplicate": not stored,
+            **({"context_links": context_links} if context_links else {}),
         }
 
     @router.get("/api/threads")

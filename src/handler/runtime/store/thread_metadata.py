@@ -90,6 +90,32 @@ class ThreadMetadata:
         return _date(rows[0]["read_at"]) if rows else None
 
 
+    async def thread_context_links(self, key: str) -> list[str]:
+        rows = await self._thread_query(
+            "SELECT context_links FROM threads WHERE key=?", (key,))
+        return _links(rows[0]["context_links"]) if rows else []
+
+    async def add_thread_context_links(self, key: str, links: list[str], *,
+                                       limit: int = 20) -> list[str]:
+        """Merge links into the thread's context links, newest last: a link sent
+        again moves to the end, and only the newest `limit` are kept."""
+        if not links:
+            return await self.thread_context_links(key)
+        merged = [link for link in await self.thread_context_links(key) if link not in links]
+        merged = (merged + list(dict.fromkeys(links)))[-limit:]
+        cast = "CAST(? AS JSONB)" if isinstance(self, PostgresThreadMetadata) else "?"
+        rows = await self._thread_query(
+            f"UPDATE threads SET context_links={cast} WHERE key=? RETURNING key",
+            (json.dumps(merged), key))
+        return merged if rows else []
+
+
+def _links(value) -> list[str]:
+    if isinstance(value, str):
+        value = json.loads(value)
+    return list(value or [])
+
+
 class SQLiteThreadMetadata(ThreadMetadata):
     def _thread_timestamp(self, value):
         return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
