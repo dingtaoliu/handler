@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .gateway.crontal_catalog import DEFAULT_FULL_SPECS, spec_key
 from .mail.instructions import DEFAULT_EMAIL_INSTRUCTIONS
 from .store.base import SettingsStore
 from .types import Decision, Risk, SettingsVersion
@@ -213,6 +214,27 @@ class EfficiencySettings(Section):
         "classification, extraction and drafting; it remains responsible for verification.")
     classification_model: ModelName = ModelName.GPT_6_LUNA
     drafting_model: ModelName = ModelName.GPT_6_1_TERRA
+    route_catalog: bool = Field(
+        True, description="Put Crontal's API route catalog (and the contracts listed "
+        "below) in the cached part of the instructions, so the agent can call common "
+        "endpoints without a discovery round trip. Discovery tools stay available.")
+    route_catalog_max_chars: int = Field(
+        40_000, ge=1_000, le=200_000, description="Cap on the catalog's size. All route "
+        "lines are kept; contracts are added in list order while they fit. If the route "
+        "lines alone exceed it, the catalog is left out.")
+    route_catalog_full_specs: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_FULL_SPECS), title="Route catalog full specs",
+        description="Endpoints whose full contracts are included, most important first, "
+        "as 'METHOD /api/v1/path' with path parameters as Crontal lists them "
+        "(e.g. 'GET /api/v1/rfq/<int:rfq_id>').")
+
+    @model_validator(mode="after")
+    def check_full_specs(self):
+        bad = [entry for entry in self.route_catalog_full_specs if spec_key(entry) is None]
+        if bad:
+            raise ValueError("route_catalog_full_specs entries must look like "
+                             f"'GET /api/v1/path': {bad}")
+        return self
 
 
 MODELS = {

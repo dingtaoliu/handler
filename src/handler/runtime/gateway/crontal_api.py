@@ -42,6 +42,7 @@ from ..context import RunContext
 from ..types import Risk
 from ..uploads import sanitize_filename
 from .base import ToolResult, ToolSpec
+from .crontal_catalog import HIDDEN_PREFIXES, CrontalRouteCatalog, crontal_route_catalog
 from .crontal_identity import (
     ON_BEHALF_OF_HEADER,
     CrontalIdentityClient,
@@ -51,14 +52,11 @@ from .crontal_identity import (
 )
 
 API_PREFIX = "/api/v1/"
-# Never reachable by the agent (refused, and left out of crontal_api_routes):
-# its own plumbing and site-admin tools.
-_HIDDEN = ("/api/v1/agent-access", "/api/v1/agent-mcp", "/api/v1/handler",
-           "/api/v1/admin", "/api/v1/marketplace/query", "/api/v1/files/stats")
+# Never reachable by the agent (refused, and left out of crontal_api_routes
+# and the prompt catalog): its own plumbing and site-admin tools.
+_HIDDEN = HIDDEN_PREFIXES
 MAX_JSON_CHARS = 60_000
 MAX_TEXT_CHARS = 20_000
-ROUTES_TTL_SECONDS = 600
-SPEC_TTL_SECONDS = 600
 SPEC_ON_STATUS = (400, 422)
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -229,7 +227,8 @@ class CrontalApiTools:
                  workspace_for: Callable[[str], Path],
                  client: httpx.AsyncClient | None = None,
                  identity: CrontalIdentityClient | None = None,
-                 upload_sources: list[UploadSource] | None = None) -> None:
+                 upload_sources: list[UploadSource] | None = None,
+                 catalog: CrontalRouteCatalog | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self._agent_token = agent_token
         self._workspace_for = workspace_for
@@ -241,12 +240,16 @@ class CrontalApiTools:
                         if client is not None
                         else crontal_identity(self.base_url, agent_token))
         self.identity = identity
+        # Route list and contracts, shared with the prompt's catalog the same way.
+        if catalog is None:
+            catalog = (CrontalRouteCatalog(self.base_url, agent_token, client=client)
+                       if client is not None
+                       else crontal_route_catalog(self.base_url, agent_token))
+        self.catalog = catalog
         # Shared list: integrations (mailbox) register resolvers into it later.
         self._upload_sources = upload_sources if upload_sources is not None else []
         # JWTs by on-behalf-of user ("" = none); all are the AI user's.
         self._jwts: dict[str, tuple[str, float]] = {}
-        self._routes: tuple[list[dict[str, Any]], float] | None = None
-        self._specs: dict[tuple[str, str], tuple[Any, float]] = {}
 
     # ── auth ────────────────────────────────────────────────────────────────
 
@@ -427,13 +430,7 @@ class CrontalApiTools:
         return str(target.relative_to(workspace))
 
     async def _catalog(self) -> list[dict[str, Any]]:
-        if self._routes is None or time.time() - self._routes[1] > ROUTES_TTL_SECONDS:
-            response = await self._client.get(
-                f"{self.base_url}/api/v1/agent-access/routes",
-                headers={"Authorization": f"Bearer {self._agent_token}"})
-            response.raise_for_status()
-            self._routes = (response.json()["routes"], time.time())
-        return self._routes[0]
+        return await self.catalog.routes()
 
     async def _list_routes(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
         try:
@@ -466,27 +463,7 @@ class CrontalApiTools:
 
     async def _spec(self, method: str, path: str) -> Any:
         """One route's spec from Crontal (cached); a string when unavailable."""
-        key = (method.upper(), path.split("?", 1)[0])
-        cached = self._specs.get(key)
-        if cached and time.time() - cached[1] <= SPEC_TTL_SECONDS:
-            return cached[0]
-        try:
-            response = await self._client.get(
-                f"{self.base_url}/api/v1/agent-access/routes/describe",
-                params={"method": key[0], "path": key[1]},
-                headers={"Authorization": f"Bearer {self._agent_token}"})
-        except httpx.HTTPError as exc:
-            return f"Could not describe {key[0]} {key[1]}: {exc}"
-        if response.status_code == 404:
-            spec: Any = (f"No Crontal endpoint matches {key[0]} {key[1]}; "
-                         "see crontal_api_routes.")
-        elif response.status_code != 200:
-            return (f"Could not describe {key[0]} {key[1]} "
-                    f"(HTTP {response.status_code}): {response.text[:200]}")
-        else:
-            spec = response.json()
-        self._specs[key] = (spec, time.time())
-        return spec
+        return await self.catalog.spec(method, path)
 
     async def _describe(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
         method = str(args.get("method", "")).upper()
@@ -544,7 +521,7 @@ class CrontalApiTools:
                 "schema (required fields, types, allowed enum values, nested objects such "
                 "as product_info and its per-shape shape_attributes), multipart fields for "
                 "uploads, and the response shape. Call it before a write you haven't made "
-                "in this thread.",
+                "in this thread, unless your instructions' API catalog shows its contract.",
                 {"type": "object", "properties": {
                     "method": {"type": "string",
                                "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},

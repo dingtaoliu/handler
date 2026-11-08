@@ -1,0 +1,2678 @@
+{
+ "routes": [
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/agent/chat",
+   "summary": "Send a user message and get an AI response."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/agent/conversations",
+   "summary": "List the authenticated user's AI assistant conversations."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/agent/conversations",
+   "summary": "Create a new AI assistant conversation."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/agent/conversations/<int:conversation_id>",
+   "summary": "Soft-delete a conversation by marking it inactive."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/agent/conversations/<int:conversation_id>",
+   "summary": "Get a conversation and its messages."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/agent/conversations/<int:conversation_id>/enqueue_message",
+   "summary": "Save a user message to the DB without running the agent."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/agent/health",
+   "summary": "Health check for the agent service."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/agent/skills",
+   "summary": "List all skills for the authenticated user."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/agent/skills",
+   "summary": "Create a new skill for the authenticated user."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/agent/skills/<int:skill_id>",
+   "summary": "Delete a skill owned by the authenticated user."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/agent/skills/<int:skill_id>",
+   "summary": "Update an existing skill owned by the authenticated user."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/agent/tools",
+   "summary": "List all tools registered in the agent tool registry."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/agent/usage",
+   "summary": "Return the authenticated user's cumulative agent usage."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/auth/change-password",
+   "summary": "Change the current user's password. Other sessions are signed out."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/auth/forgot-password",
+   "summary": "Initiate a password reset. Always returns 200 to prevent user enumeration."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/auth/invite/accept",
+   "summary": "Accept a merchant invite: set username + password, activate, log in."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/auth/invite/preview",
+   "summary": "Look up a merchant invite so the accept page can show who it's for."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/auth/login",
+   "summary": "Check user credentials and log in the user."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/auth/me",
+   "summary": "Get the current authenticated user's information."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/auth/me",
+   "summary": "Update the current user's profile. Only the username is editable."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/auth/register",
+   "summary": "Create a new user."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/auth/reset-password",
+   "summary": "Apply a new password using a reset token."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/",
+   "summary": "Get all bids. Restricted to site administrators."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/<int:bid_id>",
+   "summary": "Get a bid by ID. Caller must be the supplier or the buyer on this bid."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/bid/<int:bid_id>",
+   "summary": "Update a bid by ID. Only the owning supplier can update it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/bid/<int:bid_id>/attach",
+   "summary": "Attach an already-uploaded file to a bid."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/<int:bid_id>/files",
+   "summary": "Get all files attached to a bid."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/bid/<int:bid_id>/files/<int:file_id>",
+   "summary": "Detach a file from a bid."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/bid/<int:bid_id>/lock",
+   "summary": "Lock and submit a bid."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/bid/<int:bid_id>/respond",
+   "summary": "Buyer responds to a bid (agree/decline/follow-up)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/bid/<int:bid_id>/upload",
+   "summary": "Upload a file and attach it to a bid in one operation."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/currencies",
+   "summary": "Public category metadata; contains no merchant or pricing data."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/demand_listing/<int:demand_listing_id>",
+   "summary": "Get all bids for a specific demand listing."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/merchant/<int:merchant_id>",
+   "summary": "Get all quotes (non-saved) submitted by a specific merchant (supplier)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/rfq/<int:rfq_id>",
+   "summary": "Get all bids for a specific RFQ (for buyer to review)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/bid/save",
+   "summary": "Save an RFQ for later quoting."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/bid/save/<int:rfq_id>",
+   "summary": "Remove a saved RFQ."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/saved",
+   "summary": "Get all saved RFQs for the authenticated merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/bid/start",
+   "summary": "Start a new bid for an RFQ. Creates a draft bid with a unique token."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/supply_listing/<int:supply_listing_id>",
+   "summary": "Get all bids for a specific supply listing."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/token/<string:bid_token>",
+   "summary": "Get a bid by its unique token. Caller must be the supplier or buyer on this bid."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/bid/token/<string:bid_token>/revisions",
+   "summary": "Get all revisions for a bid token. Caller must be the supplier or buyer."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/bid/token/<string:bid_token>/revisions",
+   "summary": "Create a new revision of an existing bid."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/card/me",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/card/me",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/chat",
+   "summary": "Get or create a direct-message chat with another merchant — idempotent: reuses the existing DM for this pair of merchants if one already exists, rather than creating a duplicate every time."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/chat/<int:chat_id>",
+   "summary": "Get a chat by ID."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/chat/merchant/<int:merchant_id>",
+   "summary": "Get all chats for a specific merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/chat/scoped",
+   "summary": "Get or create a chat scoped to an RFQ or a bid, idempotently, between the calling merchant and the other party (buyer or supplier)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/contact",
+   "summary": "Get all contacts for the authenticated merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/contact",
+   "summary": "Create a new contact for the authenticated merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/contact/<int:contact_id>",
+   "summary": "Delete a contact."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/contact/<int:contact_id>",
+   "summary": "Get a specific contact by ID."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/contact/<int:contact_id>",
+   "summary": "Update a contact."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/contact/batch_upload",
+   "summary": "Batch upload contacts from CSV file to a contact list."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/contact/list",
+   "summary": "Get all contact lists for the authenticated merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/contact/list",
+   "summary": "Create a new contact list for the authenticated merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/contact/list/<int:contact_list_id>",
+   "summary": "Delete a contact list."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/contact/list/<int:contact_list_id>",
+   "summary": "Get a specific contact list by ID."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/contact/list/<int:contact_list_id>",
+   "summary": "Update a contact list."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/contact/list/<int:contact_list_id>/contact/<int:contact_id>",
+   "summary": "Remove a contact from a contact list."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/contact/list/<int:contact_list_id>/contact/<int:contact_id>",
+   "summary": "Add a contact to a contact list."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/demand_listing",
+   "summary": "Get all demand listings belonging to the authenticated merchant's RFQs."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/demand_listing",
+   "summary": "Create a new demand listing. The linked RFQ must belong to the caller."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/demand_listing/<int:demand_listing_id>",
+   "summary": "Delete a demand listing. Only the owner of the linked RFQ can delete it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/demand_listing/<int:demand_listing_id>",
+   "summary": "Get a demand listing by ID. Only the owner of the linked RFQ can read it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/demand_listing/<int:demand_listing_id>",
+   "summary": "Update a demand listing. Only the owner of the linked RFQ can update it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/files/<int:file_id>",
+   "summary": "Move a file or folder to the trash (restorable)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/files/<int:file_id>",
+   "summary": "Download a file's bytes."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PATCH"
+   ],
+   "path": "/api/v1/files/<int:file_id>",
+   "summary": "Rename, move or re-describe a file or folder."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/files/<int:file_id>/details",
+   "summary": "File or folder details: who uploaded/modified it and when, source, and the inquiries, quotes, chats, certifications and imports that use it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/files/<int:file_id>/metadata",
+   "summary": "Get one file's metadata without downloading it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/files/browse",
+   "summary": "List one folder's sub-folders and files (default the root '/')."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/files/bulk/delete",
+   "summary": "Permanently delete files/folders that are in the trash (people only)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/files/bulk/download",
+   "summary": "Download several files/folders as one zip."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/files/bulk/move",
+   "summary": "Move several files/folders into one folder."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/files/bulk/restore",
+   "summary": "Restore files/folders from the trash."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/files/bulk/trash",
+   "summary": "Move several files/folders to the trash."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/files/folders",
+   "summary": "Create a folder (and any missing parent folders)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/files/merchant",
+   "summary": "Every file of the merchant, newest first (flat; see /browse for folders)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/files/search",
+   "summary": "Search files and folders by name or description across all folders."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/files/trash",
+   "summary": "List what is in the trash (a trashed folder is listed once)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/files/trash/empty",
+   "summary": "Permanently delete everything in the trash (people only)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/files/tree",
+   "summary": "Every folder of the merchant's Files (paths), to see how files are organised before moving or creating folders."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/files/upload",
+   "summary": "Upload a file into the merchant's Files (optionally into a folder)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/inventory",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/inventory",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/inventory/<int:id>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/inventory/<int:id>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/inventory/<int:id>/ledger",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/inventory/<int:id>/stock",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/inventory/locations",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/inventory/locations",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/inventory/locations/<int:id>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/inventory/products",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/inventory/products",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/inventory/products/<int:id>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/inventory/products/<int:id>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/marketplace/demand_listings",
+   "summary": "Get demand listings belonging to published RFQs."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/marketplace/supply_listings",
+   "summary": "Get all supply listings."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/merchant",
+   "summary": "Create a new merchant for the authenticated user."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/merchant/",
+   "summary": "Get all merchants in the system."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/merchant/",
+   "summary": "Create a new merchant for the authenticated user."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/merchant/<int:merchant_id>",
+   "summary": "Get a merchant by ID."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/merchant/<int:merchant_id>",
+   "summary": "Update a merchant. The caller must own the merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/merchant/<int:merchant_id>/invites",
+   "summary": "Invite a coworker by email. Re-inviting a pending email resends it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/merchant/<int:merchant_id>/invites/<int:invite_id>",
+   "summary": "Revoke a pending invite; its link stops working immediately."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/merchant/<int:merchant_id>/invites/<int:invite_id>/resend",
+   "summary": "Issue a fresh link (new token, new 7-day expiry) and email it again."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/merchant/<int:merchant_id>/qualification",
+   "summary": "Get all qualifications for a merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/merchant/<int:merchant_id>/team",
+   "summary": "List the merchant's active members and pending invites."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/merchant/me",
+   "summary": "Get the current user's merchant information."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/merchant/qualification",
+   "summary": "Create a new certification for the authenticated user's merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/merchant/qualification/<int:qualification_id>",
+   "summary": "Delete a certification belonging to the authenticated user's merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/message/<int:message_id>",
+   "summary": "Update a message by ID. Only the message text field may be changed."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/message/chat/<int:chat_id>",
+   "summary": "Get all messages for a specific chat."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/message/chat/<int:chat_id>",
+   "summary": "Create a new message in a chat. Supports both JSON and multipart/form-data (for file attachments)."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/message/chat/<int:chat_id>/stream/<int:last_message_id>",
+   "summary": "Stream new messages for a specific chat starting from the last message ID."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/notification",
+   "summary": "List the authenticated user's most recent notifications, newest first."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/notification/<notification_id>/read",
+   "summary": "Mark one notification as read."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/operations/<register>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET",
+    "PATCH"
+   ],
+   "path": "/api/v1/operations/<register>/<int:id>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/operations/<register>/export",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/operations/allocations",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/operations/analytics/<view>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/operations/analytics/spec-benchmark",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/operations/analytics/supplier-performance",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/operations/certificates/<int:id>/verify",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/operations/commercial-links/<kind>/<int:id>/remove",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "path": "/api/v1/operations/deals",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/operations/deals/<int:id>/contribution",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/operations/deals/<int:id>/cost-coverage",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/operations/deals/<int:id>/invoice-links",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/operations/deals/<int:id>/orders",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/operations/deals/<int:id>/progression",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/operations/evidence/<int:id>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "path": "/api/v1/operations/imports",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PATCH"
+   ],
+   "path": "/api/v1/operations/imports/<int:batch_id>/records/<int:record_id>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/operations/imports/<int:batch_id>/records/<int:record_id>/resolve-duplicate",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/operations/imports/<int:id>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/operations/imports/<int:id>/commit",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/operations/invoice-links/<int:id>/payments",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "path": "/api/v1/operations/market/news",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "path": "/api/v1/operations/market/prices",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "path": "/api/v1/operations/partners",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET",
+    "PATCH"
+   ],
+   "path": "/api/v1/operations/partners/<int:id>",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "path": "/api/v1/operations/partners/<int:id>/assessments",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "path": "/api/v1/operations/partners/<int:id>/capabilities",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "path": "/api/v1/operations/partners/<int:id>/certificates",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/operations/partners/<int:id>/history",
+   "summary": ""
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/products/material-types",
+   "summary": "Get all available material types."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/products/schema",
+   "summary": "Get all available product schemas."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/products/schema/<material_type>/shapes",
+   "summary": "Get the shape-specific field schema for a given material type."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/public/card/<string:share_token>",
+   "summary": "Get a public business card by share token."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/public/rfqs/share/<string:share_token>",
+   "summary": "Get an RFQ by its share token if it's published. No authentication required."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/rfq",
+   "summary": "Get all RFQs belonging to the authenticated merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/rfq",
+   "summary": "Create a new RFQ. merchant_id is derived from the authenticated user."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/rfq/<int:rfq_id>",
+   "summary": "Delete an RFQ by ID. Only the owning merchant can delete it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/rfq/<int:rfq_id>",
+   "summary": "Get an RFQ by ID. Only the owning merchant can access it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/rfq/<int:rfq_id>",
+   "summary": "Update an RFQ by ID. Only the owning merchant can update it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/rfq/<int:rfq_id>/share-email",
+   "summary": "Send the RFQ share link to all contacts in a contact list."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/rfq/merchant/<int:merchant_id>",
+   "summary": "Get all RFQs for a merchant. Callers may only view their own merchant's RFQs."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/rfq/received",
+   "summary": "List the received RFQs recorded by the calling seller."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/rfq/received",
+   "summary": "Create a received RFQ with its line items."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/rfq/received/<int:rfq_id>",
+   "summary": "Delete one of your received RFQs with its line items and quotes."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/rfq/received/<int:rfq_id>",
+   "summary": "Get one of your received RFQs."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/rfq/received/<int:rfq_id>",
+   "summary": "Update the header of one of your received RFQs."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/rfq/received/<int:rfq_id>/confirm",
+   "summary": "Confirm a reviewed received RFQ so you can quote on it."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/rfq/received/extract",
+   "summary": "Extract a draft received RFQ from an uploaded document or pasted text."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/supply_listing",
+   "summary": "Get all supply listings."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/supply_listing",
+   "summary": "Create a new supply listing. merchant_id is derived from the authenticated user."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/v1/supply_listing/<int:supply_listing_id>",
+   "summary": "Delete a supply listing by ID. Only the owning merchant may delete."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/supply_listing/<int:supply_listing_id>",
+   "summary": "Get a supply listing by ID."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/v1/supply_listing/<int:supply_listing_id>",
+   "summary": "Update a supply listing by ID. Only the owning merchant may update."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/v1/supply_listing/batch_upload",
+   "summary": "Batch upload supply listings from CSV file. Assumes all products are stainless steel products."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/supply_listing/merchant/<int:merchant_id>",
+   "summary": "Get all supply listings for a specific merchant."
+  },
+  {
+   "has_schema": true,
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/v1/time",
+   "summary": "Get the current server time."
+  }
+ ],
+ "source": "Crontal main @ 594539d, /api/v1/agent-access/routes and /routes/describe via Flask test client (SQLite, default shapes seeded)",
+ "specs": {
+  "GET /api/v1/bid/merchant/<int:merchant_id>": {
+   "has_schema": true,
+   "method": "GET",
+   "notes": "merchant_id must be your own.",
+   "path": "/api/v1/bid/merchant/<int:merchant_id>",
+   "path_params": {
+    "merchant_id": {
+     "type": "integer"
+    }
+   },
+   "response": [
+    {
+     "bid_token": "string",
+     "buyer_responses": [
+      {
+       "bid_id": "integer",
+       "buyer_merchant_id": "integer",
+       "created_at": "string (date-time)",
+       "id": "integer",
+       "message": "string",
+       "response_type": "string"
+      }
+     ],
+     "created_at": "string (date-time)",
+     "currency": "string",
+     "expiry_date": "string (date)",
+     "id": "integer",
+     "is_locked": "boolean",
+     "is_saved": "boolean",
+     "lead_time_days": "integer",
+     "locked_at": "string (date-time)",
+     "message": "string",
+     "parent_bid_id": "integer",
+     "payment_terms": "string",
+     "pricing_details": [
+      {
+       "listing_id": "integer",
+       "notes": "string",
+       "quantity": "number",
+       "unit_price": "number"
+      }
+     ],
+     "revision": "integer",
+     "rfq_details": {
+      "bidding_end_date": "string (date)",
+      "bidding_start_date": "string (date)",
+      "bids_count": "integer",
+      "country": "string",
+      "created_at": "string (date-time)",
+      "delivery_address": {
+       "additional_info": "string",
+       "city": "string",
+       "country": "string",
+       "id": "integer",
+       "postal_code": "string",
+       "region": "string",
+       "street_address": "string"
+      },
+      "description": "string",
+      "external_buyer_contact": "string",
+      "external_buyer_name": "string",
+      "external_reference": "string",
+      "fulfillment_date": "string (date)",
+      "id": "integer",
+      "intake_status": "string",
+      "listings": [
+       {
+        "bid_deadline": "string (date)",
+        "delivery_date": "string (date)",
+        "id": "integer",
+        "payment_terms": "string",
+        "price_per_unit": "number",
+        "product": "object",
+        "quality_requirements": "string",
+        "quantity": "number",
+        "source_text": "string",
+        "status": "string",
+        "unit": "string"
+       }
+      ],
+      "merchant": {
+       "id": "integer",
+       "name": "string"
+      },
+      "name": "string",
+      "origin": "string",
+      "received_by_merchant_id": "integer",
+      "received_date": "string (date)",
+      "share_token": "string",
+      "source_channel": "string",
+      "source_file_id": "integer",
+      "status": "string",
+      "updated_at": "string (date-time)"
+     },
+     "rfq_id": "integer",
+     "status": "string",
+     "submitted_at": "string (date-time)",
+     "supplier_merchant_id": "integer",
+     "terms": "string",
+     "total_price": "number",
+     "unlocked_at": "string (date-time)",
+     "updated_at": "string (date-time)"
+    }
+   ],
+   "success_status": 200,
+   "summary": "Get all quotes (non-saved) submitted by a specific merchant (supplier)."
+  },
+  "GET /api/v1/contact": {
+   "has_schema": true,
+   "method": "GET",
+   "path": "/api/v1/contact",
+   "query": {
+    "market": {
+     "description": "Market segment filter.",
+     "type": "string"
+    },
+    "q": {
+     "description": "Free-text search.",
+     "type": "string"
+    },
+    "recent": {
+     "description": "Only recently added contacts.",
+     "type": "boolean"
+    }
+   },
+   "response": [
+    {
+     "contact_merchant_id": "integer",
+     "contact_name": "string",
+     "contact_user_id": "integer",
+     "created_at": "string (date-time)",
+     "creator_merchant_id": "integer",
+     "email": "string",
+     "grade_tags": [
+      "string"
+     ],
+     "id": "integer",
+     "location": "string",
+     "market_segment": "string",
+     "merchant_name": "string",
+     "met_at": "string (date-time)",
+     "notes": "string",
+     "phone": "string",
+     "region": "string",
+     "role": "string"
+    }
+   ],
+   "success_status": 200,
+   "summary": "Get all contacts for the authenticated merchant."
+  },
+  "GET /api/v1/files/browse": {
+   "has_schema": true,
+   "method": "GET",
+   "path": "/api/v1/files/browse",
+   "query": {
+    "include_folders": {
+     "default": true,
+     "description": "Include sub-folders (listed first).",
+     "type": "boolean"
+    },
+    "order": {
+     "default": "asc",
+     "description": "Sort order.",
+     "enum": [
+      "asc",
+      "desc"
+     ],
+     "type": "string"
+    },
+    "path": {
+     "default": "/",
+     "description": "Folder path: '/' is the root, nested like '/Customers/Morris/2026/'.",
+     "type": "string"
+    },
+    "sort": {
+     "default": "name",
+     "description": "Sort key.",
+     "enum": [
+      "name",
+      "modified",
+      "created",
+      "size"
+     ],
+     "type": "string"
+    }
+   },
+   "response": {
+    "breadcrumbs": [
+     {
+      "name": "string",
+      "path": "string"
+     }
+    ],
+    "files": [
+     {
+      "content_type": "string",
+      "created_at": "string (date-time)",
+      "deleted_at": "string (date-time), set while in the trash",
+      "description": "string",
+      "filename": "string (the name)",
+      "folder_path": "string (folder it sits in)",
+      "id": "integer",
+      "kind": "file|folder",
+      "modified_by": {
+       "id": "integer",
+       "is_ai": "boolean",
+       "name": "string"
+      },
+      "path": "string (full path; folders end with '/')",
+      "size_bytes": "integer",
+      "source": "upload|email|ai_generated|system|unknown",
+      "source_detail": "object",
+      "updated_at": "string (date-time)",
+      "uploaded_by": {
+       "id": "integer",
+       "is_ai": "boolean",
+       "name": "string"
+      }
+     }
+    ],
+    "folders": [
+     {
+      "content_type": "string",
+      "created_at": "string (date-time)",
+      "deleted_at": "string (date-time), set while in the trash",
+      "description": "string",
+      "filename": "string (the name)",
+      "folder_path": "string (folder it sits in)",
+      "id": "integer",
+      "item_count": "integer",
+      "kind": "file|folder",
+      "modified_by": {
+       "id": "integer",
+       "is_ai": "boolean",
+       "name": "string"
+      },
+      "path": "string (full path; folders end with '/')",
+      "size_bytes": "integer",
+      "source": "upload|email|ai_generated|system|unknown",
+      "source_detail": "object",
+      "updated_at": "string (date-time)",
+      "uploaded_by": {
+       "id": "integer",
+       "is_ai": "boolean",
+       "name": "string"
+      }
+     }
+    ],
+    "path": "string",
+    "success": "boolean"
+   },
+   "success_status": 200,
+   "summary": "List one folder's sub-folders and files (default the root '/')."
+  },
+  "GET /api/v1/files/search": {
+   "has_schema": true,
+   "method": "GET",
+   "path": "/api/v1/files/search",
+   "query": {
+    "kind": {
+     "description": "Only files or only folders.",
+     "enum": [
+      "file",
+      "folder"
+     ],
+     "type": "string"
+    },
+    "limit": {
+     "default": 200,
+     "description": "Max results (<= 200).",
+     "type": "integer"
+    },
+    "path": {
+     "description": "Only search inside this folder (and below).",
+     "type": "string"
+    },
+    "q": {
+     "description": "Text to find in names and descriptions.",
+     "required": true,
+     "type": "string"
+    }
+   },
+   "response": {
+    "query": "string",
+    "results": [
+     {
+      "content_type": "string",
+      "created_at": "string (date-time)",
+      "deleted_at": "string (date-time), set while in the trash",
+      "description": "string",
+      "filename": "string (the name)",
+      "folder_path": "string (folder it sits in)",
+      "id": "integer",
+      "kind": "file|folder",
+      "modified_by": {
+       "id": "integer",
+       "is_ai": "boolean",
+       "name": "string"
+      },
+      "path": "string (full path; folders end with '/')",
+      "size_bytes": "integer",
+      "source": "upload|email|ai_generated|system|unknown",
+      "source_detail": "object",
+      "updated_at": "string (date-time)",
+      "uploaded_by": {
+       "id": "integer",
+       "is_ai": "boolean",
+       "name": "string"
+      }
+     }
+    ],
+    "success": "boolean"
+   },
+   "success_status": 200,
+   "summary": "Search files and folders by name or description across all folders."
+  },
+  "GET /api/v1/notification": {
+   "has_schema": true,
+   "method": "GET",
+   "path": "/api/v1/notification",
+   "query": {
+    "limit": {
+     "default": 30,
+     "description": "1-100.",
+     "type": "integer"
+    }
+   },
+   "response": [
+    {
+     "created_at": "string (date-time)",
+     "data": "object",
+     "id": "integer|string",
+     "is_read": "boolean",
+     "read_at": "string (date-time)",
+     "related_entity_id": "integer",
+     "related_entity_type": "string",
+     "type": "string"
+    }
+   ],
+   "success_status": 200,
+   "summary": "List the authenticated user's most recent notifications, newest first."
+  },
+  "GET /api/v1/rfq": {
+   "has_schema": true,
+   "method": "GET",
+   "path": "/api/v1/rfq",
+   "response": [
+    {
+     "bidding_end_date": "string (date)",
+     "bidding_start_date": "string (date)",
+     "bids_count": "integer",
+     "country": "string",
+     "created_at": "string (date-time)",
+     "delivery_address": {
+      "additional_info": "string",
+      "city": "string",
+      "country": "string",
+      "id": "integer",
+      "postal_code": "string",
+      "region": "string",
+      "street_address": "string"
+     },
+     "description": "string",
+     "external_buyer_contact": "string",
+     "external_buyer_name": "string",
+     "external_reference": "string",
+     "fulfillment_date": "string (date)",
+     "id": "integer",
+     "intake_status": "string",
+     "listings": [
+      {
+       "bid_deadline": "string (date)",
+       "delivery_date": "string (date)",
+       "id": "integer",
+       "payment_terms": "string",
+       "price_per_unit": "number",
+       "product": {
+        "condition": "string",
+        "finish": "string",
+        "grade": "string",
+        "id": "integer",
+        "material_type": "string",
+        "name": "string",
+        "shape": "string",
+        "shape_attributes": "object",
+        "standard": "string",
+        "weight": "string"
+       },
+       "quality_requirements": "string",
+       "quantity": "number",
+       "source_text": "string",
+       "status": "string",
+       "unit": "string"
+      }
+     ],
+     "merchant": {
+      "id": "integer",
+      "name": "string"
+     },
+     "name": "string",
+     "origin": "string",
+     "received_by_merchant_id": "integer",
+     "received_date": "string (date)",
+     "share_token": "string",
+     "source_channel": "string",
+     "source_file_id": "integer",
+     "status": "string",
+     "updated_at": "string (date-time)"
+    }
+   ],
+   "success_status": 200,
+   "summary": "Get all RFQs belonging to the authenticated merchant."
+  },
+  "GET /api/v1/rfq/<int:rfq_id>": {
+   "has_schema": true,
+   "method": "GET",
+   "path": "/api/v1/rfq/<int:rfq_id>",
+   "path_params": {
+    "rfq_id": {
+     "type": "integer"
+    }
+   },
+   "response": {
+    "bidding_end_date": "string (date)",
+    "bidding_start_date": "string (date)",
+    "bids_count": "integer",
+    "country": "string",
+    "created_at": "string (date-time)",
+    "delivery_address": {
+     "additional_info": "string",
+     "city": "string",
+     "country": "string",
+     "id": "integer",
+     "postal_code": "string",
+     "region": "string",
+     "street_address": "string"
+    },
+    "description": "string",
+    "external_buyer_contact": "string",
+    "external_buyer_name": "string",
+    "external_reference": "string",
+    "fulfillment_date": "string (date)",
+    "id": "integer",
+    "intake_status": "string",
+    "listings": [
+     {
+      "bid_deadline": "string (date)",
+      "delivery_date": "string (date)",
+      "id": "integer",
+      "payment_terms": "string",
+      "price_per_unit": "number",
+      "product": {
+       "condition": "string",
+       "finish": "string",
+       "grade": "string",
+       "id": "integer",
+       "material_type": "string",
+       "name": "string",
+       "shape": "string",
+       "shape_attributes": "object",
+       "standard": "string",
+       "weight": "string"
+      },
+      "quality_requirements": "string",
+      "quantity": "number",
+      "source_text": "string",
+      "status": "string",
+      "unit": "string"
+     }
+    ],
+    "merchant": {
+     "id": "integer",
+     "name": "string"
+    },
+    "name": "string",
+    "origin": "string",
+    "received_by_merchant_id": "integer",
+    "received_date": "string (date)",
+    "share_token": "string",
+    "source_channel": "string",
+    "source_file_id": "integer",
+    "status": "string",
+    "updated_at": "string (date-time)"
+   },
+   "success_status": 200,
+   "summary": "Get an RFQ by ID. Only the owning merchant can access it."
+  },
+  "GET /api/v1/rfq/received": {
+   "has_schema": true,
+   "method": "GET",
+   "notes": "Your received RFQs, newest first.",
+   "path": "/api/v1/rfq/received",
+   "response": [
+    {
+     "bidding_end_date": "string (date)",
+     "bidding_start_date": "string (date)",
+     "bids_count": "integer",
+     "country": "string",
+     "created_at": "string (date-time)",
+     "delivery_address": {
+      "additional_info": "string",
+      "city": "string",
+      "country": "string",
+      "id": "integer",
+      "postal_code": "string",
+      "region": "string",
+      "street_address": "string"
+     },
+     "description": "string",
+     "external_buyer_contact": "string",
+     "external_buyer_name": "string",
+     "external_reference": "string",
+     "fulfillment_date": "string (date)",
+     "id": "integer",
+     "intake_status": "string",
+     "listings": [
+      {
+       "bid_deadline": "string (date)",
+       "delivery_date": "string (date)",
+       "id": "integer",
+       "payment_terms": "string",
+       "price_per_unit": "number",
+       "product": {
+        "condition": "string",
+        "finish": "string",
+        "grade": "string",
+        "id": "integer",
+        "material_type": "string",
+        "name": "string",
+        "shape": "string",
+        "shape_attributes": "object",
+        "standard": "string",
+        "weight": "string"
+       },
+       "quality_requirements": "string",
+       "quantity": "number",
+       "source_text": "string",
+       "status": "string",
+       "unit": "string"
+      }
+     ],
+     "merchant": {
+      "id": "integer",
+      "name": "string"
+     },
+     "name": "string",
+     "origin": "string",
+     "quote": {
+      "bid_id": "integer",
+      "bid_token": "string",
+      "is_saved": "boolean",
+      "revision": "integer",
+      "status": "string"
+     },
+     "received_by_merchant_id": "integer",
+     "received_date": "string (date)",
+     "share_token": "string",
+     "source_channel": "string",
+     "source_file_id": "integer",
+     "source_file_name": "string",
+     "status": "string",
+     "updated_at": "string (date-time)"
+    }
+   ],
+   "success_status": 200,
+   "summary": "List the received RFQs recorded by the calling seller."
+  },
+  "GET /api/v1/rfq/received/<int:rfq_id>": {
+   "has_schema": true,
+   "method": "GET",
+   "path": "/api/v1/rfq/received/<int:rfq_id>",
+   "path_params": {
+    "rfq_id": {
+     "type": "integer"
+    }
+   },
+   "response": {
+    "bidding_end_date": "string (date)",
+    "bidding_start_date": "string (date)",
+    "bids_count": "integer",
+    "country": "string",
+    "created_at": "string (date-time)",
+    "delivery_address": {
+     "additional_info": "string",
+     "city": "string",
+     "country": "string",
+     "id": "integer",
+     "postal_code": "string",
+     "region": "string",
+     "street_address": "string"
+    },
+    "description": "string",
+    "external_buyer_contact": "string",
+    "external_buyer_name": "string",
+    "external_reference": "string",
+    "fulfillment_date": "string (date)",
+    "id": "integer",
+    "intake_status": "string",
+    "listings": [
+     {
+      "bid_deadline": "string (date)",
+      "delivery_date": "string (date)",
+      "id": "integer",
+      "payment_terms": "string",
+      "price_per_unit": "number",
+      "product": {
+       "condition": "string",
+       "finish": "string",
+       "grade": "string",
+       "id": "integer",
+       "material_type": "string",
+       "name": "string",
+       "shape": "string",
+       "shape_attributes": "object",
+       "standard": "string",
+       "weight": "string"
+      },
+      "quality_requirements": "string",
+      "quantity": "number",
+      "source_text": "string",
+      "status": "string",
+      "unit": "string"
+     }
+    ],
+    "merchant": {
+     "id": "integer",
+     "name": "string"
+    },
+    "name": "string",
+    "origin": "string",
+    "quote": {
+     "bid_id": "integer",
+     "bid_token": "string",
+     "is_saved": "boolean",
+     "revision": "integer",
+     "status": "string"
+    },
+    "received_by_merchant_id": "integer",
+    "received_date": "string (date)",
+    "share_token": "string",
+    "source_channel": "string",
+    "source_file_id": "integer",
+    "source_file_name": "string",
+    "status": "string",
+    "updated_at": "string (date-time)"
+   },
+   "success_status": 200,
+   "summary": "Get one of your received RFQs."
+  },
+  "PATCH /api/v1/files/<int:file_id>": {
+   "body": {
+    "additionalProperties": false,
+    "description": "Rename, move and/or describe one file or folder. Omit what stays.",
+    "properties": {
+     "description": {
+      "description": "New description; null or '' clears it.",
+      "maxLength": 1000,
+      "type": "string"
+     },
+     "folder_path": {
+      "description": "Destination folder to move it into. Folder path: '/' is the root, nested folders look like '/Customers/Morris/2026/'. Missing folders are created.",
+      "type": "string"
+     },
+     "name": {
+      "description": "New name (keep the extension for files); no '/'.",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "has_schema": true,
+   "method": "PATCH",
+   "notes": "Rename with `name`, move with `folder_path` (the destination folder; created when missing), or both. Moving a folder moves everything in it. 409 when the name is already taken in the destination.",
+   "path": "/api/v1/files/<int:file_id>",
+   "path_params": {
+    "file_id": {
+     "type": "integer"
+    }
+   },
+   "response": {
+    "item": {
+     "content_type": "string",
+     "created_at": "string (date-time)",
+     "deleted_at": "string (date-time), set while in the trash",
+     "description": "string",
+     "filename": "string (the name)",
+     "folder_path": "string (folder it sits in)",
+     "id": "integer",
+     "kind": "file|folder",
+     "modified_by": {
+      "id": "integer",
+      "is_ai": "boolean",
+      "name": "string"
+     },
+     "path": "string (full path; folders end with '/')",
+     "size_bytes": "integer",
+     "source": "upload|email|ai_generated|system|unknown",
+     "source_detail": "object",
+     "updated_at": "string (date-time)",
+     "uploaded_by": {
+      "id": "integer",
+      "is_ai": "boolean",
+      "name": "string"
+     }
+    },
+    "success": "boolean"
+   },
+   "success_status": 200,
+   "summary": "Rename, move or re-describe a file or folder."
+  },
+  "POST /api/v1/demand_listing": {
+   "body": {
+    "properties": {
+     "bid_deadline": {
+      "format": "date",
+      "type": "string"
+     },
+     "delivery_address": {
+      "description": "Address input schema for create/update requests.",
+      "properties": {
+       "additional_info": {
+        "type": "string"
+       },
+       "city": {
+        "type": "string"
+       },
+       "country": {
+        "type": "string"
+       },
+       "postal_code": {
+        "type": "string"
+       },
+       "region": {
+        "type": "string"
+       },
+       "street_address": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "country"
+      ],
+      "type": "object"
+     },
+     "delivery_date": {
+      "format": "date",
+      "type": "string"
+     },
+     "payment_terms": {
+      "type": "string"
+     },
+     "price_per_unit": {
+      "type": "number"
+     },
+     "product_info": {
+      "description": "Product info for creating demand/supply listings.",
+      "properties": {
+       "condition": {
+        "examples": [
+         "polished",
+         "anneal_pickled",
+         "bright_annealed"
+        ],
+        "type": "string"
+       },
+       "grade": {
+        "examples": [
+         "304",
+         "316",
+         "316L",
+         "310"
+        ],
+        "type": "string"
+       },
+       "material_type": {
+        "enum": [
+         "stainless_steel"
+        ],
+        "type": "string"
+       },
+       "name": {
+        "type": "string"
+       },
+       "shape": {
+        "enum": [
+         "coil",
+         "flat_bar",
+         "hex_bar",
+         "pipe_seamless",
+         "pipe_welded",
+         "plate",
+         "round_bar",
+         "sheet",
+         "square_bar",
+         "tube_coil",
+         "tube_straight"
+        ],
+        "type": "string"
+       },
+       "shape_attributes": {
+        "additionalProperties": true,
+        "description": "Dimensions for the chosen shape; keys per shape are listed in shape_attributes_by_shape (units as the user gave them).",
+        "type": "object"
+       },
+       "standard": {
+        "examples": [
+         "ASTM",
+         "JIS",
+         "EN"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "material_type"
+      ],
+      "shape_attributes_by_shape": {
+       "coil": {
+        "coil_weight": "number: Coil Weight",
+        "protective_film": "boolean: Protective Film",
+        "thickness": "number: Thickness",
+        "width": "number: Width"
+       },
+       "flat_bar": {
+        "heat_treatment": "string: Heat Treatment",
+        "length": "number: Length",
+        "surface_condition": "string: Surface Condition",
+        "thickness": "number: Thickness",
+        "width": "number: Width"
+       },
+       "hex_bar": {
+        "heat_treatment": "string: Heat Treatment",
+        "length": "number: Length",
+        "surface_condition": "string: Surface Condition",
+        "width": "number: Width"
+       },
+       "pipe_seamless": {
+        "od": "number: Outer Diameter",
+        "schedule": "string: Schedule",
+        "wt": "number: Wall Thickness"
+       },
+       "pipe_welded": {
+        "od": "number: Outer Diameter",
+        "schedule": "string: Schedule",
+        "wt": "number: Wall Thickness"
+       },
+       "plate": {
+        "cut_to_size": "boolean: Cut to Size",
+        "length": "number: Length",
+        "protective_film": "boolean: Protective Film",
+        "thickness": "number: Thickness",
+        "width": "number: Width"
+       },
+       "round_bar": {
+        "diameter": "number: Diameter",
+        "heat_treatment": "string: Heat Treatment",
+        "length": "number: Length",
+        "surface_condition": "string: Surface Condition"
+       },
+       "sheet": {
+        "cut_to_size": "boolean: Cut to Size",
+        "length": "number: Length",
+        "protective_film": "boolean: Protective Film",
+        "thickness": "number: Thickness",
+        "width": "number: Width"
+       },
+       "square_bar": {
+        "heat_treatment": "string: Heat Treatment",
+        "length": "number: Length",
+        "surface_condition": "string: Surface Condition",
+        "width": "number: Width"
+       },
+       "tube_coil": {
+        "coil_id": "number: Coil ID",
+        "coil_od": "number: Coil OD",
+        "coil_weight": "number: Coil Weight",
+        "end_protection": "string: End Protection",
+        "od": "number: Outer Diameter",
+        "spool_type": "string: Spool Type",
+        "wt": "number: Wall Thickness"
+       },
+       "tube_straight": {
+        "coating_or_lining": "string: Coating or Lining",
+        "end_finish": "string: End Finish",
+        "fixed_length": "number: Fixed Length",
+        "length_type": "string: Length Type",
+        "ndt": "list: NDT Requirements",
+        "od": "number: Outer Diameter",
+        "wt": "number: Wall Thickness"
+       }
+      },
+      "type": "object"
+     },
+     "quality_requirements": {
+      "type": "string"
+     },
+     "quantity": {
+      "type": "number"
+     },
+     "rfq_id": {
+      "type": "integer"
+     },
+     "timeline": {
+      "type": "string"
+     },
+     "unit": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "rfq_id",
+     "product_info"
+    ],
+    "type": "object"
+   },
+   "has_schema": true,
+   "method": "POST",
+   "notes": "One line item on an RFQ you own. product_info.shape picks which shape_attributes keys apply. delivery_address overrides the RFQ's.",
+   "path": "/api/v1/demand_listing",
+   "response": {
+    "bid_deadline": "string (date)",
+    "created_at": "string (date-time)",
+    "delivery_address": {
+     "additional_info": "string",
+     "city": "string",
+     "country": "string",
+     "id": "integer",
+     "postal_code": "string",
+     "region": "string",
+     "street_address": "string"
+    },
+    "delivery_date": "string (date)",
+    "id": "integer",
+    "listing_type": "string",
+    "merchant_id": "integer",
+    "payment_terms": "string",
+    "price_per_unit": "number",
+    "product": {
+     "condition": "string",
+     "finish": "string",
+     "grade": "string",
+     "id": "integer",
+     "material_type": "string",
+     "name": "string",
+     "shape": "string",
+     "shape_attributes": "object",
+     "standard": "string",
+     "weight": "string"
+    },
+    "product_id": "integer",
+    "quality_requirements": "string",
+    "quantity": "number",
+    "rfq_id": "integer",
+    "source_text": "string",
+    "status": "string",
+    "timeline": "string",
+    "unit": "string",
+    "updated_at": "string (date-time)"
+   },
+   "success_status": 201,
+   "summary": "Create a new demand listing. The linked RFQ must belong to the caller."
+  },
+  "POST /api/v1/files/upload": {
+   "has_schema": true,
+   "method": "POST",
+   "multipart": {
+    "description": {
+     "description": "Optional description.",
+     "type": "string"
+    },
+    "file": {
+     "required": true,
+     "type": "file"
+    },
+    "folder_path": {
+     "description": "Folder to put it in, e.g. '/Customers/Morris/2026/' (created when missing). Default '/'. A name already taken there gets ' (1)' added.",
+     "type": "string"
+    },
+    "source": {
+     "description": "Where the file came from. The AI agent sends 'ai_generated' for files it made and 'email' for email attachments; people 'upload' or 'email'. Defaults by who uploads.",
+     "enum": [
+      "upload",
+      "email",
+      "ai_generated"
+     ],
+     "type": "string"
+    },
+    "source_detail": {
+     "description": "JSON object with provenance, e.g. for email {\"mailbox\": \"...\", \"sender\": \"...\", \"subject\": \"...\", \"message_id\": \"...\"}; for agent files {\"thread_key\": \"...\"}.",
+     "type": "string"
+    }
+   },
+   "notes": "Stored for the caller's merchant; attach it elsewhere by file id.",
+   "path": "/api/v1/files/upload",
+   "response": {
+    "file": {
+     "content_type": "string",
+     "created_at": "string (date-time)",
+     "description": "string",
+     "filename": "string",
+     "folder_path": "string",
+     "id": "integer",
+     "size_bytes": "integer",
+     "source": "string"
+    },
+    "success": "boolean"
+   },
+   "success_status": 201,
+   "summary": "Upload a file into the merchant's Files (optionally into a folder)."
+  },
+  "POST /api/v1/rfq/received": {
+   "body": {
+    "properties": {
+     "bidding_end_date": {
+      "format": "date",
+      "type": "string"
+     },
+     "confirm": {
+      "default": false,
+      "type": "boolean"
+     },
+     "country": {
+      "maxLength": 255,
+      "type": "string"
+     },
+     "delivery_address": {
+      "description": "Address input schema for create/update requests.",
+      "properties": {
+       "additional_info": {
+        "type": "string"
+       },
+       "city": {
+        "type": "string"
+       },
+       "country": {
+        "type": "string"
+       },
+       "postal_code": {
+        "type": "string"
+       },
+       "region": {
+        "type": "string"
+       },
+       "street_address": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "country"
+      ],
+      "type": "object"
+     },
+     "description": {
+      "maxLength": 500,
+      "type": "string"
+     },
+     "external_buyer_contact": {
+      "maxLength": 255,
+      "type": "string"
+     },
+     "external_buyer_name": {
+      "maxLength": 255,
+      "type": "string"
+     },
+     "external_reference": {
+      "maxLength": 100,
+      "type": "string"
+     },
+     "fulfillment_date": {
+      "format": "date",
+      "type": "string"
+     },
+     "listings": {
+      "default": [],
+      "items": {
+       "description": "One requested line item, as read from the buyer's RFQ.",
+       "properties": {
+        "delivery_date": {
+         "format": "date",
+         "type": "string"
+        },
+        "payment_terms": {
+         "maxLength": 255,
+         "type": "string"
+        },
+        "price_per_unit": {
+         "minimum": 0,
+         "type": "number"
+        },
+        "product_info": {
+         "additionalProperties": false,
+         "description": "Product spec of one line; stainless steel is the only material.",
+         "properties": {
+          "condition": {
+           "maxLength": 255,
+           "type": "string"
+          },
+          "finish": {
+           "maxLength": 255,
+           "type": "string"
+          },
+          "grade": {
+           "maxLength": 255,
+           "type": "string"
+          },
+          "material_type": {
+           "default": "stainless_steel",
+           "type": "string"
+          },
+          "name": {
+           "maxLength": 255,
+           "type": "string"
+          },
+          "shape": {
+           "maxLength": 255,
+           "type": "string"
+          },
+          "shape_attributes": {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          "standard": {
+           "maxLength": 255,
+           "type": "string"
+          },
+          "weight": {
+           "maxLength": 255,
+           "type": "string"
+          }
+         },
+         "type": "object"
+        },
+        "quality_requirements": {
+         "type": "string"
+        },
+        "quantity": {
+         "minimum": 0,
+         "type": "number"
+        },
+        "source_text": {
+         "maxLength": 5000,
+         "type": "string"
+        },
+        "timeline": {
+         "maxLength": 255,
+         "type": "string"
+        },
+        "unit": {
+         "maxLength": 255,
+         "type": "string"
+        }
+       },
+       "required": [
+        "product_info"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     },
+     "name": {
+      "maxLength": 255,
+      "type": "string"
+     },
+     "received_date": {
+      "format": "date",
+      "type": "string"
+     },
+     "source_channel": {
+      "type": "string"
+     },
+     "source_file_id": {
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "has_schema": true,
+   "method": "POST",
+   "notes": "Records an RFQ you received from a buyer who is not on Crontal. Private to you: never published or shared, and the buyer is not notified. listings[].product_info is stainless steel (shape and shape_attributes as in POST /api/v1/demand_listing). Starts as intake_status needs_review; set confirm true or call .../confirm to enable quoting.",
+   "path": "/api/v1/rfq/received",
+   "response": {
+    "bidding_end_date": "string (date)",
+    "bidding_start_date": "string (date)",
+    "bids_count": "integer",
+    "country": "string",
+    "created_at": "string (date-time)",
+    "delivery_address": {
+     "additional_info": "string",
+     "city": "string",
+     "country": "string",
+     "id": "integer",
+     "postal_code": "string",
+     "region": "string",
+     "street_address": "string"
+    },
+    "description": "string",
+    "external_buyer_contact": "string",
+    "external_buyer_name": "string",
+    "external_reference": "string",
+    "fulfillment_date": "string (date)",
+    "id": "integer",
+    "intake_status": "string",
+    "listings": [
+     {
+      "bid_deadline": "string (date)",
+      "delivery_date": "string (date)",
+      "id": "integer",
+      "payment_terms": "string",
+      "price_per_unit": "number",
+      "product": {
+       "condition": "string",
+       "finish": "string",
+       "grade": "string",
+       "id": "integer",
+       "material_type": "string",
+       "name": "string",
+       "shape": "string",
+       "shape_attributes": "object",
+       "standard": "string",
+       "weight": "string"
+      },
+      "quality_requirements": "string",
+      "quantity": "number",
+      "source_text": "string",
+      "status": "string",
+      "unit": "string"
+     }
+    ],
+    "merchant": {
+     "id": "integer",
+     "name": "string"
+    },
+    "name": "string",
+    "origin": "string",
+    "quote": {
+     "bid_id": "integer",
+     "bid_token": "string",
+     "is_saved": "boolean",
+     "revision": "integer",
+     "status": "string"
+    },
+    "received_by_merchant_id": "integer",
+    "received_date": "string (date)",
+    "share_token": "string",
+    "source_channel": "string",
+    "source_file_id": "integer",
+    "source_file_name": "string",
+    "status": "string",
+    "updated_at": "string (date-time)"
+   },
+   "success_status": 201,
+   "summary": "Create a received RFQ with its line items."
+  }
+ }
+}

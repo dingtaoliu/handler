@@ -15,6 +15,14 @@ main model's verification. Live `efficiency` settings can disable fresh sessions
 helpers. Released on `crontal-agent` as **v48**, runtime commit `17324c3`, after backup **b026**; rollback **v47**. Main/BSS persona version 3 corrects stale identity wording. All three Crontal instance health/tool/settings checks passed. The main model remains Sol. Legacy Handler and the personal deployment are
 unchanged. Read the implementation document before changing these contracts.
 
+**Follow-up (branch `feat/route-catalog-in-prompt`, not merged or deployed):** Crontal's API
+route catalog (all route lines plus full contracts for 13 common routes) is now the last stable
+prompt component, `crontal_route_catalog`, cached per instance for 1 h with lazy refresh and a
+non-blocking fallback to discovery tools. Settings `efficiency.route_catalog`,
+`route_catalog_max_chars` (40000) and `route_catalog_full_specs`. ~8,962 tokens on a realistic
+fixture (3,706 for route lines alone). This supersedes the 2026-10-25 (2b) "pull on demand only"
+decision below; see the implementation document.
+
 Updated 2026-10-18 by the driver (Claude Code), for whoever picks this up next. Read this first, then `docs/agent-runtime-design.md` (the design) and the package briefs in `docs/rebuild/` (`phase1.md` … `phase4-ui.md`). Known problems are in `docs/rebuild/known-issues.md`.
 
 ## 1. What this project is

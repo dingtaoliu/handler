@@ -215,11 +215,8 @@ def _settings_defaults(integrations: Any, legacy_crontal: bool) -> dict[str, dic
     return out
 
 
-def _crontal_identity_client(args: Any, env: Any, integrations: Any, legacy: bool) -> Any:
-    """The instance's Crontal AI identity client (shared with the Crontal tools),
-    or None when this instance has no Crontal URL and agent token."""
-    from .gateway.crontal_identity import crontal_identity
-
+def _crontal_url_and_token(args: Any, env: Any, integrations: Any,
+                           legacy: bool) -> tuple[str | None, str | None]:
     url, token = None, None
     if legacy:
         url, token = args.crontal_url, env.get("CRONTAL_AGENT_TOKEN")
@@ -228,9 +225,29 @@ def _crontal_identity_client(args: Any, env: Any, integrations: Any, legacy: boo
             if integration.name == "crontal":
                 url = getattr(integration, "crontal_url", None)
                 token = getattr(integration, "agent_token", None)
+    return url, token
+
+
+def _crontal_identity_client(args: Any, env: Any, integrations: Any, legacy: bool) -> Any:
+    """The instance's Crontal AI identity client (shared with the Crontal tools),
+    or None when this instance has no Crontal URL and agent token."""
+    from .gateway.crontal_identity import crontal_identity
+
+    url, token = _crontal_url_and_token(args, env, integrations, legacy)
     if not (url and token):
         return None
     return crontal_identity(crontal_base_url(url), token)
+
+
+def _crontal_route_catalog(args: Any, env: Any, integrations: Any, legacy: bool) -> Any:
+    """The instance's Crontal API catalog (shared with the crontal_api tools),
+    or None when this instance has no Crontal URL and agent token."""
+    from .gateway.crontal_catalog import crontal_route_catalog
+
+    url, token = _crontal_url_and_token(args, env, integrations, legacy)
+    if not (url and token):
+        return None
+    return crontal_route_catalog(crontal_base_url(url), token)
 
 
 def _trusted_device_users(raw: str) -> dict[str, str]:
@@ -513,6 +530,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         emit_event = thread_router(store)
 
         crontal_id = _crontal_identity_client(args, env, integrations, legacy_crontal)
+        crontal_catalog = _crontal_route_catalog(args, env, integrations, legacy_crontal)
         users = [u.strip() for u in args.users.split(",") if u.strip()]
         # Output sinks: integrations register only when configured.
         outbox = Outbox(store)
@@ -575,7 +593,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             tokens=tokens, mcp_url=f"http://{local_host}:{args.port}{base_path}/mcp/",
             settings=settings, memory_tools=memory_tools,
             workspace_sync=workspace_sync, failure_notifier=FailureNotifier(notifier),
-            crontal_identity=crontal_id,
+            crontal_identity=crontal_id, crontal_catalog=crontal_catalog,
         )
         dispatcher = Dispatcher(
             store, executor, lease_seconds=config.lease_seconds,
@@ -604,6 +622,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         store.on_routed = lambda event, spec: publish_queued(bus, event, spec)
         app.include_router(settings_router(settings, auth, memory_tools,
                                            crontal_identity=crontal_id,
+                                           crontal_catalog=crontal_catalog,
                                            available_tools=lambda: {s.name for s in gateway.specs()}))
         app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
                                         uploads=uploads, log_file=_log_file(args)))
