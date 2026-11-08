@@ -23,4 +23,3 @@ def check_text(text: str, name: str, size: int | None = None) -> str:
     if bad / len(sample) > GARBAGE_RATIO:
         raise binary_error(name, size if size is not None else len(text))
     return text
-

@@ -26,4 +26,3 @@ def cached_conversion(path: Path, convert: Callable[[Path], str]) -> str:
         while len(_cache) > _CACHE_ENTRIES:
             _cache.popitem(last=False)
     return text
-

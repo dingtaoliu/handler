@@ -127,4 +127,3 @@ def _ranges(indexes: list[int]) -> str:
     if start is not None:
         out.append(f"{start + 1}" if start == prev else f"{start + 1}-{prev + 1}")
     return ",".join(out)
-

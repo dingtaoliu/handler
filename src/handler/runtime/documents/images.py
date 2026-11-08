@@ -94,4 +94,3 @@ def fit_image(image: Image, *, force: bool = False) -> Image:
         if buf.tell() <= IMAGE_MAX_BYTES:
             return Image(mime, buf.getvalue(), image.label)
     raise ReadError(f"{image.label or 'image'} is too large to show even after downscaling")
-

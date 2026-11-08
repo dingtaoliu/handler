@@ -271,4 +271,3 @@ def _render(wb: _Workbook, sheet: str | None, cells: str | None, budget: int | N
             out.append(note + ".]")
             break
     return Reading("\n".join(out).rstrip() + "\n")
-

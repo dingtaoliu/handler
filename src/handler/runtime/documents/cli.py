@@ -49,4 +49,3 @@ def main(argv: list[str] | None = None) -> int:
             target.write_bytes(image.data)
             print(f"image: {target} (open it with view_image)")
     return 0
-

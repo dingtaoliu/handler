@@ -41,4 +41,3 @@ def plain_text(path: Path, name: str) -> str:
             raise binary_error(name, len(data)) from None
         text = str(best)
     return check_text(text, name, len(data))
-

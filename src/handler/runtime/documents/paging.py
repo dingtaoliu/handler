@@ -21,4 +21,3 @@ def page_text(text: str, offset: int, max_chars: int, name: str) -> Reading:
             note += f" Call read_file with offset={end} to read on."
         chunk += note + "]"
     return Reading(chunk or "(empty file)")
-

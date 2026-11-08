@@ -42,4 +42,3 @@ def convert_document(path: Path, name: str, convert: Callable[[Path], str]) -> s
     except Exception as exc:  # noqa: BLE001
         raise ReadError(f"could not convert {name}: {type(exc).__name__}: {exc}") from exc
     return check_text(text, name)
-
