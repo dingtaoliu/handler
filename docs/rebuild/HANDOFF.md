@@ -226,6 +226,12 @@ Measured on a Heroku dyno: same uid as Handler, `unprivileged_userns_clone=0` so
 - bss lost memory saves recovered: 45 expired and 6 denied, executed via `/api/admin/memory-saves/recover`. The resulting topics have duplicate names (e.g. five topics for ZM Tubes PO 30595); merging them is pending owner approval.
 - Not deployed yet: Crontal `fix/inquiry-background-extraction` (Read RFQ reads in the background; migration `a1i2n3q4r5x6`). The cause: extraction took more than 30 s, and the browser and Heroku cut the request off.
 
+**Deployed 2026-11-08 12:56–13:05 UTC:** Handler **v49** (`rebuild` @ 19c1450) and Crontal **v119** (`main` @ 0cb7c11). Backup b027 first; Crontal migration `a1i2n3q4r5x6` (inquiry background extraction) applied; `GUNICORN_THREADS=16` set on Crontal. Rollback targets: Handler v48, Crontal v118.
+- Handler: compact Crontal route catalog in the stable prompt (`efficiency.route_catalog*`, ~1.7k tokens; only 13% of bss runs call Crontal, so keep it small); chat `context_links` (page context -> run-start memory); mail-intake plan doc (`mail-intake-plan.md`, not built).
+- Crontal: Read RFQ reads in the background (`intake_status` extracting/extraction_failed, retry, line editor); Files My files/Trash tabs; grouped tool calls in chat; bounded DB pool (2+2 per process; with Handler's 12 the 20-connection DB is exactly full: no headroom for extra processes), streams release DB sessions and drop dead clients within ~15 s; cached thread list; page context chip for new chats.
+- bss memory tidied by hand (46 -> 36 topics, 26 linked); backup in the session scratchpad only.
+- Verified: Handler instance health/404, catalog present in prompt; Crontal health, new bundle served, DB 17/20 after restart.
+
 **Backlog:**
 - **Mail intake: keep everything, wake less.** Plan in `mail-intake-plan.md` (owner review 2026-11-08, not started).
 - Paginate Crontal's notification list (see §6).
