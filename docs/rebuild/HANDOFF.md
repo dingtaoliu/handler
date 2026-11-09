@@ -8,6 +8,11 @@ for current progress and [the design](bss-improvement-design-2026-11-08.md) for
 contracts and constraints. Item 1 is investigation first; preserve production
 records while establishing why the incomplete import was confirmed.
 
+CSV export tool and durable chat downloads released as **v54**, runtime `4339dd6`,
+image `d38375a1d3b3`, backup **b032**, rollback **v53**. Full suite **1,230 passed,
+2 skipped**; live synthetic BSS artifact persistence/download and all three
+instance health/auth checks passed. See [csv-spreadsheets.md](csv-spreadsheets.md).
+
 ## 2026-11-08 native PDF file transport
 
 Native OpenAI `read_file` now uploads intact PDFs and returns file references,

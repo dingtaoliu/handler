@@ -1,6 +1,7 @@
 """mail_* tools through the gateway: reads, drafts, and approval-gated sends."""
 from email import policy
 from email.parser import BytesParser
+import asyncio
 
 import pytest
 
@@ -78,6 +79,115 @@ async def test_draft_reply_is_stored_and_appended_to_drafts(gw):
     (draft_raw, _, _), = gw.server.folders["草稿箱"].messages.values()
     draft = BytesParser(policy=policy.default).parsebytes(draft_raw)
     assert draft["In-Reply-To"] == "<rfq1@client.cn>"
+
+
+async def test_list_read_and_reuse_draft_preserve_signature(gw):
+    args = {"reply_to_message_id": "<rfq1@client.cn>", "body": "Quote\n\nLisa Li\nFull signature"}
+    first = await call(gw, "mail_draft_reply", args)
+    second = await call(gw, "mail_draft_reply", args)
+    assert second.content["reused"] is True
+    assert first.content["draft_id"] == second.content["draft_id"]
+    assert len(gw.server.folders["草稿箱"].messages) == 1
+    listing = await call(gw, "mail_list_drafts", {})
+    assert [d["draft_id"] for d in listing.content["drafts"]] == [first.content["draft_id"]]
+    assert "Full signature" not in str(listing.content)
+    read = await call(gw, "mail_read_draft", {"draft_id": first.content["draft_id"]})
+    assert read.content["body"] == args["body"]
+    assert read.content["next_offset"] is None
+    assert "_server_message_id" not in read.content
+    changed = await call(gw, "mail_draft_reply", {**args, "body": "New text"})
+    assert changed.is_error and changed.content["draft_id"] == first.content["draft_id"]
+    assert len(gw.server.folders["草稿箱"].messages) == 1
+
+
+async def test_concurrent_duplicate_inquiry_reserves_only_one_server_copy(gw):
+    args = {"to": "buyer@client.cn", "subject": "RFQ duplicate", "body": "body",
+            "inquiry_key": "client.cn/AM40041"}
+    results = await asyncio.gather(*(call(gw, "mail_draft_reply", args) for _ in range(8)))
+    assert len({r.content["draft_id"] for r in results}) == 1
+    assert len(gw.server.folders["草稿箱"].messages) == 1
+    assert len(await gw.mail_store.list_drafts()) == 1
+
+
+async def test_same_path_changed_attachment_is_not_silently_reused(gw):
+    args = {"reply_to_message_id": "<rfq1@client.cn>", "body": "quote",
+            "attachments": ["quote.pdf"]}
+    await call(gw, "mail_draft_reply", args)
+    (gw.workspace / "quote.pdf").write_bytes(b"different quotation")
+    result = await call(gw, "mail_draft_reply", args)
+    assert result.is_error
+    assert len(gw.server.folders["草稿箱"].messages) == 1
+
+
+async def test_update_draft_replaces_one_copy_and_preserves_identity(gw):
+    created = await call(gw, "mail_draft_reply", {
+        "reply_to_message_id": "<rfq1@client.cn>", "body": "old body"})
+    draft_id = created.content["draft_id"]
+    unrelated = gw.server.deliver(make_mail(subject="unrelated", message_id="<other@test>"), "草稿箱")
+    read = await call(gw, "mail_read_draft", {"draft_id": draft_id})
+    result = await call(gw, "mail_update_draft", {"draft_id": draft_id,
+        "body_sha256": read.content["body_sha256"], "body": "new body\nFull signature"})
+    assert not result.is_error, result.content
+    assert result.content["draft_id"] == draft_id
+    messages = gw.server.folders["草稿箱"].messages
+    assert len(messages) == 2 and unrelated in messages
+    stored = await gw.mail_store.get_draft(draft_id)
+    assert stored["fields"]["body"] == "new body\nFull signature"
+    assert stored["status"] == "draft" and gw.server.sent == []
+    raw = next(value[0] for uid, value in messages.items() if uid != unrelated)
+    assert "Full signature" in BytesParser(policy=policy.default).parsebytes(raw).get_content()
+    stale = await call(gw, "mail_update_draft", {"draft_id": draft_id,
+        "body_sha256": read.content["body_sha256"], "body": "stale edit"})
+    assert stale.is_error and len(messages) == 2
+
+
+async def test_server_side_edit_is_never_overwritten(gw):
+    created = await call(gw, "mail_draft_reply", {
+        "reply_to_message_id": "<rfq1@client.cn>", "body": "body"})
+    draft_id = created.content["draft_id"]
+    read = await call(gw, "mail_read_draft", {"draft_id": draft_id})
+    folder = gw.server.folders["草稿箱"]
+    uid = next(iter(folder.messages))
+    raw, when, flags = folder.messages[uid]
+    folder.messages[uid] = (raw.replace(b"body", b"user-edited body"), when, flags)
+    result = await call(gw, "mail_update_draft", {"draft_id": draft_id,
+        "body_sha256": read.content["body_sha256"], "body": "agent change"})
+    assert result.is_error and "outside Handler" in str(result.content)
+    assert len(folder.messages) == 1
+    assert (await gw.mail_store.get_draft(draft_id))["status"] == "draft"
+
+
+async def test_cleanup_failure_blocks_retry_and_send(gw, monkeypatch):
+    from .fake_mail import FakeImapSession
+    from handler.runtime.integrations.mailbox.transport import MailError
+    def fail(self, uid):
+        raise MailError("cleanup failed")
+    created = await call(gw, "mail_draft_reply", {
+        "reply_to_message_id": "<rfq1@client.cn>", "body": "body"})
+    draft_id = created.content["draft_id"]
+    read = await call(gw, "mail_read_draft", {"draft_id": draft_id})
+    monkeypatch.setattr(FakeImapSession, "delete_uid", fail)
+    result = await call(gw, "mail_update_draft", {"draft_id": draft_id,
+        "body_sha256": read.content["body_sha256"], "body": "new"})
+    assert result.is_error and "Do not retry" in str(result.content)
+    assert (await gw.mail_store.get_draft(draft_id))["status"] == "reconcile"
+    assert len(gw.server.folders["草稿箱"].messages) == 2
+    assert (await call(gw, "mail_send", {"draft_id": draft_id})).is_error
+
+
+async def test_server_draft_listing_reads_untracked_copies_and_rejects_old_uids(gw):
+    gw.server.deliver(make_mail(subject="Manual unsigned draft", message_id="<manual@test>",
+                                body="No signature"), "草稿箱")
+    listing = await call(gw, "mail_list_server_drafts", {})
+    assert not listing.is_error, listing.content
+    item = listing.content["drafts"][0]
+    assert item["subject"] == "Manual unsigned draft"
+    result = await call(gw, "mail_read_server_draft", {"draft_ref": item["draft_ref"]})
+    assert "No signature" in result.content["body"]
+    assert gw.server.sent == []
+    gw.server.renumber("草稿箱")
+    stale = await call(gw, "mail_read_server_draft", {"draft_ref": item["draft_ref"]})
+    assert stale.is_error and "UIDVALIDITY" in str(stale.content)
 
 
 async def test_send_requires_approval_and_pins_content(gw):

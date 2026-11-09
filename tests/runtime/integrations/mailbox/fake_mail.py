@@ -84,6 +84,13 @@ class FakeMailServer:
             word = words[i].upper()
             if word == "ALL":
                 i += 1
+            elif word == "HEADER" and words[i + 1].lower() == "message-id":
+                from email import policy
+                from email.parser import BytesParser
+                wanted = words[i + 2].strip('"')
+                result = [u for u in result if str(BytesParser(policy=policy.default)
+                    .parsebytes(target.messages[u][0]).get("Message-ID")) == wanted]
+                i += 3
             elif word == "UID":
                 low, _, high = words[i + 1].partition(":")
                 lo = int(low)
@@ -140,6 +147,9 @@ class FakeImapSession:
         if folder not in self.server.folders:
             raise MailError(f"IMAP APPEND {folder} failed")
         self.server.deliver(data, folder)
+
+    def delete_uid(self, uid):
+        self.server.folders[self.selected].messages.pop(uid, None)
 
     def logout(self):
         pass
