@@ -44,6 +44,17 @@ CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.tenant_state (
 );
 CREATE INDEX IF NOT EXISTS tenant_state_next_wake
     ON {CONTROL_SCHEMA}.tenant_state(next_wake_at);
+CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.spooled_email (
+    tenant TEXT NOT NULL REFERENCES {CONTROL_SCHEMA}.tenants(name),
+    digest TEXT NOT NULL,
+    body BYTEA NOT NULL,
+    headers JSONB NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, digest)
+);
 CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.registry_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -197,6 +208,60 @@ class TenantRegistry:
             if enabled:  # anything that queued while it was off runs now
                 await conn.execute(f"UPDATE {_C}.tenant_state SET next_wake_at=now() WHERE name=%s",
                                    (name,))
+
+    async def request_wake(self, name: str) -> None:
+        async with self.hub.pool.connection() as conn:
+            await conn.execute(
+                f"UPDATE {_C}.tenant_state SET next_wake_at = LEAST(next_wake_at, now()) WHERE name=%s",
+                (name,))
+
+    # --- email the tenant could not take ------------------------------------
+    async def spool_email(self, name: str, digest: str, body: bytes, headers: dict[str, str]) -> None:
+        """Keep verified mail, idempotently, and make sure the tenant wakes for it."""
+        async with self.hub.pool.connection() as conn:
+            await conn.execute(
+                f"INSERT INTO {_C}.spooled_email (tenant, digest, body, headers) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT (tenant, digest) DO NOTHING",
+                (name, digest, body, Jsonb(headers)))
+            await conn.execute(
+                f"UPDATE {_C}.tenant_state SET next_wake_at = LEAST(next_wake_at, now()) WHERE name=%s",
+                (name,))
+
+    async def tenants_with_spooled_email(self) -> list[str]:
+        async with self.hub.pool.connection() as conn:
+            cursor = await conn.execute(
+                f"SELECT DISTINCT e.tenant FROM {_C}.spooled_email e "
+                f"JOIN {_C}.tenants t ON t.name = e.tenant "
+                "WHERE t.enabled AND e.next_attempt_at <= now()")
+            return [row["tenant"] for row in await cursor.fetchall()]
+
+    async def spooled_digests(self, name: str) -> list[str]:
+        async with self.hub.pool.connection() as conn:
+            cursor = await conn.execute(
+                f"SELECT digest FROM {_C}.spooled_email WHERE tenant=%s AND next_attempt_at <= now() "
+                "ORDER BY received_at, digest", (name,))
+            return [row["digest"] for row in await cursor.fetchall()]
+
+    async def spooled_message(self, name: str, digest: str) -> tuple[bytes, dict[str, str]] | None:
+        async with self.hub.pool.connection() as conn:
+            cursor = await conn.execute(
+                f"SELECT body, headers FROM {_C}.spooled_email WHERE tenant=%s AND digest=%s",
+                (name, digest))
+            row = await cursor.fetchone()
+        return (bytes(row["body"]), row["headers"]) if row else None
+
+    async def spool_delivered(self, name: str, digest: str) -> None:
+        async with self.hub.pool.connection() as conn:
+            await conn.execute(f"DELETE FROM {_C}.spooled_email WHERE tenant=%s AND digest=%s",
+                               (name, digest))
+
+    async def spool_failed(self, name: str, digest: str, error: str, retry_seconds: float) -> None:
+        """Never deleted: it stays until a replay succeeds."""
+        async with self.hub.pool.connection() as conn:
+            await conn.execute(
+                f"UPDATE {_C}.spooled_email SET attempts = attempts + 1, last_error = %s, "
+                "next_attempt_at = now() + make_interval(secs => %s) WHERE tenant=%s AND digest=%s",
+                (error[:500], retry_seconds, name, digest))
 
     # --- lifecycle ----------------------------------------------------------
     async def due(self) -> list[tuple[str, datetime]]:

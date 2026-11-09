@@ -16,6 +16,7 @@ the boot grace, for writes that predate any of these.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from collections.abc import Callable
@@ -24,10 +25,13 @@ from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any
 
+import httpx
 from psycopg.errors import UndefinedTable
 from starlette._utils import get_route_path
 from starlette.responses import JSONResponse
 
+from ..web.email_ingest import MAX_EMAIL_BYTES, sign_email, verify_email
+from .limits import PlanLimits
 from .registry import Tenant, TenantRegistry
 
 logger = logging.getLogger("handler.runtime.tenancy")
@@ -37,6 +41,9 @@ ROOT_TENANT = "main"
 PINNED_INTEGRATIONS = frozenset({"mailbox", "gmail", "google"})
 _INSTANCE_PATH = re.compile(r"^/i/([a-z][a-z0-9_]{0,31})(/.*)$")
 ACTIVATION_RETRY_SECONDS = 30.0
+SPOOL_RETRY_SECONDS = 300.0
+REPLAYED_HEADERS = ("content-type", "x-handler-envelope-from", "x-handler-envelope-to",
+                    "x-handler-auth-results", "x-handler-forwarded")
 
 
 @dataclass
@@ -53,6 +60,7 @@ class _Slot:
     runtime: _Runtime | None = None
     activation: asyncio.Task[Any] | None = None
     deactivation: asyncio.Task[Any] | None = None
+    replay: asyncio.Task[Any] | None = None
     in_flight: set[asyncio.Task[Any]] = field(default_factory=set)
     last_activity: float = field(default_factory=monotonic)
     stale: bool = False  # its config changed; restart once quiescent
@@ -72,12 +80,14 @@ RuntimeFactory = Callable[[Tenant], Any]  # an async context manager yielding th
 class TenantHost:
     def __init__(self, registry: TenantRegistry, runtime_for: RuntimeFactory, *,
                  idle_seconds: float = 600.0, scan_seconds: float = 15.0,
-                 boot_grace_seconds: float = 120.0, concurrent_activations: int = 4) -> None:
+                 boot_grace_seconds: float = 120.0, concurrent_activations: int = 4,
+                 limits_for: Callable[[Tenant], PlanLimits] | None = None) -> None:
         self.registry = registry
         self._runtime_for = runtime_for
         self.idle_seconds = idle_seconds
         self.scan_seconds = scan_seconds
         self.boot_grace_seconds = boot_grace_seconds
+        self._limits_for = limits_for
         self._starting = asyncio.Semaphore(concurrent_activations)
         self._slots: dict[str, _Slot] = {}
         self._by_schema: dict[str, _Slot] = {}
@@ -91,20 +101,27 @@ class TenantHost:
             return
         name, child = self._route(scope)
         slot = await self._slot(name) if name else None
-        if slot is None or not slot.tenant.enabled:
+        if slot is None:
             await self._refuse(scope, receive, send, 404, "instance not found")
+            return
+        if not slot.tenant.enabled:
+            if not await self._spool_email(slot, child, receive, send):
+                await self._refuse(scope, receive, send, 404, "instance not found")
             return
         task = asyncio.current_task()
         slot.in_flight.add(task)  # before any await: a stop must see this request
         try:
             try:
-                runtime = await self._runtime(slot)
+                runtime = None if self._closing else await self._runtime(slot)
             except Exception:
                 logger.exception("tenant activation failed", extra={"tenant": slot.tenant.name})
-                await self._refuse(scope, receive, send, 503, "instance unavailable",
-                                   headers={"Retry-After": "5"})
+                if not await self._spool_email(slot, child, receive, send):
+                    await self._refuse(scope, receive, send, 503, "instance unavailable",
+                                       headers={"Retry-After": "5"})
                 return
             if runtime is None:
+                if await self._spool_email(slot, child, receive, send):
+                    return
                 # Shutting down must read as "retry", so senders don't give up on mail.
                 status, detail = ((503, "instance unavailable") if self._closing
                                   else (404, "instance not found"))
@@ -134,6 +151,112 @@ class TenantHost:
             await send({"type": "websocket.close", "code": 1013 if status == 503 else 1008})
             return
         await JSONResponse({"detail": detail}, status, headers)(scope, receive, send)
+
+    # --- email a tenant can't take right now ---------------------------------
+    @staticmethod
+    def _is_email_ingest(scope) -> bool:
+        path = get_route_path(scope)  # the child scope's root_path strips /i/<name>
+        return scope["type"] == "http" and scope["method"] == "POST" and path == "/ingest/email"
+
+    async def _spool_email(self, slot: _Slot, scope, receive, send) -> bool:
+        """Keep a signed email the tenant can't take. False if this isn't one to keep.
+
+        The Cloudflare Worker makes one POST and never retries, so a refusal here
+        would lose the message from Handler. Checks are those of web/email_ingest.
+        A failure to store (database down) leaves the sender a 503.
+        """
+        if not self._is_email_ingest(scope):
+            return False
+        secret = self.registry.unseal(slot.tenant).get("HANDLER_EMAIL_SECRET")
+        if not secret:
+            return False
+        headers = {key.decode("latin-1").lower(): value.decode("latin-1")
+                   for key, value in scope.get("headers", [])}
+        body = await self._read_body(receive)
+        if body is None:
+            await self._refuse(scope, receive, send, 413, "email too large")
+            return True
+        if not verify_email(secret, headers.get("x-handler-timestamp"),
+                            headers.get("x-handler-signature"), body):
+            await self._refuse(scope, receive, send, 401, "invalid signature")
+            return True
+        if not body.strip():
+            await self._refuse(scope, receive, send, 422, "empty email")
+            return True
+        kept = {key: headers[key] for key in REPLAYED_HEADERS if key in headers}
+        try:
+            await self.registry.spool_email(slot.tenant.name, hashlib.sha256(body).hexdigest(),
+                                            body, kept)
+        except Exception:
+            logger.exception("could not spool email", extra={"tenant": slot.tenant.name})
+            await self._refuse(scope, receive, send, 503, "instance unavailable",
+                               headers={"Retry-After": "5"})
+            return True
+        logger.info("email spooled", extra={"tenant": slot.tenant.name, "size": len(body)})
+        await JSONResponse({"status": "spooled"}, 202)(scope, receive, send)
+        return True
+
+    @staticmethod
+    async def _read_body(receive) -> bytes | None:
+        chunks, size = [], 0
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            chunks.append(message.get("body", b""))
+            size += len(chunks[-1])
+            if size > MAX_EMAIL_BYTES:
+                return None
+            if not message.get("more_body"):
+                break
+        return b"".join(chunks)
+
+    def _start_replay(self, slot: _Slot) -> None:
+        if slot.replay is None or slot.replay.done():
+            slot.replay = asyncio.create_task(self._replay_spool(slot),
+                                              name=f"replay-{slot.tenant.name}")
+            slot.replay.add_done_callback(self._log_failure)
+
+    async def _replay_spool(self, slot: _Slot) -> None:
+        """Send spooled mail through the tenant's normal intake, quota gate included.
+
+        Each is signed afresh, as its original timestamp has aged out. Intake's
+        idempotency key makes a repeat harmless and uncounted.
+        """
+        task = asyncio.current_task()
+        slot.in_flight.add(task)
+        name = slot.tenant.name
+        try:
+            runtime = await self._runtime(slot)
+            secret = self.registry.unseal(slot.tenant).get("HANDLER_EMAIL_SECRET")
+            if runtime is None or not secret:
+                return
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=runtime.app),
+                                         base_url="http://handler", timeout=120) as client:
+                for digest in await self.registry.spooled_digests(name):
+                    message = await self.registry.spooled_message(name, digest)
+                    if message is None:
+                        continue
+                    body, headers = message
+                    timestamp, signature = sign_email(secret, body)
+                    try:
+                        response = await client.post("/ingest/email", content=body, headers={
+                            **headers, "x-handler-timestamp": timestamp,
+                            "x-handler-signature": signature})
+                    except Exception as exc:  # noqa: BLE001 - stays spooled
+                        await self.registry.spool_failed(name, digest, repr(exc), SPOOL_RETRY_SECONDS)
+                        continue
+                    if response.status_code < 300:
+                        await self.registry.spool_delivered(name, digest)
+                    else:
+                        logger.warning("spooled email replay refused", extra={
+                            "tenant": name, "status": response.status_code})
+                        await self.registry.spool_failed(
+                            name, digest, f"{response.status_code}: {response.text}",
+                            SPOOL_RETRY_SECONDS)
+        finally:
+            slot.in_flight.discard(task)
+            slot.touch()
 
     async def _slot(self, name: str) -> _Slot | None:
         slot = self._slots.get(name)
@@ -265,12 +388,32 @@ class TenantHost:
         tenant = await self.registry.get(name)
         if tenant is None:
             return
-        was_running = name in self._slots and self._slots[name].runtime is not None
+        known = self._slots.get(name)
+        was_running = known is not None and known.runtime is not None
+        limits_changed = known is not None and (known.tenant.plan, known.tenant.limits) != (
+            tenant.plan, tenant.limits)
         slot = self._remember(tenant)
         if not tenant.enabled:
             await self._deactivate(slot, force=True)
-        elif was_running:
+            return
+        if was_running:
             slot.stale = True  # new config and secrets take effect on the next start
+        if limits_changed:
+            await self._apply_limits(slot)
+
+    async def _apply_limits(self, slot: _Slot) -> None:
+        """A plan change frees held input now; the rest of a restart can wait for quiescence."""
+        if self._limits_for is None:
+            return
+        runtime = slot.runtime
+        if runtime is None or slot.lock.locked():
+            # Starts with the new plan; its first housekeeping pass releases the backlog.
+            await self.registry.request_wake(slot.tenant.name)
+            self._activation(slot)
+            return
+        parts = runtime.app.state.lifecycle
+        parts.limits.current = self._limits_for(slot.tenant)
+        await parts.store.release_held_inputs()
 
     # --- the one scanning task ----------------------------------------------
     async def run(self) -> None:
@@ -328,6 +471,10 @@ class TenantHost:
                 slot.runtime.app.state.lifecycle.store._wake.set()
             else:
                 self._activation(slot)
+        for name in await self.registry.tenants_with_spooled_email():
+            slot = await self._slot(name)
+            if slot is not None:
+                self._start_replay(slot)  # activates the tenant first if it is asleep
         for slot in self._slots.values():
             if not slot.tenant.enabled:
                 continue
@@ -349,7 +496,7 @@ class TenantHost:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
         slots = list(self._slots.values())
-        pending = [t for s in slots for t in (s.activation, s.deactivation) if t is not None]
+        pending = [t for s in slots for t in (s.activation, s.deactivation, s.replay) if t is not None]
         await asyncio.gather(*pending, return_exceptions=True)
         for slot in slots:
             if slot.runtime is not None:

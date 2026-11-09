@@ -20,12 +20,13 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pathlib import Path
 
 import uvicorn
 
-from .auth import Authenticator, add_cli_commands, run_cli
+from .auth import Authenticator, Principal, add_cli_commands, run_cli
 from .bus import RunEventBus
 from .dispatcher import Dispatcher
 from .documents import READ_LIMIT_ENV, configure_read_limit
@@ -65,7 +66,16 @@ from .store.postgres import PostgresStore
 from .store.postgres_hub import DEFAULT_POOL_MAX, PostgresHub
 from .store.sqlite import SQLiteStore
 from .tasks import publish_queued
-from .tenancy.host import TenantHost
+from .tenancy.host import PINNED_INTEGRATIONS, TenantHost
+from .tenancy.limits import (
+    PLAN_LIMITS_ENV,
+    LiveLimits,
+    PlanLimits,
+    check_limit_keys,
+    parse_plan_table,
+    resolve_limits,
+    upgrade_required,
+)
 from .tenancy.platform_api import platform_router
 from .tenancy.registry import Tenant, TenantRegistry
 from .tenancy.run_gate import DEFAULT_MAX_RUNS, DEFAULT_PLAN_CAPS, RunGate, parse_plan_caps
@@ -517,7 +527,15 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
                    parse_plan_caps(env.get("HANDLER_PLAN_RUN_CAPS", DEFAULT_PLAN_CAPS)),
                    max_wait=float(env.get("HANDLER_RUN_MAX_WAIT_SECONDS", "60")))
 
+    plan_table = parse_plan_table(env.get(PLAN_LIMITS_ENV))
+
     def validate(tenants: list[Tenant]) -> None:
+        for tenant in tenants:
+            check_limit_keys(tenant.limits, f"{tenant.name}: limits")
+            if (not resolve_limits(tenant.plan, tenant.limits, plan_table).connected_mail
+                    and PINNED_INTEGRATIONS.intersection(tenant.integrations or ())):
+                raise ValueError(f"{tenant.name}: connected mailboxes and Gmail are not "
+                                 f"included in the {tenant.plan} plan")
         names = [tenant.name for tenant in tenants]
         if len(names) != len(set(names)):
             raise ValueError("tenant names must be unique")
@@ -534,13 +552,17 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
 
     registry = TenantRegistry(hub, box, validate)
 
+    def limits_for(tenant: Tenant) -> PlanLimits:
+        gate.configure(tenant.name, tenant.plan, _plan_limit(tenant))
+        return resolve_limits(tenant.plan, tenant.limits, plan_table)
+
     def runtime_for(tenant: Tenant):
         name, cfg, scoped, base = tenant_instance_config(args, env, tenant, box)
-        gate.configure(name, tenant.plan, _plan_limit(tenant))
-        return instance_runtime(cfg, scoped, base_path=base, instance_name=name, hub=hub, gate=gate)
+        return instance_runtime(cfg, scoped, base_path=base, instance_name=name, hub=hub, gate=gate,
+                                plan_limits=LiveLimits(limits_for(tenant)))
 
     tenants = TenantHost(
-        registry, runtime_for,
+        registry, runtime_for, limits_for=limits_for,
         idle_seconds=float(env.get("HANDLER_TENANT_IDLE_SECONDS", "600")),
         scan_seconds=float(env.get("HANDLER_TENANT_SCAN_SECONDS", "15")),
         boot_grace_seconds=float(env.get("HANDLER_TENANT_BOOT_GRACE_SECONDS", "120")))
@@ -631,7 +653,8 @@ async def serve(args: argparse.Namespace) -> None:
 async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                            base_path: str = "", instance_name: str = "",
                            registry: IntegrationRegistry | None = None,
-                           hub: PostgresHub | None = None, gate: RunGate | None = None):
+                           hub: PostgresHub | None = None, gate: RunGate | None = None,
+                           plan_limits: LiveLimits | None = None):
     """Own one instance and close all its resources when the host stops."""
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -666,6 +689,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                            max_size=int(env.get("HANDLER_DB_POOL_MAX", "5")))
              if args.database_url
              else SQLiteStore(data_dir / "handler.db"))
+    if plan_limits is not None:
+        store.limits = plan_limits
     try:
         # Runs a dead worker left at 'running' (e.g. the dyno restarted mid-run).
         swept = await store.sweep_abandoned_runs()
@@ -710,6 +735,15 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                             instance=instance_name)
         memory_tools = MemoryTools(store, settings)
         scheduler = Scheduler(store, default_harness=settings.harness_source("automation"))
+        if plan_limits is not None:
+            async def tell_skipped(schedule, over) -> None:
+                recipients = schedule.notify or ([schedule.created_by] if schedule.created_by else [])
+                await notifier.send(
+                    f"automation:{schedule.id}", None,
+                    f"Automation \"{schedule.name}\" was skipped: this workspace has used all "
+                    f"{over.limit} inputs in its plan this month. It runs again after "
+                    f"{over.resets_at.date().isoformat()}.", recipients)
+            scheduler.on_skipped = tell_skipped
         gateway = Gateway(store, GrantPolicy(grants_cfg), emit_event=emit_event)
         questions = QuestionService(store, emit_event=emit_event, notifier=notifier)
         from .tools.approvals import ApprovalContinuationTools
@@ -724,7 +758,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         config = RunConfig(data_dir=data_dir, reasoning_effort=args.reasoning_effort,
                            timeout_seconds=float(limits_cfg["run_timeout_seconds"]),
                            max_attempts=int(limits_cfg["max_attempts"]),
-                           instance_name=instance_name or "main")
+                           instance_name=instance_name or "main",
+                           default_model=args.model, plan_limits=plan_limits)
         local_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
         file_store = (S3FileStore.from_env(prefix=env.get("HANDLER_FILE_PREFIX", ""), env=dict(env))
                       if args.file_store == "s3" else LocalFileStore(data_dir / "files"))
@@ -815,7 +850,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         else:
             logger.info("email intake off: set HANDLER_EMAIL_SECRET to enable /ingest/email")
         google_oauth = google_oauth_from_env(store, env=env)  # None unless GOOGLE_OAUTH_* are set
-        app.include_router(google_router(google_oauth, auth,
+        app.include_router(google_router(google_oauth, auth, plan_limits=plan_limits,
                                          return_to_origins=env.get("HANDLER_RETURN_TO_ORIGINS", "")))
         if google_oauth is not None:
             gateway.register(GmailTools(
@@ -828,6 +863,10 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             app.include_router(crontal_ingest_router(store, webhook_secret,
                                                      harness=settings.harness_source("crontal")))
         app.include_router(ui_manifest_router(integrations, auth))
+        if plan_limits is not None and not plan_limits.current.connected_mail:
+            @app.post("/api/mailboxes")
+            async def mailboxes_not_in_plan(_principal: Principal = Depends(auth.require_admin)):
+                return JSONResponse(upgrade_required("mailbox", plan_limits.current), status_code=403)
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -837,6 +876,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             version = grants_version
             while not stop.is_set():
                 try:
+                    if plan_limits is not None:
+                        await store.release_held_inputs()
                     await gateway.expire_stale()
                     await questions.expire_stale()
                     grants, latest = await settings.get("grants")
@@ -883,7 +924,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         app.state.integrations = integrations
         app.state.gateway, app.state.outbox = gateway, outbox
         app.state.lifecycle = SimpleNamespace(dispatcher=dispatcher, store=store, outbox=outbox,
-                                              workspace_sync=workspace_sync)
+                                              workspace_sync=workspace_sync, limits=plan_limits)
         app.state.identity_provider = (contributions.identity_provider[1]
                                        if contributions.identity_provider else None)
 
