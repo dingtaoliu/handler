@@ -22,7 +22,7 @@ remaining quota. Do not create background jobs merely to keep this work running.
 | Item | State | Next action |
 | --- | --- | --- |
 | 1. Incomplete RFQ | Initial investigation complete; follow-ups open | See [investigation](../audits/bss-rfq562-investigation.md): independently verified 102 rows, only first 16 imported, downstream draft quote 232; actor/exact omission mechanism unknown; no production repair |
-| 2. CSV tool/delivery | Implementing | Shared gateway tool for both harnesses; durable FileStore artifacts, existing authenticated upload download route and file transcript blocks avoid a frontend deployment |
+| 2. CSV tool/delivery | Implemented; release in progress | See [CSV tool](csv-spreadsheets.md). Full suite 1,230 passed/2 skipped, 17 focused checks, new modules Pyright clean. Durable FileStore artifacts use existing authenticated downloads and transcript file blocks; no frontend deployment needed |
 | 3. RFQ fidelity | Investigation/design documented | Verify unit and shape gaps; implement reviewed mappings without corrupting historical records |
 | 4. Connector/draft tools | Pending | Effective capabilities first, draft upsert/reconciliation second |
 | 5. Context/caching | Pending | Stable prefix and measured cost/context changes; preserve full-read email gate |
@@ -32,7 +32,7 @@ remaining quota. Do not create background jobs merely to keep this work running.
 ## Verification/deployment
 
 Handler tests: `PYTHONPATH=src .venv/bin/python -m pytest tests/runtime -q -p no:cacheprovider`.
-Baseline **1,216 passed, 2 skipped**. Run focused tests as changes are made and
+Current **1,230 passed, 2 skipped**. Run focused tests as changes are made and
 the complete suite before a release. New modules should pass Pyright using
 `--pythonpath .venv/bin/python`; the native harness already has unrelated errors.
 Commit/push finished work and follow `HANDOFF.md` deployment instructions.

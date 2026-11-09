@@ -8,14 +8,16 @@ from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from ..auth import Authenticator, Principal, can_see_thread
+from ..artifacts import ArtifactStore
 from ..context import RunContext
 from ..gateway.gateway import Gateway
 from ..memory import MemoryTools, normalize_links
@@ -156,6 +158,7 @@ def aggregate_usage(runs: list[Run], thread_of: dict[str, str], days: int,
 def admin_router(
     store: Store, auth: Authenticator, *, scheduler: Scheduler, gateway: Gateway,
     uploads: UploadStore, log_file: Path | None = None,
+    artifact_store: ArtifactStore | None = None,
 ) -> APIRouter:
     router = APIRouter()
     user = Depends(auth.require_principal)
@@ -391,7 +394,17 @@ def admin_router(
         return [{**m.public(), "user_id": m.user_id} for m in files]
 
     @router.get("/api/uploads/{file_id}")
-    async def download_upload(file_id: str, principal: Principal = user) -> FileResponse:
+    async def download_upload(file_id: str, principal: Principal = user) -> Response:
+        if uploads.get(file_id) is None and artifact_store is not None:
+            meta = await artifact_store.get(file_id)
+            if meta is None or not (principal.is_admin or meta.user_id == principal.user_id):
+                raise HTTPException(404, "File not found")
+            data = await artifact_store.data(file_id)
+            if data is None:
+                raise HTTPException(404, "File not found")
+            return Response(data, media_type=meta.content_type, headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(meta.filename, safe='')}",
+                "X-Handler-Upload-Owner": meta.user_id})
         meta = visible_upload(file_id, principal)
         path = uploads.path(meta)
         if path is None:

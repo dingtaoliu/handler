@@ -72,10 +72,11 @@ CRLF record endings and UTF-8 with BOM for common desktop Excel compatibility.
 Preserve Unicode. Missing values become blank cells; distinguish missing from
 zero. Date columns use ISO dates. Numeric values use decimal points without
 locale-specific grouping; identifiers remain text in the CSV data.
-Reject formula expressions in this initial scalar-data tool rather than silently
-turning source text into executable spreadsheet expressions. Quote escaping alone
-does not make formula-looking text a literal in spreadsheet software; document
-and test the literal-text handling policy before implementation.
+Do not evaluate formulas. The implementation prefixes formula-looking text and
+leading control characters with an apostrophe and reports `literalized_cells`.
+Typed negative numeric cells stay numeric. This also applies to phone numbers
+beginning with `+`; CSV readers may display the apostrophe. Source data remains
+unchanged. This explicit export convention avoids silently treating data as formulas.
 
 Return a compact receipt: workspace path, MIME type, row/column counts, byte
 count and content hash. Never echo the full table back into the agent context.

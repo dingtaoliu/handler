@@ -228,6 +228,11 @@ def transcript_message(thread_key: str, run_id: str, ev: RunEvent,
              "is_error": d.get("status") not in (None, "completed", "ok"),
              "exit_code": d.get("exit_code")},
         ]
+        if (str(d.get("tool") or "").split("__")[-1] == "write_spreadsheet"
+                and d.get("status") in (None, "completed", "ok")):
+            from .artifacts import artifact_block
+            if attachment := artifact_block(d.get("output")):
+                blocks.append(attachment)
         return Message(thread_key, Role.TOOL, blocks, run_id=run_id, raw=ev.raw)
     return None
 

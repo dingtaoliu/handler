@@ -562,6 +562,11 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         local_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
         file_store = (S3FileStore.from_env(prefix=env.get("HANDLER_FILE_PREFIX", ""), env=dict(env))
                       if args.file_store == "s3" else LocalFileStore(data_dir / "files"))
+        from .artifacts import ArtifactStore
+        from .tools.spreadsheets import SpreadsheetTools
+        artifact_store = ArtifactStore(file_store)
+        gateway.register(SpreadsheetTools(
+            lambda key: config.workspaces_dir / thread_slug(key), artifact_store))
         harnesses: dict = {}
         try:
             harnesses["codex"] = CodexHarness(
@@ -628,7 +633,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                                            crontal_catalog=crontal_catalog,
                                            available_tools=lambda: {s.name for s in gateway.specs()}))
         app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
-                                        uploads=uploads, log_file=_log_file(args)))
+                                        uploads=uploads, log_file=_log_file(args),
+                                        artifact_store=artifact_store))
         email_secret = env.get("HANDLER_EMAIL_SECRET")
         intake_observers: list = []  # integrations add theirs below
         if email_secret:
