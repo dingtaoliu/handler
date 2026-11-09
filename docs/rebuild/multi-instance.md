@@ -1,5 +1,9 @@
 # Multiple instances on one dyno
 
+To define tenants in the database and run each only while it has work, see
+[tenant-registry.md](tenant-registry.md). Everything below describes env-defined
+hosting, which stays the default.
+
 `handler-rt serve` can host independent runtimes behind one port in one process.
 Set `HANDLER_INSTANCES=main,bss`. Each name must match `[a-z][a-z0-9_]{0,31}`,
 be unique, and include `main`. With this unset the existing single-instance
