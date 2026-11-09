@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 
 from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
@@ -54,6 +55,8 @@ class PostgresHub:
         self._listener: asyncio.Task[None] | None = None
         self._listening = asyncio.Event()
         self._closed = False
+        self.on_unattached: Callable[[str], None] | None = None  # work for an inactive schema
+        self.on_listening: Callable[[], None] | None = None  # notices may have been missed
 
     async def _setup(self) -> None:
         await self.pool.open()
@@ -90,10 +93,14 @@ class PostgresHub:
                     self._listening.set()
                     for wake in self._wakes.values():  # anything missed while offline
                         wake.set()
+                    if self.on_listening is not None:
+                        self.on_listening()
                     async for notice in conn.notifies():
                         wake = self._wakes.get(notice.payload)
                         if wake is not None:
                             wake.set()
+                        elif self.on_unattached is not None:
+                            self.on_unattached(notice.payload)
             except asyncio.CancelledError:
                 raise
             except Exception:
