@@ -100,6 +100,26 @@ async def _insert(conn: AsyncConnection, table: str, values: dict[str, Any]) -> 
     await conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", values)
 
 
+async def earliest_work_at(conn: AsyncConnection, sinks: Sequence[str] | None) -> datetime | None:
+    """When this schema next needs a runtime: queued work, schedules, outbox, expiries.
+
+    `sinks` limits outbox rows to those a runtime can deliver (None: all of them).
+    Approvals and questions are included because only a runtime expires them.
+    """
+    cursor = await conn.execute(
+        "SELECT LEAST("
+        "(SELECT MIN(GREATEST(COALESCE(available_at, pending_since), "
+        " COALESCE(lease_until, pending_since))) FROM threads "
+        " WHERE pending_since IS NOT NULL AND NOT dead), "
+        "(SELECT MIN(next_run_at) FROM schedules WHERE enabled), "
+        "(SELECT MIN(next_attempt_at) FROM deliveries WHERE status = 'pending' "
+        " AND (%(all)s OR sink = ANY(%(sinks)s))), "
+        "(SELECT MIN(expires_at) FROM approvals WHERE status = 'pending'), "
+        "(SELECT MIN(expires_at) FROM questions WHERE status = 'pending')) AS due",
+        {"all": sinks is None, "sinks": list(sinks or [])})
+    return (await cursor.fetchone())["due"]
+
+
 async def _put_event(
     conn: AsyncConnection, event: Event, thread: ThreadSpec | None, now: datetime
 ) -> bool:
@@ -168,6 +188,7 @@ class PostgresCore(PostgresUsage):
         self._listener: asyncio.Task[None] | None = None
         self._listening = asyncio.Event()
         self._closed = False
+        self._marks_wake = False  # a registry's tenant_state exists for a store on its own
 
     # --- plumbing ---------------------------------------------------------
     async def _setup(self) -> None:
@@ -187,6 +208,9 @@ class PostgresCore(PostgresUsage):
                     sql.Identifier(self._schema)))
             for text in ddl:
                 await conn.execute(text)
+            cursor = await conn.execute(
+                "SELECT to_regclass(%s) AS state", (f"{CONTROL_SCHEMA}.tenant_state",))
+            self._marks_wake = (await cursor.fetchone())["state"] is not None
         self._listener = asyncio.create_task(self._listen())
         await self._listening.wait()
 
@@ -272,6 +296,12 @@ class PostgresCore(PostgresUsage):
             return
         await conn.execute("SELECT pg_notify(%s || '_' || current_schema(), ''), "
                            "pg_notify(%s, current_schema())", (CHANNEL, SHARED_CHANNEL))
+        if self._marks_wake:
+            # Commits with the work: the wake survives a NOTIFY nobody heard.
+            await conn.execute(
+                sql.SQL("UPDATE {0}.tenant_state s SET next_wake_at = LEAST(s.next_wake_at, now()) "
+                        "FROM {0}.tenants t WHERE t.name = s.name AND t.schema_name = %s").format(
+                    sql.Identifier(CONTROL_SCHEMA)), (self._tenant_schema,))
 
     async def _list(self, cls: type[T], query: str, parameters: Any = ()) -> list[T]:
         async with self._conn() as conn:
@@ -435,6 +465,21 @@ class PostgresCore(PostgresUsage):
         if failed:
             self._wake.set()
         return failed
+
+    async def earliest_work(self, sinks: Sequence[str] | None = None) -> datetime | None:
+        async with self._conn() as conn:
+            return await earliest_work_at(conn, sinks)
+
+    async def has_claimable(self, lane: Lane) -> bool:
+        async with self._conn() as conn:
+            now = self._clock()
+            cursor = await conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM threads WHERE lane = %s "
+                "AND pending_since IS NOT NULL AND NOT dead "
+                "AND (available_at IS NULL OR available_at <= %s) "
+                "AND (lease_until IS NULL OR lease_until < %s)) AS found",
+                (lane.value, now, now))
+            return (await cursor.fetchone())["found"]
 
     async def wait_for_work(self, timeout: float) -> None:
         await self._ensure()
