@@ -44,3 +44,9 @@ result token estimates against comparable tasks before claiming savings.
 Follow-ups: evaluate earlier task checkpoints/compaction against source-coverage
 and multi-turn quality tests. No new warming automations or forced summaries were
 introduced. Historical conversations are not rewritten.
+
+Released as v56 (`39baef4`, image `647f2f3e823d`), backup b034, rollback v55.
+All three instance health/auth checks passed. Read-only live BSS user 2 prompt
+previews have the same 3,613-token stable prefix for chat and automation (15,291
+characters); total instruction estimates are 4,808 and 4,833 tokens respectively.
+Gmail guidance is absent. These exclude tool schemas and conversation history.

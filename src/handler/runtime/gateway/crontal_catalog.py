@@ -82,6 +82,55 @@ def hidden(path: str) -> bool:
     return path.lower().startswith(HIDDEN_PREFIXES)
 
 
+def canonical_route(method: str, path: str, routes: Iterable[dict[str, Any]]) -> str:
+    """Resolve description aliases only; never rewrite an executing request.
+
+    Template names must match the published contract. Concrete values are matched
+    conservatively for standard converters; unknown converters go to Crontal.
+    """
+    path = path.split("?", 1)[0]
+    candidates = [str(r["path"]) for r in routes
+                  if method in (r.get("methods") or []) and not hidden(str(r["path"]))]
+    if hidden(path):
+        raise ValueError("That endpoint is not available to the agent")
+    if path in candidates:
+        return path
+    template = _PARAM.sub(r"{\1}", path).rstrip("/")
+    aliases = [p for p in candidates if _PARAM.sub(r"{\1}", p).rstrip("/") == template]
+    if len(aliases) == 1:
+        return aliases[0]
+    if len(aliases) > 1:
+        raise ValueError("Ambiguous route description; use the exact crontal_api_routes path")
+    if any(c in path for c in "{}<>"):
+        raise ValueError(f"No published {method} route matches {path}; see crontal_api_routes")
+    matches = []
+    converters = {"int": r"[0-9]+", "float": r"[0-9]+\.[0-9]+",
+                  "string": r"[^/]+", "default": r"[^/]+", "path": r"[^/].*?",
+                  "uuid": r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"}
+    for candidate in candidates:
+        pattern, cursor, static = "", 0, 0
+        for param in _PARAM.finditer(candidate):
+            converter = param.group(0)[1:-1].partition(":")[0] if ":" in param.group(0) else "default"
+            if converter not in converters:
+                break  # Let the backend resolve custom/parameterized converters.
+            literal = candidate[cursor:param.start()]
+            static += len(literal)
+            pattern += re.escape(literal) + converters[converter]
+            cursor = param.end()
+        else:
+            tail = candidate[cursor:].rstrip("/")
+            pattern += re.escape(tail)
+            if re.fullmatch(pattern, path.rstrip("/")):
+                matches.append((static + len(tail), candidate))
+    if matches:
+        best = max(score for score, _ in matches)
+        winners = {p for score, p in matches if score == best}
+        if len(winners) == 1:
+            return winners.pop()
+        raise ValueError("Ambiguous route description; use the exact crontal_api_routes path")
+    return path  # Backend remains authoritative for concrete/unknown routes.
+
+
 def resource_prefix(entry: str) -> str | None:
     """A normalized `/api/v1/...` path prefix; None when malformed."""
     entry = entry.strip().rstrip("/")
@@ -248,6 +297,16 @@ class CrontalRouteCatalog:
     async def spec(self, method: str, path: str) -> Any:
         """One route's contract (cached); a string when unavailable."""
         key = (method.upper(), path.split("?", 1)[0])
+        if hidden(key[1]):
+            return "That endpoint is not available to the agent"
+        try:
+            key = (key[0], canonical_route(key[0], key[1], await self.routes()))
+        except ValueError as exc:
+            return str(exc)
+        except httpx.HTTPError:
+            # Discovery outages must not block exact/concrete descriptions.
+            if any(c in path for c in "{}<>"):
+                return "Route catalog unavailable; retry discovery before describing a template"
         cached = self._specs.get(key)
         if cached and time.time() - cached[1] <= SPEC_TTL_SECONDS:
             return cached[0]

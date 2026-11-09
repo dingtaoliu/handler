@@ -353,3 +353,45 @@ async def test_prompt_preview_shows_the_catalog_component(tmp_path, fixture):
         assert "\nGET /supply_listing" not in body["prompt"]
     finally:
         await store.close()
+
+
+def test_canonical_route_description_forms_and_specificity():
+    from handler.runtime.gateway.crontal_catalog import canonical_route
+    routes = [
+        {"path": "/api/v1/files/<int:file_id>", "methods": ["GET"]},
+        {"path": "/api/v1/files/browse", "methods": ["GET"]},
+        {"path": "/api/v1/contact/list/<int:contact_list_id>/contact/<int:contact_id>", "methods": ["POST"]},
+        {"path": "/api/v1/contact/<string:name>", "methods": ["GET"]},
+    ]
+    for path in ("/api/v1/files/{file_id}", "/api/v1/files/<int:file_id>",
+                 "/api/v1/files/15?download=1", "/api/v1/files/15/"):
+        assert canonical_route("GET", path, routes) == "/api/v1/files/<int:file_id>"
+    assert canonical_route("POST", "/api/v1/contact/list/{contact_list_id}/contact/{contact_id}", routes) == routes[2]["path"]
+    assert canonical_route("GET", "/api/v1/files/browse", routes) == routes[1]["path"]
+    assert canonical_route("GET", "/api/v1/files/abc", routes) == "/api/v1/files/abc"
+    assert canonical_route("GET", "/api/v1/contact/Alice", routes) == routes[3]["path"]
+    with pytest.raises(ValueError, match="No published"):
+        canonical_route("DELETE", "/api/v1/files/{file_id}", routes)
+    with pytest.raises(ValueError, match="not available"):
+        canonical_route("GET", "/api/v1/admin/users", routes)
+    with pytest.raises(ValueError, match="Ambiguous"):
+        canonical_route("GET", "/api/v1/contact/Alice", routes + [
+            {"path": "/api/v1/contact/<string:other>", "methods": ["GET"]}])
+
+
+async def test_description_aliases_share_cache(fixture):
+    fake = FakeCrontal(fixture)
+    catalog = make_catalog(fake)
+    path = next(r["path"] for r in fixture["routes"]
+                if "<int:" in r["path"] and "GET" in r["methods"]
+                and not catalog_module.hidden(r["path"]))
+    brace = catalog_module._PARAM.sub(r"{\1}", path)
+    concrete = catalog_module._PARAM.sub("17", path)
+    try:
+        a = await catalog.spec("get", brace)
+        assert isinstance(a, dict) and a["path"] == path
+        assert await catalog.spec("GET", path) == a
+        assert await catalog.spec("GET", concrete + "?view=1") == a
+        assert fake.describes == 1
+    finally:
+        await catalog._client.aclose()

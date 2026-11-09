@@ -19,6 +19,11 @@ image `1cabdadd96ac`, backup **b033**, rollback **v54**. Full suite **1,242 pass
 See [mail-capabilities-and-drafts.md](mail-capabilities-and-drafts.md) for limits
 and interruption recovery; no production SMTP or draft mutation was used in tests.
 
+Context reuse released as **v56**, runtime `39baef4`, image `647f2f3e823d`,
+backup **b034**, rollback **v55**. **1,245 passed/2 skipped**; all instances healthy.
+Live BSS chat/automation share a 3,613-token common prefix; see
+[context-reuse.md](context-reuse.md). Provider savings are not yet measured.
+
 ## 2026-11-08 native PDF file transport
 
 Native OpenAI `read_file` now uploads intact PDFs and returns file references,
