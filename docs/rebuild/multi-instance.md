@@ -48,11 +48,42 @@ shared schemas on the same database, overlapping S3 prefixes, and reused configu
 webhook/email/encryption secrets. Keep the main schema `handler_crontal` and prefix
 `handler/crontal/` to preserve existing records; do not migrate or copy main data.
 
-`HANDLER_DB_POOL_MAX` (default 5) sets the pool maximum per instance and supports
-scoped overrides. Each Postgres store also holds a LISTEN connection. Two default
-instances can therefore consume up to 12 database connections; reserve capacity
-for Crontal's web processes and maintenance within the database plan's limit.
-Run concurrency is **per instance**, so add both limits when sizing the dyno.
+## Database connections
+
+With `HANDLER_INSTANCES` set, all instances on one database share one pool and one
+LISTEN connection owned by the host: **11 + 1 = 12 connections for the whole
+process, however many instances it hosts**. `HANDLER_DB_SHARED_POOL_MAX` (default
+11) sets the pool size. It is a host setting and cannot be scoped to an instance.
+Instances on a different `DATABASE_URL` get their own 11 + 1 for that database.
+
+`HANDLER_DB_POOL_MAX` (default 5) now applies only to a single instance, with
+`HANDLER_INSTANCES` unset, and to one-off CLI commands. Hosts ignore it and its
+scoped overrides. Leave any existing value in place: a rollback to an image from
+before shared connections reads it as a per-instance size, so raising it to 11
+would make that image open 44 connections. A CLI command holds up to 2 connections
+while it runs, on top of the 12. Single-instance and SQLite deployments use no
+shared pool and create no control schema.
+
+Isolation on a shared connection:
+
+- Every store transaction starts with `SET LOCAL search_path TO <schema>`. All pool
+  connections are transactional, because `SET LOCAL` does nothing in autocommit.
+- The pool's default `search_path` is `handler_control`, which has no tenant tables,
+  so unscoped SQL fails with `undefined_table` instead of reaching a tenant.
+- Auto-prepared statements are off on the shared pool: `SELECT *` would fail wherever
+  two tenants' columns differ in order. Prepared statements cannot be re-enabled.
+- Nothing may keep session state on a pool connection: no plain `SET`, session
+  advisory locks or temp tables. New code must also not hold a store transaction
+  across slow work, since 11 connections serve every tenant.
+
+`handler_control.tenant_schema_versions` records a hash of each tenant's applied DDL
+per component (`core`, `mailbox`), so a start with current schemas runs one `SELECT`
+per tenant and no DDL. To force a re-apply, delete that tenant's row. The control
+schema is created automatically and needs no migration.
+
+Notifications use one channel, `handler_work_shared`, with the schema name as the
+payload. Run concurrency is **per instance**, so add it across instances when sizing
+the dyno.
 
 ## Memory and document reads
 
@@ -142,3 +173,9 @@ process log sink.
 To roll back, restore the previous image/config with `HANDLER_INSTANCES` unset.
 Main continues using its original schema and S3 prefix. BSS's schema and files
 remain intact for a later retry; do not remove them during a runtime rollback.
+
+Shared connections change no tenant tables, so an image from before them runs
+unchanged against the same database and ignores `handler_control`; leave that schema
+in place. While old and new dynos overlap they do not hear each other's
+notifications, since an old dyno sends only on its per-schema channel. Work is not
+lost: each dispatcher's idle poll claims it within 30 seconds.
