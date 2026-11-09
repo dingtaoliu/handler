@@ -36,6 +36,7 @@ from .images import MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, downscale, sniff_fi
 from .instructions import build_instructions
 from .mail.intake import render_email_event, resolve_act_as
 from .memory import MemoryTools
+from .observability.memory import process_memory
 from .observability.pricing import PriceTable
 from .observability.attribution import capture_attribution
 from .observability.recorder import RawSink, StepRecorder
@@ -386,6 +387,8 @@ def _has_rollout(home: Path, session_id: str) -> bool:
 
 
 class RunExecutor:
+    _active_runs = 0  # across every instance in this process, for the memory logs
+
     def __init__(
         self,
         store: Store,
@@ -460,10 +463,19 @@ class RunExecutor:
         self._publish(thread.key, run.id, "run_started", {"trigger_event_ids": run.trigger_event_ids})
         await self._publish_task(thread, run.id)
         logger.info("run started", extra={"harness": run.harness, "events": len(events)})
+        RunExecutor._active_runs += 1
+        self._log_run_memory("start")
         try:
             await self._run_with_heartbeat(lease, thread, run, events, repair=repair)
         finally:
+            self._log_run_memory("end")
+            RunExecutor._active_runs -= 1
             reset_current_run(token)
+
+    def _log_run_memory(self, phase: str) -> None:
+        logger.info("run memory", extra={
+            "phase": phase, "instance": self.config.instance_name,
+            "active_runs": RunExecutor._active_runs, **process_memory()})
 
     async def _renew(self, lease: Lease) -> Lease | None:
         """Extend the lease, retrying store errors while it is still valid."""

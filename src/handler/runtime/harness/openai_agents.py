@@ -130,8 +130,8 @@ def workspace_tools(workspace: Path, *, client: openai.AsyncOpenAI | None = None
                 if pdf_files is None:
                     raise documents.ReadError("PDF upload service is unavailable")
                 return await pdf_files.read(target, display=path, pages=pages)
-            reading = await asyncio.to_thread(
-                documents.read, target, display=path, offset=offset, sheet=sheet,
+            reading = await documents.capped_read(
+                "read_file", documents.read, target, display=path, offset=offset, sheet=sheet,
                 cells=cells, pages=pages, as_images=as_images)
         except (documents.ReadError, ValueError, OSError) as exc:
             return f"error: {exc}"
@@ -364,7 +364,8 @@ def bounded_task_tool(client: Any, models: dict[str, str], usage_events: list[Ru
                     return fallback("A source file is missing; handle the task yourself.")
                 # Request one character beyond the total budget so clipping is
                 # detected rather than mistaken for the complete source.
-                text = await asyncio.to_thread(documents.to_text, target, max_chars=50_001)
+                text = await documents.capped_read(
+                    "bounded_model_task", documents.to_text, target, max_chars=50_001)
                 if not text:
                     return fallback("A source is scanned, unsupported or unreadable; inspect it yourself.")
                 if target.suffix.lower() in documents.SPREADSHEET_SUFFIXES and (

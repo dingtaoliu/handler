@@ -356,8 +356,8 @@ class MailTools:
             data = parsed.attachments[index].data
             name = sanitize_filename(match.get("filename"), default="attachment")
             saved = self._save(ctx, f"mail/{row['account_id']}/{row['id']}/{name}", data)
-        text = await asyncio.to_thread(documents.to_text, workspace / saved,
-                                       max_chars=MAX_TEXT_CHARS + 1)
+        text = await documents.capped_read("mailbox", documents.to_text, workspace / saved,
+                                           max_chars=MAX_TEXT_CHARS + 1)
         result: dict[str, Any] = {"filename": match.get("filename"),
                                   "mime_type": match.get("content_type"), "size": len(data),
                                   "saved_to": saved}

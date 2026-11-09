@@ -411,8 +411,8 @@ class CrontalApiTools:
         if not options.get("include_text", True):
             return ToolResult(result)
         budget = max(1000, min(MAX_TEXT_CHARS, int(options.get("max_output_chars", MAX_TEXT_CHARS))))
-        text = await asyncio.to_thread(documents.to_text, workspace / saved,
-                                       max_chars=budget + 1)
+        text = await documents.capped_read("crontal_api", documents.to_text, workspace / saved,
+                                           max_chars=budget + 1)
         if text:
             result["text"] = text[:budget]
             if len(text) > budget:

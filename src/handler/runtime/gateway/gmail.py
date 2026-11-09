@@ -365,8 +365,8 @@ class GmailTools:
             data = _b64decode(body.get("data", ""))
         saved = self._save(ctx, message_id, filename, data)
         workspace = self._workspace_for(ctx.thread_key)
-        text = await asyncio.to_thread(documents.to_text, workspace / saved,
-                                       max_chars=MAX_TEXT_CHARS + 1)
+        text = await documents.capped_read("gmail", documents.to_text, workspace / saved,
+                                           max_chars=MAX_TEXT_CHARS + 1)
         result: dict[str, Any] = {"filename": filename, "mime_type": mime, "size": len(data),
                                   "saved_to": saved}
         if text:

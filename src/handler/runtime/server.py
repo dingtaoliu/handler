@@ -26,6 +26,7 @@ import uvicorn
 from .auth import Authenticator, add_cli_commands, run_cli
 from .bus import RunEventBus
 from .dispatcher import Dispatcher
+from .documents import READ_LIMIT_ENV, configure_read_limit
 from .files import LocalFileStore, S3FileStore
 from .gateway.api import approvals_router, questions_router
 from .web.memory_recovery_api import memory_recovery_router
@@ -408,7 +409,9 @@ def instance_configs(args: argparse.Namespace, env: Mapping[str, str]):
 
 
 def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> FastAPI:
-    configs = instance_configs(args, dict(os.environ if env is None else env))
+    env = dict(os.environ if env is None else env)
+    configs = instance_configs(args, env)
+    configure_read_limit(env.get(READ_LIMIT_ENV))
 
     @contextlib.asynccontextmanager
     async def lifespan(host):

@@ -11,6 +11,7 @@ from pathlib import Path
 import openai
 from agents import ToolOutputFileContent, ToolOutputText
 
+from ..documents.limiter import capped_read
 from ..documents.pdf import prepare_input
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ class PDFFiles:
 
     async def read(self, path: Path, *, display: str, pages: str | None = None
                    ) -> list[ToolOutputText | ToolOutputFileContent]:
-        pdf = await asyncio.to_thread(prepare_input, path, display=display, pages=pages)
+        pdf = await capped_read("pdf_upload", prepare_input, path, display=display, pages=pages)
         scope = f"{self.client.base_url}|{self.client.api_key}|{self.client.organization}|{self.client.project}"
         key = hashlib.sha256(scope.encode() + b"\0" + pdf.data).hexdigest()
         async with self.lock:
