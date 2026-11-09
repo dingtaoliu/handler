@@ -1,5 +1,13 @@
 # Handoff: handler rebuild
 
+## Active: BSS sequential improvements
+
+The owner authorized sequential work on the seven recent-chat findings, with
+durable takeover notes. Start with [bss-improvement-handoff.md](bss-improvement-handoff.md)
+for current progress and [the design](bss-improvement-design-2026-11-08.md) for
+contracts and constraints. Item 1 is investigation first; preserve production
+records while establishing why the incomplete import was confirmed.
+
 ## 2026-11-08 native PDF file transport
 
 Native OpenAI `read_file` now uploads intact PDFs and returns file references,
