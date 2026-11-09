@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from ..store.base import EventQueue
+from ..tenancy.limits import OverLimit
 from ..types import Event, Lane, ThreadSpec, ThreadType
 
 logger = logging.getLogger("handler.runtime.ingest")
@@ -77,7 +78,8 @@ def crontal_ingest_router(
         new = await queue.put(event, spec)
         logger.info("crontal notification", extra={"notification_id": note_id,
                                                    "thread_key": key, "duplicate": not new})
-        return JSONResponse({"thread_key": key, "duplicate": not new},
+        held = {"held": True} if isinstance(new, OverLimit) else {}
+        return JSONResponse({"thread_key": key, "duplicate": not new, **held},
                             status_code=202 if new else 200)
 
     return router

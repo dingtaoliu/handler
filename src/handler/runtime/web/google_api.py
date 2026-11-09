@@ -22,10 +22,11 @@ from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from ..auth import Authenticator, Principal
+from ..tenancy.limits import upgrade_required
 from ..gateway.google_oauth import (
     CALLBACK_PATH,
     INSTANCE_OWNER,
@@ -111,7 +112,7 @@ def _iso(value) -> str | None:
     return value.isoformat() if value else None
 
 
-def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *,
+def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *, plan_limits=None,
                   return_to_origins: str | Iterable[str] | None = None) -> APIRouter:
     """`return_to_origins` defaults to the HANDLER_RETURN_TO_ORIGINS env var."""
     router = APIRouter()
@@ -152,6 +153,8 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *,
     @router.post("/api/connections/google/start")
     async def start(request: Request, body: StartRequest | None = None,
                     principal: Principal = user) -> dict:
+        if plan_limits is not None and not plan_limits.current.connected_mail:
+            return JSONResponse(upgrade_required("gmail", plan_limits.current), status_code=403)
         google = configured()
         return_to = (body.return_to or "").strip() if body else ""
         if return_to and not allowed_return_to(return_to, origins):

@@ -50,10 +50,15 @@ class McpServerSpec:
     env: dict[str, str] = field(default_factory=dict)
 
 
+RUN_LIMIT_NOTICE = ("I stopped here because this request reached the plan's limit for one "
+                    "run. Send a follow-up to continue.")
+
+
 @dataclass(frozen=True)
 class RunLimits:
     timeout_seconds: float = 900.0
     max_turns: int | None = None
+    max_tokens: int | None = None  # input + output, across the whole run
 
 
 @dataclass(frozen=True)

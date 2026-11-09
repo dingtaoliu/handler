@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 
 from psycopg.types.json import Jsonb
 
+from ..tenancy.limits import OverLimit
 from .tasks import announce_routed
 from ..types import (
     Approval,
@@ -139,7 +140,9 @@ class ScheduleMixin(_Rows):
             )
             if not cursor.rowcount:
                 return False
-            routed = await _put_event(conn, event, thread, self._clock())
+            routed = await _put_event(conn, event, thread, self._clock(), self._plan_limits())
+            if isinstance(routed, OverLimit):
+                return routed
             if routed:
                 await self._notify(conn)
         self._wake.set()

@@ -18,6 +18,16 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from ..tenancy.limits import (
+    HOLD,
+    METERED,
+    SKIP,
+    LiveLimits,
+    OverLimit,
+    PlanLimits,
+    next_reset,
+    period_of,
+)
 from .postgres_hub import CONTROL_SCHEMA, SCHEMA_LOCK, SHARED_CHANNEL, PostgresHub
 from .usage import PostgresUsage
 from .tasks import announce_routed
@@ -104,10 +114,16 @@ async def earliest_work_at(conn: AsyncConnection, sinks: Sequence[str] | None) -
     """When this schema next needs a runtime: queued work, schedules, outbox, expiries.
 
     `sinks` limits outbox rows to those a runtime can deliver (None: all of them).
-    Approvals and questions are included because only a runtime expires them.
+    Approvals and questions are included because only a runtime expires them. Held
+    inputs wait for the next month, so they wake it then but never count as due now.
     """
+    # A sleeping tenant may not have started since these tables were added.
+    cursor = await conn.execute("SELECT to_regclass('held_inputs') AS held")
+    has_held = (await cursor.fetchone())["held"] is not None
+    held = ("(SELECT (date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month') "
+            "AT TIME ZONE 'UTC' WHERE EXISTS (SELECT 1 FROM held_inputs)), " if has_held else "")
     cursor = await conn.execute(
-        "SELECT LEAST("
+        "SELECT LEAST(" + held +
         "(SELECT MIN(GREATEST(COALESCE(available_at, pending_since), "
         " COALESCE(lease_until, pending_since))) FROM threads "
         " WHERE pending_since IS NOT NULL AND NOT dead), "
@@ -120,9 +136,64 @@ async def earliest_work_at(conn: AsyncConnection, sinks: Sequence[str] | None) -
     return (await cursor.fetchone())["due"]
 
 
+async def _route(conn: AsyncConnection, thread: ThreadSpec, event_type: str, now: datetime) -> None:
+    """Create the thread if needed and mark it as having work."""
+    # A new chat message revives a dead thread: the person is asking again.
+    revive = event_type == "chat.message"
+    await conn.execute(
+        "INSERT INTO threads (key, type, lane, owner_user_id, harness, "
+        "model, priority, created_at, pending_since) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (key) DO UPDATE SET "
+        "pending_since = COALESCE(threads.pending_since, "
+        "excluded.pending_since), "
+        "dead = CASE WHEN %s THEN FALSE ELSE threads.dead END, "
+        "attempts = CASE WHEN %s THEN 0 ELSE threads.attempts END",
+        (thread.key, thread.type.value, thread.lane.value,
+         thread.owner_user_id, thread.harness, thread.model,
+         thread.priority, now, now, revive, revive),
+    )
+
+
+async def _charge_input(conn: AsyncConnection, event: Event, thread: ThreadSpec,
+                        limits: PlanLimits, action: str, now: datetime) -> OverLimit | None:
+    """Count this new input, or apply the plan's action if the month is used up.
+
+    Runs after the insert won the idempotency check, in its transaction. The
+    conditional upsert locks the period's row, so the count is exact under load.
+    """
+    period, limit = period_of(now), limits.monthly_inputs
+    if limit > 0:
+        cursor = await conn.execute(
+            "INSERT INTO input_usage (period, used) VALUES (%s, 1) "
+            "ON CONFLICT (period) DO UPDATE SET used = input_usage.used + 1 "
+            "WHERE input_usage.used < %s RETURNING used", (period, limit))
+        if await cursor.fetchone() is not None:
+            return None
+    notify = False
+    if action == HOLD:
+        await conn.execute("UPDATE events SET status = %s WHERE id = %s",
+                           (EventStatus.HELD.value, event.id))
+        await conn.execute(
+            "INSERT INTO held_inputs (event_id, thread_spec, held_at) VALUES (%s, %s, %s)",
+            (event.id, Jsonb({"key": thread.key, "type": thread.type.value,
+                              "lane": thread.lane.value, "owner_user_id": thread.owner_user_id,
+                              "harness": thread.harness, "model": thread.model,
+                              "priority": thread.priority}), now))
+    else:
+        await conn.execute("DELETE FROM events WHERE id = %s", (event.id,))
+        if action == SKIP:
+            cursor = await conn.execute(
+                "INSERT INTO quota_notices (period, subject) VALUES (%s, %s) "
+                "ON CONFLICT DO NOTHING", (period, str(event.payload.get("schedule_id"))))
+            notify = bool(cursor.rowcount)
+    return OverLimit(action, limits.plan, limit, limit, next_reset(now), notify)
+
+
 async def _put_event(
-    conn: AsyncConnection, event: Event, thread: ThreadSpec | None, now: datetime
-) -> bool:
+    conn: AsyncConnection, event: Event, thread: ThreadSpec | None, now: datetime,
+    limits: PlanLimits | None = None,
+) -> bool | OverLimit:
     """Insert an event idempotently and route its thread; False if a duplicate."""
     values = _values(event)
     values["thread_key"] = thread.key if thread else event.thread_key
@@ -136,21 +207,12 @@ async def _put_event(
     if not cursor.rowcount:
         return False
     if thread is not None:
-        # A new chat message revives a dead thread: the person is asking again.
-        revive = event.type == "chat.message"
-        await conn.execute(
-            "INSERT INTO threads (key, type, lane, owner_user_id, harness, "
-            "model, priority, created_at, pending_since) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (key) DO UPDATE SET "
-            "pending_since = COALESCE(threads.pending_since, "
-            "excluded.pending_since), "
-            "dead = CASE WHEN %s THEN FALSE ELSE threads.dead END, "
-            "attempts = CASE WHEN %s THEN 0 ELSE threads.attempts END",
-            (thread.key, thread.type.value, thread.lane.value,
-             thread.owner_user_id, thread.harness, thread.model,
-             thread.priority, now, now, revive, revive),
-        )
+        action = METERED.get(event.type)
+        if action and limits is not None and limits.monthly_inputs is not None:
+            over = await _charge_input(conn, event, thread, limits, action, now)
+            if over is not None:
+                return over
+        await _route(conn, thread, event.type, now)
     return True
 
 
@@ -188,6 +250,7 @@ class PostgresCore(PostgresUsage):
         self._listener: asyncio.Task[None] | None = None
         self._listening = asyncio.Event()
         self._closed = False
+        self.limits: LiveLimits | None = None  # set for registry-hosted tenants only
         self._marks_wake = False  # a registry's tenant_state exists for a store on its own
 
     # --- plumbing ---------------------------------------------------------
@@ -342,14 +405,79 @@ class PostgresCore(PostgresUsage):
             return bool(await operation(conn))
 
     # --- queue ------------------------------------------------------------
-    async def put(self, event: Event, thread: ThreadSpec | None) -> bool:
+    def _plan_limits(self) -> PlanLimits | None:
+        return self.limits.current if self.limits is not None else None
+
+    async def put(self, event: Event, thread: ThreadSpec | None) -> bool | OverLimit:
         async with self._conn() as conn:
-            if not await _put_event(conn, event, thread, self._clock()):
-                return False
+            stored = await _put_event(conn, event, thread, self._clock(), self._plan_limits())
+            if not stored or isinstance(stored, OverLimit):
+                return stored
             await self._notify(conn)
         self._wake.set()
         announce_routed(self, event, thread)
         return True
+
+    async def input_usage(self) -> dict[str, Any] | None:
+        """This month's metered inputs, or None for a tenant with no limit."""
+        limits = self._plan_limits()
+        if limits is None or limits.monthly_inputs is None:
+            return None
+        now = self._clock()
+        async with self._conn() as conn:
+            cursor = await conn.execute("SELECT used FROM input_usage WHERE period = %s",
+                                        (period_of(now),))
+            row = await cursor.fetchone()
+            cursor = await conn.execute("SELECT count(*) AS held FROM held_inputs")
+            held = (await cursor.fetchone())["held"]
+        return {"plan": limits.plan, "used": row["used"] if row else 0,
+                "limit": limits.monthly_inputs, "held": held,
+                "resets_at": next_reset(now).isoformat()}
+
+    async def release_held_inputs(self) -> int:
+        """Route held inputs, oldest first, as far as this month's allowance goes.
+
+        Each counts against the current month; what doesn't fit stays held for the
+        next one. All inputs for one thread are read together by its next run.
+        """
+        limits = self._plan_limits()
+        if limits is None:
+            return 0
+        released: list[tuple[str, ThreadSpec]] = []
+        async with self._conn() as conn:
+            cursor = await conn.execute("SELECT EXISTS (SELECT 1 FROM held_inputs) AS any")
+            if not (await cursor.fetchone())["any"]:
+                return 0
+            now = self._clock()
+            period, room = period_of(now), None
+            if limits.monthly_inputs is not None:
+                await conn.execute("INSERT INTO input_usage (period, used) VALUES (%s, 0) "
+                                   "ON CONFLICT (period) DO NOTHING", (period,))
+                cursor = await conn.execute(
+                    "SELECT used FROM input_usage WHERE period = %s FOR UPDATE", (period,))
+                room = limits.monthly_inputs - (await cursor.fetchone())["used"]
+                if room <= 0:
+                    return 0
+            cursor = await conn.execute(
+                "SELECT h.event_id, h.thread_spec, e.type FROM held_inputs h "
+                "JOIN events e ON e.id = h.event_id ORDER BY h.seq LIMIT %s "
+                "FOR UPDATE OF h SKIP LOCKED", (room,))
+            for row in await cursor.fetchall():
+                raw = row["thread_spec"]
+                spec = ThreadSpec(**{**raw, "type": ThreadType(raw["type"]), "lane": Lane(raw["lane"])})
+                await _route(conn, spec, row["type"], now)
+                await conn.execute("UPDATE events SET status = %s WHERE id = %s",
+                                   (EventStatus.ROUTED.value, row["event_id"]))
+                await conn.execute("DELETE FROM held_inputs WHERE event_id = %s", (row["event_id"],))
+                released.append((row["event_id"], spec))
+            if released and limits.monthly_inputs is not None:
+                await conn.execute("UPDATE input_usage SET used = used + %s WHERE period = %s",
+                                   (len(released), period))
+            if released:
+                await self._notify(conn)
+        if released:
+            self._wake.set()
+        return len(released)
 
     async def claim(
         self, owner: str, lane: Lane, limit: int, lease_seconds: float

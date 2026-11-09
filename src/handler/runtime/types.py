@@ -65,6 +65,7 @@ class ThreadType(StrEnum):
 class EventStatus(StrEnum):
     ROUTED = "routed"
     IGNORED = "ignored"
+    HELD = "held"  # stored over a plan's limit; routed when the allowance returns
 
 
 class RunStatus(StrEnum):

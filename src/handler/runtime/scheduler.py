@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -13,7 +13,8 @@ from croniter import croniter
 
 from .store.base import ScheduleStore
 from .settings import HarnessSource, resolve_harness
-from .types import Event, Lane, ThreadSpec, ThreadType, utcnow
+from .tenancy.limits import OverLimit
+from .types import Event, Lane, Schedule, ThreadSpec, ThreadType, utcnow
 
 
 logger = logging.getLogger("handler.runtime.scheduler")
@@ -74,6 +75,7 @@ class Scheduler:
         self.default_harness = default_harness
         self.max_sleep_seconds = max_sleep_seconds
         self._wake = asyncio.Event()
+        self.on_skipped: Callable[[Schedule, OverLimit], Awaitable[None]] | None = None
 
     def wake(self) -> None:
         self._wake.set()
@@ -114,7 +116,17 @@ class Scheduler:
                     owner_user_id=schedule.created_by,
                     harness=schedule.harness or await resolve_harness(self.default_harness), model=schedule.model,
                 )
-                fired += await self.store.fire_schedule(schedule, expected, next_run, event, thread)
+                outcome = await self.store.fire_schedule(schedule, expected, next_run, event, thread)
+                if isinstance(outcome, OverLimit):
+                    logger.info("automation skipped: input limit",
+                                extra={"schedule": schedule.id, "used": outcome.used})
+                    if outcome.notify and self.on_skipped is not None:
+                        try:
+                            await self.on_skipped(schedule, outcome)
+                        except Exception:
+                            logger.exception("skip notice failed", extra={"schedule": schedule.id})
+                    continue
+                fired += outcome
         return fired
 
     async def run_forever(self, stop: asyncio.Event) -> None:

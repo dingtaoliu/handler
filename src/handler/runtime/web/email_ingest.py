@@ -47,6 +47,7 @@ from ..mail.parse import parse_email
 from ..run import thread_slug
 from ..settings import HarnessSource, SettingsService, resolve_harness
 from ..store.base import Store
+from ..tenancy.limits import OverLimit
 from ..types import Event, Lane, ThreadSpec, ThreadType
 from ..workspaces import WorkspaceSync
 
@@ -206,7 +207,8 @@ def email_ingest_router(
                 await observer(body, envelope_to=envelope_to, thread_key=key)
             except Exception:  # noqa: BLE001 - the email is already queued
                 logger.exception("email intake observer failed", extra={"thread_key": key})
-        return JSONResponse({"status": "accepted", "thread_key": key, "duplicate": not new,
+        status = "held" if isinstance(new, OverLimit) else "accepted"
+        return JSONResponse({"status": status, "thread_key": key, "duplicate": not new,
                              "workspace": workspace["dir"]},
                             status_code=202 if new else 200)
 

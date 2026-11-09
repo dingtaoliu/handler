@@ -47,7 +47,7 @@ from .. import documents
 from ..images import sniff_file
 from ..settings import HARNESS_DEFAULT_MODELS
 from ..types import TokenUsage, utcnow
-from .base import HarnessError, RunEvent, RunEventKind, RunRequest
+from .base import RUN_LIMIT_NOTICE, HarnessError, RunEvent, RunEventKind, RunRequest
 from .pdf_files import PDFFiles
 
 logger = logging.getLogger(__name__)
@@ -565,6 +565,8 @@ class OpenAIAgentsHarness:
         seen_requests: set[str] = set()
         call_requests: dict[str, str] = {}
         meter: _RequestMeter | None = None
+        spent = 0
+        limited = False  # stopped at a plan's token or iteration limit
         helper = (bounded_task_tool(self.client, req.bounded_task_models, auxiliary_usage, req.workspace, call_requests, seen_requests)
                   if req.bounded_task_models else None)
         try:
@@ -598,7 +600,19 @@ class OpenAIAgentsHarness:
                             progressed = True
                             if event.kind is RunEventKind.ASSISTANT_TEXT:
                                 text = event.data["text"]
+                            if event.kind is RunEventKind.USAGE and event.usage is not None:
+                                spent += event.usage.input_tokens + event.usage.output_tokens
+                                if (req.limits.max_tokens is not None and not limited
+                                        and spent >= req.limits.max_tokens):
+                                    limited = True
+                                    # After the turn, so tool calls get their outputs and
+                                    # the Conversation stays usable for the next message.
+                                    result.cancel(mode="after_turn")
                             yield event
+                    except MaxTurnsExceeded:
+                        if req.limits.max_turns is None:
+                            raise
+                        limited = True
                     except openai.BadRequestError as exc:
                         # Retry in place only when the request was refused before
                         # anything happened (so the input was not stored either).
@@ -619,6 +633,8 @@ class OpenAIAgentsHarness:
                 final = result.final_output
                 if isinstance(final, str) and final:
                     text = final
+                if limited:
+                    text = f"{text}\n\n{RUN_LIMIT_NOTICE}" if text else RUN_LIMIT_NOTICE
                 finished = True
         except asyncio.CancelledError:
             if result is not None:

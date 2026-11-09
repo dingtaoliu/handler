@@ -13,12 +13,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
 from ..bus import BusMessage, RunEventBus
 from ..store.base import Store
+from ..tenancy.limits import OverLimit
 from ..images import MAX_IMAGES_PER_MESSAGE, VISION_TYPES
 from ..memory import MAX_CONTEXT_LINKS, MAX_THREAD_CONTEXT_LINKS, normalize_context_link
 from ..uploads import UploadStore
@@ -157,6 +158,13 @@ def create_app(
         if not can_see_thread(principal, key):
             raise HTTPException(404, "thread not found")
 
+    @router.get("/api/limits/inputs")
+    async def input_limits(_principal: Principal = principal_dep) -> dict[str, Any]:
+        """This month's input usage for the composer; `limited` is false with no quota."""
+        reader = getattr(store, "input_usage", None)
+        usage = await reader() if reader is not None else None
+        return {"limited": False} if usage is None else {"limited": True, **usage}
+
     @router.post("/api/chat")
     async def chat(body: ChatRequest, request: Request,
                    principal: Principal = principal_dep) -> dict[str, Any]:
@@ -208,6 +216,8 @@ def create_app(
             harness=await resolve_harness(default_harness),
         )
         stored = await store.put(event, spec)
+        if isinstance(stored, OverLimit):
+            return JSONResponse(stored.payload(), status_code=429)
         if context_links:
             # The message carries them too, so a run that starts first sees them.
             context_links = await store.add_thread_context_links(

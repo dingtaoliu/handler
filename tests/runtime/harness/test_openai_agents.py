@@ -11,6 +11,8 @@ import pytest
 
 from handler.runtime.harness import openai_agents as oa
 from handler.runtime.harness.base import (
+    RUN_LIMIT_NOTICE,
+    RunLimits,
     HarnessError,
     McpServerSpec,
     RunEventKind,
@@ -481,3 +483,45 @@ async def test_refused_compaction_is_turned_off_and_retried(tmp_path, runner, mo
     assert events[-1].kind is RunEventKind.FINAL
     assert harness.compact_threshold is None
     assert runner.calls[1]["agent"].model_settings.context_management is None
+
+
+async def test_token_limit_stops_the_run_after_the_turn(tmp_path, runner):
+    class Limited(FakeStream):
+        modes: list[str] = []
+
+        def cancel(self, mode: str = "immediate") -> None:
+            self.modes.append(mode)
+
+    usage = SimpleNamespace(input_tokens=900, output_tokens=200,
+                            input_tokens_details=SimpleNamespace(cached_tokens=0),
+                            output_tokens_details=SimpleNamespace(reasoning_tokens=0))
+    response = SimpleNamespace(id="resp_1", usage=usage)
+    raw = SimpleNamespace(type="raw_response_event",
+                          data=SimpleNamespace(type="response.completed", response=response))
+    stream = Limited([raw, *_events()])
+    stream.final_output = "Partial answer."
+    runner.state["next"] = stream
+    harness = oa.OpenAIAgentsHarness("key", client=FakeClient())
+    events = [e async for e in harness.run(_req(tmp_path, limits=RunLimits(max_tokens=1000)))]
+    assert stream.modes == ["after_turn"]
+    final = events[-1]
+    assert final.kind is RunEventKind.FINAL
+    assert final.data["text"] == f"Partial answer.\n\n{RUN_LIMIT_NOTICE}"
+
+
+async def test_iteration_limit_finishes_with_a_notice_not_a_failure(tmp_path, runner):
+    stream = FakeStream(_events(), error=oa.MaxTurnsExceeded("too many"))
+    stream.final_output = None
+    runner.state["next"] = stream
+    harness = oa.OpenAIAgentsHarness("key", client=FakeClient())
+    events = [e async for e in harness.run(_req(tmp_path, limits=RunLimits(max_turns=3)))]
+    assert runner.calls[0]["max_turns"] == 3
+    assert events[-1].kind is RunEventKind.FINAL
+    assert RUN_LIMIT_NOTICE in events[-1].data["text"]
+
+
+async def test_turn_limit_error_without_a_plan_limit_is_still_a_failure(tmp_path, runner):
+    runner.state["next"] = FakeStream(_events(), error=oa.MaxTurnsExceeded("too many"))
+    harness = oa.OpenAIAgentsHarness("key", client=FakeClient())
+    with pytest.raises(HarnessError):
+        [e async for e in harness.run(_req(tmp_path))]

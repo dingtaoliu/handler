@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from ..auth import Authenticator, Principal, can_see_thread
@@ -24,6 +24,7 @@ from ..memory import MemoryTools, normalize_links
 from ..scheduler import Scheduler, parse_spec
 from ..settings import resolve_harness
 from ..store.base import Store
+from ..tenancy.limits import OverLimit
 from ..types import Event, Lane, MemoryTopic, Run, RunStep, Schedule, ThreadSpec, ThreadType, TokenUsage
 from ..uploads import (
     MAX_FILE_BYTES,
@@ -325,7 +326,9 @@ def admin_router(
                           owner_user_id=schedule.created_by,
                           harness=schedule.harness or await resolve_harness(scheduler.default_harness),
                           model=schedule.model)
-        await store.put(event, spec)
+        outcome = await store.put(event, spec)
+        if isinstance(outcome, OverLimit):
+            return JSONResponse(outcome.payload(), status_code=429)
         return {"event_id": event.id, "thread_key": key}
 
     # ---- usage -----------------------------------------------------------

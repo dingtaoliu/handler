@@ -28,6 +28,7 @@ from .harness.base import (
     McpServerSpec,
     RunEvent,
     RunEventKind,
+    RUN_LIMIT_NOTICE,
     RunLimits,
     RunRequest,
 )
@@ -80,6 +81,8 @@ class RunConfig:
     available_tools: frozenset[str] | None = None
     available_tools_for: Callable[[RunContext], Awaitable[set[str]]] | None = None
     instance_name: str = "main"
+    default_model: str | None = None
+    plan_limits: Any = None  # LiveLimits for a registry tenant
 
     @property
     def workspaces_dir(self) -> Path:
@@ -355,6 +358,8 @@ class RunPlan:
     max_attempts: int
     fresh_session: bool = False
     bounded_task_models: dict[str, str] = field(default_factory=dict)
+    max_turns: int | None = None
+    max_tokens: int | None = None
 
 
 class _RunRecorder(StepRecorder):
@@ -558,6 +563,7 @@ class RunExecutor:
                    repair: bool = False) -> None:
         harness = self.harnesses.get(thread.harness)
         plan = await self._plan(thread, events)
+        self._apply_plan_limits(plan)
         if plan.model is None and harness is not None and hasattr(harness, "defaults"):
             plan.model = (await harness.defaults()).get("model")
         run.model = plan.model or run.model
@@ -639,7 +645,8 @@ class RunExecutor:
                 reasoning_effort=plan.reasoning_effort,
                 mcp_servers=mcp_servers,
                 env=dict(self.config.harness_env),
-                limits=RunLimits(timeout_seconds=plan.timeout_seconds),
+                limits=RunLimits(timeout_seconds=plan.timeout_seconds, max_turns=plan.max_turns,
+                                 max_tokens=plan.max_tokens),
                 repair_session=repair and not plan.fresh_session,
                 fresh_session=plan.fresh_session,
                 bounded_task_models=plan.bounded_task_models,
@@ -779,6 +786,13 @@ class RunExecutor:
                     await recorder.on_event(ev)
                     self._publish(thread.key, run.id, "run_event",
                                   {"kind": str(ev.kind), "data": _preview(ev.data)})
+                    if self._over_token_limit(harness, req, recorder):
+                        # The native harness stops itself at a turn boundary.
+                        await harness.interrupt(run.id)
+                        transcript.append(Message(thread.key, Role.ASSISTANT,
+                                                  [{"type": "text", "text": RUN_LIMIT_NOTICE}],
+                                                  run_id=run.id))
+                        return RUN_LIMIT_NOTICE
                     if ev.kind is RunEventKind.SESSION:
                         sid = ev.data.get("session_id")
                         if sid and sid != thread.session_id:
@@ -873,6 +887,25 @@ class RunExecutor:
             if resolved:
                 return resolved
         return thread.owner_user_id
+
+    @staticmethod
+    def _over_token_limit(harness: Harness, req: RunRequest, recorder: _RunRecorder) -> bool:
+        limit = req.limits.max_tokens
+        if limit is None or harness.name == "openai_agents":
+            return False
+        usage = recorder.totals()[0]
+        return usage.input_tokens + usage.output_tokens >= limit
+
+    def _apply_plan_limits(self, plan: "RunPlan") -> None:
+        """A plan's cost limits, after every setting and per-message choice."""
+        if self.config.plan_limits is None:
+            return
+        limits = self.config.plan_limits.current
+        plan.max_turns, plan.max_tokens = limits.max_run_turns, limits.max_run_tokens
+        if limits.fix_model:
+            plan.model = limits.model or self.config.default_model
+            plan.reasoning_effort = self.config.reasoning_effort
+            plan.bounded_task_models = {}  # helpers run on other models
 
     async def _plan(self, thread: Thread, events: list[Event] | None = None) -> "RunPlan":
         """Resolve instructions, model and limits from settings (with config fallbacks)."""
