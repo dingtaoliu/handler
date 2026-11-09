@@ -56,6 +56,7 @@ def pg_server(tmp_path_factory):
     options = f"-c listen_addresses='' -c unix_socket_directories='{sockdir}' -p {port} -c fsync=off"
     subprocess.run([pg_ctl, "-D", str(data), "-o", options, "-l", str(data.parent / "log"),
                     "-w", "start"], check=True, capture_output=True)
+    SERVER_LOG["path"] = data.parent / "log"
     try:
         yield f"host={sockdir} port={port} user=postgres"
     finally:
@@ -65,6 +66,7 @@ def pg_server(tmp_path_factory):
 
 
 _names = itertools.count()
+SERVER_LOG: dict[str, Path] = {}  # where the throwaway server writes its log
 
 
 @pytest.fixture

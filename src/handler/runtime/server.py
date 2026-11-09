@@ -10,12 +10,14 @@ import asyncio
 import contextlib
 import getpass
 import ipaddress
+import json
 import logging
 import os
 import re
 import secrets
 import shlex
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -36,6 +38,7 @@ from .gateway.gmail import GmailTools
 from .gateway.google_oauth import INSTANCE_OWNER, google_oauth_from_env, user_owner
 from .gateway.mcp_server import create_mcp_app
 from .gateway.policy import GrantPolicy
+from .gateway.secret_box import SecretBox
 from .gateway.tokens import RunTokens
 from .harness.codex import SANDBOX_MODES, CodexHarness, codex_binary
 from .gateway.crontal_api import CrontalApiTools, crontal_base_url
@@ -62,6 +65,10 @@ from .store.postgres import PostgresStore
 from .store.postgres_hub import DEFAULT_POOL_MAX, PostgresHub
 from .store.sqlite import SQLiteStore
 from .tasks import publish_queued
+from .tenancy.host import TenantHost
+from .tenancy.platform_api import platform_router
+from .tenancy.registry import Tenant, TenantRegistry
+from .tenancy.run_gate import DEFAULT_MAX_RUNS, DEFAULT_PLAN_CAPS, RunGate, parse_plan_caps
 from .tools.automation import AutomationTools
 from .tools.notify import NotifyTools
 from .tools.threads import ThreadTools
@@ -355,6 +362,12 @@ _PRIVATE_ENV = {
     "HANDLER_INTEGRATIONS",  # each instance chooses its own integrations
 }
 
+# Registry-mode settings of the host itself: no tenant, main included, ever sees them.
+REGISTRY_ENV = "HANDLER_TENANT_REGISTRY"
+PLATFORM_KEY_ENV = "HANDLER_PLATFORM_KEY"
+TENANT_SECRET_ENV = "HANDLER_TENANT_SECRET_KEY"
+_HOST_ONLY_ENV = {REGISTRY_ENV, PLATFORM_KEY_ENV, TENANT_SECRET_ENV, "HANDLER_INSTANCES"}
+
 # Thread types the core owns; integrations may not redefine them.
 CORE_THREAD_TYPES = frozenset({"chat", "automation"})
 
@@ -391,6 +404,12 @@ def instance_configs(args: argparse.Namespace, env: Mapping[str, str]):
             raise ValueError(f"{name}: HANDLER_ADMIN_KEY is required in multi-instance mode")
         base = f"/i/{name}"
         configs.append((name, instance_args, scoped, base))
+    validate_instance_configs(configs)
+    return configs
+
+
+def validate_instance_configs(configs: list) -> None:
+    """Reject instances that would share a directory, key, schema or file prefix."""
     for index, (name, cfg, scoped, _) in enumerate(configs):
         for other_name, other, other_env, _ in configs[:index]:
             if Path(cfg.data_dir).expanduser().resolve() == Path(other.data_dir).expanduser().resolve():
@@ -406,7 +425,6 @@ def instance_configs(args: argparse.Namespace, env: Mapping[str, str]):
             for key in ("HANDLER_WEBHOOK_SECRET", "HANDLER_EMAIL_SECRET", "HANDLER_SECRET_KEY"):
                 if scoped.get(key) and scoped.get(key) == other_env.get(key):
                     raise ValueError(f"{name} and {other_name}: {key} must differ")
-    return configs
 
 
 def _shared_hubs(configs: list, env: Mapping[str, str]) -> dict[str, PostgresHub]:
@@ -422,10 +440,136 @@ def _shared_hubs(configs: list, env: Mapping[str, str]) -> dict[str, PostgresHub
             for _, cfg, _, _ in configs if cfg.database_url}
 
 
+def _inheritable_env(env: Mapping[str, str]) -> dict[str, str]:
+    """What every registry tenant starts from: infrastructure, never a credential."""
+    return {k: v for k, v in env.items()
+            if not k.startswith(("HANDLER_I_", "GOOGLE_"))
+            and k not in _PRIVATE_ENV and k not in _HOST_ONLY_ENV}
+
+
+_SECRET_NAME = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|GOOGLE_")
+
+
+def tenant_instance_config(args: argparse.Namespace, env: Mapping[str, str], tenant: Tenant,
+                           box: SecretBox) -> tuple[str, argparse.Namespace, dict[str, str], str]:
+    """A tenant row as instance_configs would resolve it, from its own secrets only."""
+    scoped = _inheritable_env(env)
+    root = Path(args.data_dir).expanduser()
+    scoped["HANDLER_RT_DATA_DIR"] = str(root if tenant.name == "main"
+                                        else root / "instances" / tenant.name)
+    scoped["HANDLER_DB_SCHEMA"] = tenant.schema_name
+    scoped["HANDLER_FILE_PREFIX"] = tenant.s3_prefix
+    scoped.pop("INTEGRATIONS", None)
+    if tenant.integrations is not None:
+        scoped["HANDLER_INTEGRATIONS"] = ",".join(tenant.integrations)
+    scoped.update(tenant.config)
+    scoped.update(json.loads(box.decrypt(tenant.secrets)))
+    tenant_args = _parse_args(["serve"], scoped)
+    tenant_args.host, tenant_args.port = args.host, args.port
+    tenant_args.database_url = args.database_url
+    if not tenant_args.admin_key:
+        raise ValueError(f"{tenant.name}: HANDLER_ADMIN_KEY is required")
+    return tenant.name, tenant_args, scoped, f"/i/{tenant.name}"
+
+
+def _imported_tenants(args: argparse.Namespace, env: Mapping[str, str], configs: list,
+                      registry: TenantRegistry) -> list[Tenant]:
+    """The env-defined instances as tenants, keeping their schemas, prefixes and URLs."""
+    if not configs[0][0]:
+        return []
+    common = _inheritable_env(env)
+    root = Path(args.data_dir).expanduser()
+    fixed = {"HANDLER_DB_SCHEMA", "HANDLER_FILE_PREFIX", "HANDLER_INTEGRATIONS", "INTEGRATIONS",
+             "HANDLER_RT_DATA_DIR", "HANDLER_MERCHANT_ID", *_HOST_ONLY_ENV}
+    tenants = []
+    for name, cfg, scoped, _ in configs:
+        if cfg.database_url != args.database_url:
+            raise ValueError(f"{name}: the tenant registry needs one database for every instance")
+        overrides = {k: v for k, v in scoped.items() if common.get(k) != v and k not in fixed}
+        derived = root if name == "main" else root / "instances" / name
+        if Path(cfg.data_dir).expanduser() != derived:
+            overrides["HANDLER_RT_DATA_DIR"] = cfg.data_dir
+        secrets = {k: v for k, v in overrides.items() if _SECRET_NAME.search(k)}
+        merchant = scoped.get("HANDLER_MERCHANT_ID")
+        tenants.append(Tenant(
+            name=name, merchant_id=int(merchant) if merchant else None,
+            schema_name=cfg.db_schema or "public", s3_prefix=scoped.get("HANDLER_FILE_PREFIX", ""),
+            integrations=enabled_names(scoped), secrets=registry.seal(secrets),
+            config={k: v for k, v in overrides.items() if k not in secrets}))
+    return tenants
+
+
+def _plan_limit(tenant: Tenant) -> int | None:
+    value = tenant.limits.get("max_runs")
+    return int(value) if value is not None else None
+
+
+def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs: list) -> FastAPI:
+    """Host tenants from `handler_control` and start each only when it has work."""
+    platform_key, sealing_key = env.get(PLATFORM_KEY_ENV), env.get(TENANT_SECRET_ENV)
+    if not args.database_url or not platform_key or not sealing_key:
+        raise ValueError(f"{REGISTRY_ENV} needs DATABASE_URL, {PLATFORM_KEY_ENV} "
+                         f"and {TENANT_SECRET_ENV}")
+    size = int(env.get("HANDLER_DB_SHARED_POOL_MAX", str(DEFAULT_POOL_MAX)))
+    hub = PostgresHub(args.database_url, max_size=size)
+    box = SecretBox(sealing_key)
+    gate = RunGate(int(env.get("HANDLER_GLOBAL_MAX_RUNS", str(DEFAULT_MAX_RUNS))),
+                   parse_plan_caps(env.get("HANDLER_PLAN_RUN_CAPS", DEFAULT_PLAN_CAPS)),
+                   max_wait=float(env.get("HANDLER_RUN_MAX_WAIT_SECONDS", "60")))
+
+    def validate(tenants: list[Tenant]) -> None:
+        names = [tenant.name for tenant in tenants]
+        if len(names) != len(set(names)):
+            raise ValueError("tenant names must be unique")
+        schemas = [tenant.schema_name for tenant in tenants]
+        if len(schemas) != len(set(schemas)):
+            raise ValueError("tenant schemas must differ")
+        resolved = [tenant_instance_config(args, env, tenant, box) for tenant in tenants]
+        for name, cfg, _, _ in resolved:
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name):
+                raise ValueError(f"invalid instance name: {name!r}")
+            if cfg.admin_key == platform_key:
+                raise ValueError(f"{name}: an admin key must differ from the platform key")
+        validate_instance_configs(resolved)
+
+    registry = TenantRegistry(hub, box, validate)
+
+    def runtime_for(tenant: Tenant):
+        name, cfg, scoped, base = tenant_instance_config(args, env, tenant, box)
+        gate.configure(name, tenant.plan, _plan_limit(tenant))
+        return instance_runtime(cfg, scoped, base_path=base, instance_name=name, hub=hub, gate=gate)
+
+    tenants = TenantHost(
+        registry, runtime_for,
+        idle_seconds=float(env.get("HANDLER_TENANT_IDLE_SECONDS", "600")),
+        scan_seconds=float(env.get("HANDLER_TENANT_SCAN_SECONDS", "15")),
+        boot_grace_seconds=float(env.get("HANDLER_TENANT_BOOT_GRACE_SECONDS", "120")))
+
+    @contextlib.asynccontextmanager
+    async def lifespan(host):
+        try:
+            await registry.setup()
+            await registry.import_once(_imported_tenants(args, env, configs, registry))
+            validate(await registry.list())
+            tenants.start()  # in the background: the port must bind within Heroku's limit
+            yield
+        finally:
+            await tenants.shutdown()
+            await hub.close()
+
+    host = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    host.include_router(platform_router(registry, tenants, platform_key))
+    host.mount("/", tenants)
+    host.state.tenants, host.state.registry, host.state.run_gate = tenants, registry, gate
+    return host
+
+
 def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> FastAPI:
     env = dict(os.environ if env is None else env)
     configs = instance_configs(args, env)
     configure_read_limit(env.get(READ_LIMIT_ENV))
+    if env.get(REGISTRY_ENV) == "1":
+        return create_registry_host(args, env, configs)
     hubs = _shared_hubs(configs, env)
 
     @contextlib.asynccontextmanager
@@ -487,7 +631,7 @@ async def serve(args: argparse.Namespace) -> None:
 async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                            base_path: str = "", instance_name: str = "",
                            registry: IntegrationRegistry | None = None,
-                           hub: PostgresHub | None = None):
+                           hub: PostgresHub | None = None, gate: RunGate | None = None):
     """Own one instance and close all its resources when the host stops."""
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -625,7 +769,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         )
         dispatcher = Dispatcher(
             store, executor, lease_seconds=config.lease_seconds,
-            max_concurrent=args.max_concurrent,
+            max_concurrent=args.max_concurrent, gate=gate, gate_tenant=instance_name,
             lane_capacity={Lane.INTERACTIVE: int(limits_cfg["interactive_capacity"]),
                            Lane.BACKGROUND: int(limits_cfg["background_capacity"])},
         )
@@ -732,6 +876,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             app.include_router(router)
         app.state.integrations = integrations
         app.state.gateway, app.state.outbox = gateway, outbox
+        app.state.lifecycle = SimpleNamespace(dispatcher=dispatcher, store=store, outbox=outbox,
+                                              workspace_sync=workspace_sync)
         app.state.identity_provider = (contributions.identity_provider[1]
                                        if contributions.identity_provider else None)
 
