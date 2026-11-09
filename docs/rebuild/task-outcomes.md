@@ -89,3 +89,15 @@ IDs; a report may require a model round trip. `task_get_outcome` is optional whe
 the preceding result already contains the receipt. This is a quality/visibility
 tradeoff, not a claimed token saving. No additional agent, model downgrade,
 recurring automation or model-based outcome classifier is added.
+
+## Release
+
+Handler v58 (`b0a7971`, image `c72d79a1a0fa`, 2,151,469,157 bytes) and Crontal
+v122 (`0c7a849`, image `5f523db6bc51`, 741,323,571 bytes). Backup b037; rollback
+Handler v57 / Crontal v121. Full runtime suite 1,261 passed/2 skipped; new modules
+Pyright clean. Crontal 113 relevant backend tests, production frontend build and
+i18n check passed. All three instance health/isolation/schema checks and both
+users' proxy reads passed. Production bundle contains the updated panel; no
+interactive browser or real SMTP/draft test was performed. No customer records
+or historical outcomes were rewritten during deployment validation. Crontal
+Alembic upgrade was a no-op; current revision `x9ledger20261104 (head)`.

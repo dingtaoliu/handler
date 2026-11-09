@@ -1,6 +1,8 @@
 # BSS Handler improvements: decisions and proposed design
 
-Status: **sequential work authorized by the owner after design review**.
+Status: **initial authorized implementation/analysis sequence delivered**.
+See [the handoff](bss-improvement-handoff.md) for deployed releases, validation,
+verification limits and remaining investigative/product follow-ups.
 Progress and takeover instructions: [BSS work handoff](bss-improvement-handoff.md).
 
 Owner responses on November 8, 2026 supersede the earlier review's proposed

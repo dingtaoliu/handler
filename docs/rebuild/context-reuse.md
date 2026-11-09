@@ -50,3 +50,9 @@ All three instance health/auth checks passed. Read-only live BSS user 2 prompt
 previews have the same 3,613-token stable prefix for chat and automation (15,291
 characters); total instruction estimates are 4,808 and 4,833 tokens respectively.
 Gmail guidance is absent. These exclude tool schemas and conversation history.
+
+After item 7's reporting guidance, v58's live BSS preview is 4,959 instruction
+tokens with a common 3,764-token prefix (75.9%). See the current
+[token/% component breakdown](../audits/bss-prompt-components-2026-11-09.md).
+The task-outcome component itself is 92 tokens. Snapshot differences are not
+attributed entirely to that component; current catalog/memory also affect totals.
