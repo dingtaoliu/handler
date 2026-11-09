@@ -75,3 +75,22 @@ should be exercised with a dedicated test mailbox before claiming end-to-end
 provider validation. Auto-signature policy is not invented by these tools: the
 agent must use the saved signature and inspect the actual body before requesting
 a send. Deletion approvals and existing send approvals remain in force.
+
+## Real IMAP follow-up (November 9)
+
+The opt-in `test_dovecot.py` suite now exercises the full gateway/draft-tool path
+against Dovecot 2.4.4 over TLS, using a pinned Docker digest, disposable synthetic
+mailboxes and a loopback-only random port. Both scenarios passed: identical create
+retries reuse one draft; updating replaces only the tracked UID, retains Unicode
+body/signature and exact attachment bytes, and leaves an unrelated `\\Deleted`
+draft present. A subsequent external IMAP edit is detected and not overwritten.
+Current-server draft listing/body reading also round-trip through the real server.
+The transport forbids opening SMTP during these tests. No customer mailbox,
+credentials or mail was involved, and test containers/data are removed in `finally`.
+
+Run with `HANDLER_TEST_DOVECOT=1 PYTHONPATH=src .venv/bin/python -m pytest
+ tests/runtime/integrations/mailbox/test_dovecot.py -q` (join as one shell command).
+The default suite skips these cases when Docker integration is not requested.
+The setup follows the [official Dovecot Docker instructions](https://doc.dovecot.org/2.4.4/installation/docker.html).
+This establishes Dovecot interoperability; other providers and interactive mail
+clients still need their own checks before claiming universal compatibility.

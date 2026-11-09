@@ -93,3 +93,22 @@ not been run; API isolation and compatibility serialization were tested.
 5. Extend async resource adapters beyond received RFQs if needed. Unknown jobs
    stay unverified. Receipt facts cannot establish complete source coverage or
    recipient delivery; keep those verification limits explicit.
+
+## Remaining-item continuation — November 9
+
+Owner renewed the remaining work after usage reset. New findings are in the RFQ
+investigation and [cost follow-up](../audits/bss-cost-followup-2026-11-09.md):
+production XLS conversion is ~27k characters (not a 60k-cap reproduction), the
+extraction log identifies gpt-5.6-luna/15,140 input/6,363 output, and quote232 has
+zero pricing rows. No durable confirmation actor/raw response evidence exists.
+No requests have been metered since v56, so no production cost comparison is yet
+possible. No customer turn/model call was manufactured to fill that cohort.
+
+Real Dovecot TLS integration tests passed (2 cases); opt-in tests are local and
+SMTP is forbidden. Handler has only docs/test changes, no runtime release needed.
+
+Active work: additive tubular catalogue/unit fields, non-writing received-RFQ
+mapping validation, and unit-aware quote formatting in Crontal. No historical
+RFQ/product/quote repair or conversion is planned. Changes are currently local;
+tests/build/migration validation and a backed-up release remain to be completed.
+Unrelated Handler untracked files stay untouched.
