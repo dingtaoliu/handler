@@ -628,10 +628,14 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         app.include_router(tasks_router(store, bus, auth))
         app.include_router(usage_router(store, auth))
         store.on_routed = lambda event, spec: publish_queued(bus, event, spec)
+        async def effective_tool_names(ctx):
+            return {spec.name for spec in await gateway.specs_for(ctx)}
+
         app.include_router(settings_router(settings, auth, memory_tools,
                                            crontal_identity=crontal_id,
                                            crontal_catalog=crontal_catalog,
-                                           available_tools=lambda: {s.name for s in gateway.specs()}))
+                                           available_tools=lambda: {s.name for s in gateway.specs()},
+                                           available_tools_for=effective_tool_names))
         app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
                                         uploads=uploads, log_file=_log_file(args),
                                         artifact_store=artifact_store))
@@ -704,6 +708,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         for _, tool_set in contributions.tool_sets:
             gateway.register(tool_set)
         config.available_tools = frozenset(s.name for s in gateway.specs())
+        config.available_tools_for = effective_tool_names
         for _, sink in contributions.sinks:
             outbox.register(sink)
         intake_observers.extend(o for _, o in contributions.email_intake_observers)

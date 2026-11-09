@@ -1,6 +1,6 @@
 """Runtime settings and notifications endpoints."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
@@ -8,6 +8,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..auth import Authenticator, Principal
+from ..context import RunContext
 from ..instructions import build_instruction_components
 from ..observability.prompt_tokens import prompt_token_breakdown, render_components
 from ..memory import MemoryTools
@@ -26,7 +27,8 @@ class RollbackRequest(BaseModel):
 def settings_router(service: SettingsService, auth: Authenticator,
                     memory_tools: MemoryTools | None = None, *,
                     crontal_identity: Any = None, crontal_catalog: Any = None,
-                    available_tools: set[str] | Callable[[], set[str]] | None = None) -> APIRouter:
+                    available_tools: set[str] | Callable[[], set[str]] | None = None,
+                    available_tools_for: Callable[[RunContext], Awaitable[set[str]]] | None = None) -> APIRouter:
     router = APIRouter()
     user = Depends(auth.require_principal)
     admin = Depends(auth.require_admin)
@@ -60,11 +62,15 @@ def settings_router(service: SettingsService, auth: Authenticator,
         speaker = principal.user_id
         threads, _ = await service.get("threads")
         effective = await service.resolve_thread(threads.get(kind.value) or {})
+        tools = available_tools() if callable(available_tools) else available_tools
+        if available_tools_for is not None:
+            tools = await available_tools_for(RunContext(
+                run_id="", thread_key="", user_id=principal.user_id))
         components = await build_instruction_components(
             service, memory_tools or MemoryTools(service.store, service),
             speaker=speaker if kind == ThreadType.CHAT else None, thread_type=kind,
             crontal_identity=crontal_identity, crontal_catalog=crontal_catalog,
-            available_tools=available_tools() if callable(available_tools) else available_tools,
+            available_tools=tools,
             harness=effective.get("harness"))
         return {"thread_type": kind.value, "prompt": render_components(components),
                 "token_breakdown": prompt_token_breakdown(components, model=effective.get("model"))}

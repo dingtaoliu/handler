@@ -17,7 +17,7 @@ import re
 import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from .bus import BusMessage, RunEventBus
 from .context import RunContext, current_run, reset_current_run, set_current_run
@@ -76,6 +76,7 @@ class RunConfig:
     timeout_seconds: float = 900.0
     harness_env: dict[str, str] = field(default_factory=dict)
     available_tools: frozenset[str] | None = None
+    available_tools_for: Callable[[RunContext], Awaitable[set[str]]] | None = None
     instance_name: str = "main"
 
     @property
@@ -894,13 +895,19 @@ class RunExecutor:
                 "draft": efficiency["drafting_model"],
             }
         if self.memory_tools is not None:
+            available_tools = self.config.available_tools
+            if self.config.available_tools_for is not None:
+                ctx = current_run() or RunContext(
+                    run_id="", thread_key=thread.key, user_id=thread.owner_user_id,
+                    acting_as=await self._acting_as(thread))
+                available_tools = await self.config.available_tools_for(ctx)
             speaker = thread.owner_user_id if str(thread.type) == "chat" else None
             built = await build_instructions(self.settings, self.memory_tools,
                                              speaker=speaker, thread_type=thread.type,
                                              crontal_identity=self.crontal_identity,
                                              crontal_catalog=self.crontal_catalog,
                                              thread_key=thread.key, events=events,
-                                             available_tools=self.config.available_tools, harness=thread.harness)
+                                             available_tools=available_tools, harness=thread.harness)
             plan.instructions = "\n\n".join(p for p in (built, self.config.instructions) if p)
         return plan
 

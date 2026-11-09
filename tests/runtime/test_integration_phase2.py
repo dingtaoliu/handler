@@ -68,8 +68,11 @@ async def test_run_gets_gateway_token_instructions_and_settings(tmp_path: Path):
     await store.put_topic(MemoryTopic("people/danny", "Danny's preferences", "likes tables"), None)
     tokens = RunTokens()
     harness = RecordingHarness(tokens)
+    async def effective_tools(ctx):
+        assert ctx.user_id == ctx.acting_as == "danny"
+        return {"memory_read"}
     executor = RunExecutor(store, {"fake": harness}, RunEventBus(),
-                           RunConfig(data_dir=tmp_path / "d"), PriceTable([]),
+                           RunConfig(data_dir=tmp_path / "d", available_tools_for=effective_tools), PriceTable([]),
                            tokens=tokens, mcp_url="http://127.0.0.1:9/mcp/",
                            settings=settings, memory_tools=memory)
     dispatcher = Dispatcher(store, executor)
@@ -84,6 +87,7 @@ async def test_run_gets_gateway_token_instructions_and_settings(tmp_path: Path):
     assert req.model == "gpt-6-luna" and req.reasoning_effort == "medium"
     assert "You are Handler" in req.instructions and "people/danny: Danny's preferences" in req.instructions
     assert "You are talking with danny" in req.instructions
+    assert "If you have gmail_* tools" not in req.instructions
     assert req.mcp_servers[0].url == "http://127.0.0.1:9/mcp/"
     live = harness.live_contexts[0]
     assert live is not None and live.thread_key == "chat:danny:c1" and live.acting_as == "danny"

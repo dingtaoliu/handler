@@ -253,6 +253,10 @@ class MailTools:
             direction=args.get("direction"), conversation_id=args.get("conversation_id"),
             limit=limit + 1, offset=offset)
         result: dict[str, Any] = {"messages": [_summary(r) for r in rows[:limit]]}
+        if args.get("fields") is not None:
+            fields = {"id", "mailbox_id", *args["fields"]}
+            result["messages"] = [{k: v for k, v in message.items() if k in fields}
+                                  for message in result["messages"]]
         if len(rows) > limit:
             result["next_offset"] = offset + limit
         return ToolResult(result)
@@ -716,7 +720,9 @@ class MailTools:
                 "Search ingested mail (newest first) by mailbox, folder, sender, recipient, "
                 "subject, free text (subject, body, attachment names) and date range. "
                 "Returns id, conversation_id, from, to, date, subject, snippet and "
-                "attachment names. Use mail_read or mail_read_thread for bodies.",
+                "attachment names. Use fields for smaller views (e.g. from,to for contact "
+                "lookups); id and mailbox_id are always retained. Use mail_read or "
+                "mail_read_thread for bodies; search is never a full read.",
                 {"properties": {
                     "mailbox_id": mailbox_id, "folder": {"type": "string"},
                     "from": {"type": "string", "description": "Part of the sender address "
@@ -729,6 +735,11 @@ class MailTools:
                     "before": {"type": "string", "description": "ISO date/time, exclusive."},
                     "direction": {"type": "string", "enum": ["in", "out"]},
                     "conversation_id": {"type": "string"},
+                    "fields": {"type": "array", "uniqueItems": True,
+                               "items": {"type": "string", "enum": [
+                                   "id", "mailbox_id", "message_id", "conversation_id",
+                                   "folder", "date", "direction", "subject", "from", "to",
+                                   "cc", "snippet", "attachments"]}},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS,
                                     "default": 20},
                     "offset": {"type": "integer", "minimum": 0}}},

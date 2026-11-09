@@ -13,6 +13,12 @@ image `d38375a1d3b3`, backup **b032**, rollback **v53**. Full suite **1,230 pass
 2 skipped**; live synthetic BSS artifact persistence/download and all three
 instance health/auth checks passed. See [csv-spreadsheets.md](csv-spreadsheets.md).
 
+Mail capability filtering and draft tooling released as **v55**, runtime `9c5c030`,
+image `1cabdadd96ac`, backup **b033**, rollback **v54**. Full suite **1,242 passed,
+2 skipped**; effective BSS user 2 inventory and all three health/auth checks passed.
+See [mail-capabilities-and-drafts.md](mail-capabilities-and-drafts.md) for limits
+and interruption recovery; no production SMTP or draft mutation was used in tests.
+
 ## 2026-11-08 native PDF file transport
 
 Native OpenAI `read_file` now uploads intact PDFs and returns file references,
