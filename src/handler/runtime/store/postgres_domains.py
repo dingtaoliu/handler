@@ -29,7 +29,7 @@ from ..types import (
     ThreadSpec,
     new_id,
 )
-from .postgres import _insert, _notify, _put_event
+from .postgres import _insert, _put_event
 from . import sqlite as _sqlite  # noqa: F401  (sqlite_memory needs sqlite imported first)
 from .sqlite_memory import Notification
 from .sqlite_users import ROLES, User, UserToken, check_user, hash_token, new_token
@@ -141,7 +141,7 @@ class ScheduleMixin(_Rows):
                 return False
             routed = await _put_event(conn, event, thread, self._clock())
             if routed:
-                await _notify(conn)
+                await self._notify(conn)
         self._wake.set()
         if routed:
             announce_routed(self, event, thread)

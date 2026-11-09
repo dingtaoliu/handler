@@ -193,8 +193,7 @@ class MailStore:
             if self._kind == "sqlite":
                 await self._store._call(lambda db: db.executescript(SCHEMA))
             else:
-                async with self._store._conn() as conn:
-                    await conn.execute(SCHEMA)
+                await self._store._apply_schema("mailbox", [SCHEMA])
             self._ready = True
 
     async def _query(self, query: str, params: tuple = ()) -> list[dict[str, Any]]:

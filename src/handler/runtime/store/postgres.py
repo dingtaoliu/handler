@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, fields
@@ -17,6 +18,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from .postgres_hub import CONTROL_SCHEMA, SCHEMA_LOCK, SHARED_CHANNEL, PostgresHub
 from .usage import PostgresUsage
 from .tasks import announce_routed
 from ..types import (
@@ -41,7 +43,6 @@ from ..types import (
 T = TypeVar("T")
 CHANNEL = "handler_work"
 _JSON_FIELDS = {"payload", "blocks", "raw", "data", "usage", "trigger_event_ids"}
-_SCHEMA_LOCK = 7_283_001
 _SCHEMA_NAME = re.compile(r"[a-z_][a-z0-9_]{0,39}")
 
 
@@ -99,11 +100,6 @@ async def _insert(conn: AsyncConnection, table: str, values: dict[str, Any]) -> 
     await conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", values)
 
 
-async def _notify(conn: AsyncConnection) -> None:
-    """Wake listeners of this connection's schema (the channel includes it)."""
-    await conn.execute("SELECT pg_notify(%s || '_' || current_schema(), '')", (CHANNEL,))
-
-
 async def _put_event(
     conn: AsyncConnection, event: Event, thread: ThreadSpec | None, now: datetime
 ) -> bool:
@@ -148,15 +144,22 @@ class PostgresCore(PostgresUsage):
     def __init__(
         self, dsn: str, *, clock: Callable[[], datetime] = utcnow,
         min_size: int = 1, max_size: int = 5, schema: str | None = None,
+        hub: PostgresHub | None = None,
     ) -> None:
         if schema is not None and not _SCHEMA_NAME.fullmatch(schema):
             raise ValueError(f"invalid schema name {schema!r}: use [a-z0-9_], max 40")
         self._dsn = dsn
         self._clock = clock
         self._schema = schema
+        self._hub = hub
+        # On a hub the transaction names its schema; no schema means "public", the
+        # same reading instance_configs gives it when checking for shared schemas.
+        self._tenant_schema = schema or "public"
+        self._scope = sql.SQL("SET LOCAL search_path TO {}").format(
+            sql.Identifier(self._tenant_schema)) if hub else None
         self._options = "-c timezone=UTC" + (
             f" -c search_path={schema}" if schema else "")
-        self._pool = AsyncConnectionPool(
+        self._pool = hub.pool if hub else AsyncConnectionPool(
             dsn, min_size=min_size, max_size=max_size, open=False,
             kwargs={"row_factory": dict_row, "options": self._options},
         )
@@ -168,16 +171,71 @@ class PostgresCore(PostgresUsage):
 
     # --- plumbing ---------------------------------------------------------
     async def _setup(self) -> None:
+        ddl = [schema.read_text()
+               for schema in sorted(Path(__file__).parent.glob("schema_pg*.sql"))]
+        if self._hub is not None:
+            await self._hub.start()
+            await self._apply_versioned("core", ddl)
+            self._hub.attach(self._tenant_schema, self._wake)
+            self._wake.set()
+            return
         await self._pool.open()
         async with self._pool.connection() as conn:
-            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK,))
+            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK,))
             if self._schema:
                 await conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
                     sql.Identifier(self._schema)))
-            for schema in sorted(Path(__file__).parent.glob("schema_pg*.sql")):
-                await conn.execute(schema.read_text())
+            for text in ddl:
+                await conn.execute(text)
         self._listener = asyncio.create_task(self._listen())
         await self._listening.wait()
+
+    async def _applied_version(self, conn: AsyncConnection, component: str) -> str | None:
+        cursor = await conn.execute(
+            sql.SQL("SELECT version FROM {}.tenant_schema_versions "
+                    "WHERE schema_name = %s AND component = %s").format(
+                sql.Identifier(CONTROL_SCHEMA)), (self._tenant_schema, component))
+        row = await cursor.fetchone()
+        return row["version"] if row else None
+
+    async def _apply_versioned(self, component: str, ddl: Sequence[str]) -> None:
+        """Apply this tenant's DDL once per version; the check is one SELECT.
+
+        The version is the DDL's own hash, so changed SQL can't ship without a
+        re-apply. Everything is idempotent, so a rollback to older SQL is safe too.
+        """
+        version = hashlib.sha256("\0".join(ddl).encode()).hexdigest()
+        async with self._scoped() as conn:
+            if await self._applied_version(conn, component) == version:
+                return
+        assert self._hub is not None
+        async with self._hub.ddl_lock:
+            async with self._scoped() as conn:
+                await conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK,))
+                if await self._applied_version(conn, component) == version:
+                    return
+                if self._schema:
+                    await conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                        sql.Identifier(self._schema)))
+                for text in ddl:
+                    await conn.execute(text)
+                await conn.execute(
+                    sql.SQL("INSERT INTO {}.tenant_schema_versions "
+                            "(schema_name, component, version) VALUES (%s, %s, %s) "
+                            "ON CONFLICT (schema_name, component) DO UPDATE SET "
+                            "version = excluded.version, applied_at = now()").format(
+                        sql.Identifier(CONTROL_SCHEMA)),
+                    (self._tenant_schema, component, version))
+
+    async def _apply_schema(self, component: str, ddl: Sequence[str]) -> None:
+        """Create a domain's own tables (e.g. an integration's) in this store's schema."""
+        await self._ensure()
+        if self._hub is not None:
+            await self._apply_versioned(component, ddl)
+            return
+        async with self._conn() as conn:
+            for text in ddl:
+                await conn.execute(text)
 
     async def _ensure(self) -> None:
         if self._closed:
@@ -190,10 +248,30 @@ class PostgresCore(PostgresUsage):
         return self._connection()
 
     @contextlib.asynccontextmanager
+    async def _scoped(self):
+        """A pooled transaction, scoped to this tenant before any other statement."""
+        async with self._pool.connection() as conn:
+            if self._scope is not None:
+                await conn.execute(self._scope)
+            yield conn
+
+    @contextlib.asynccontextmanager
     async def _connection(self):
         await self._ensure()
-        async with self._pool.connection() as conn:
+        async with self._scoped() as conn:
             yield conn
+
+    async def _notify(self, conn: AsyncConnection) -> None:
+        """Wake this schema's listeners when the transaction commits.
+
+        A store with its own connections also uses the shared channel, so a one-off
+        CLI process reaches a server that listens through a hub.
+        """
+        if self._hub is not None:
+            await conn.execute("SELECT pg_notify(%s, %s)", (SHARED_CHANNEL, self._tenant_schema))
+            return
+        await conn.execute("SELECT pg_notify(%s || '_' || current_schema(), ''), "
+                           "pg_notify(%s, current_schema())", (CHANNEL, SHARED_CHANNEL))
 
     async def _list(self, cls: type[T], query: str, parameters: Any = ()) -> list[T]:
         async with self._conn() as conn:
@@ -238,7 +316,7 @@ class PostgresCore(PostgresUsage):
         async with self._conn() as conn:
             if not await _put_event(conn, event, thread, self._clock()):
                 return False
-            await _notify(conn)
+            await self._notify(conn)
         self._wake.set()
         announce_routed(self, event, thread)
         return True
@@ -328,7 +406,7 @@ class PostgresCore(PostgresUsage):
                 "lease_owner = NULL, lease_until = NULL WHERE key = %s",
                 (pending, lease.thread_key),
             )
-            await _notify(conn)
+            await self._notify(conn)
             return True
 
         completed = await self._fenced(lease, write)
@@ -350,7 +428,7 @@ class PostgresCore(PostgresUsage):
                 "lease_until = NULL WHERE key = %s",
                 (strip_nul(error), retry_in_seconds is None, available_at, lease.thread_key),
             )
-            await _notify(conn)
+            await self._notify(conn)
             return True
 
         failed = await self._fenced(lease, write)
@@ -472,7 +550,7 @@ class PostgresCore(PostgresUsage):
                     "AND status = 'routed' AND consumed_by_run IS NULL", (key,))
                 await conn.execute("UPDATE threads SET pending_since = NULL WHERE key = %s",
                                    (key,))
-            await _notify(conn)
+            await self._notify(conn)
         self._wake.set()
         return True
 
@@ -552,7 +630,10 @@ class PostgresCore(PostgresUsage):
         if self._ready is not None:
             with contextlib.suppress(Exception):
                 await self._ready
-            await self._pool.close()
+            if self._hub is not None:
+                self._hub.detach(self._tenant_schema)
+            else:
+                await self._pool.close()
 
 
 from .postgres_domains import (  # noqa: E402
