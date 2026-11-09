@@ -170,7 +170,7 @@ async def test_host_rolls_back_startup_and_closes_concurrently(tmp_path, monkeyp
     env = config(tmp_path)
     entered, closed = [], []
     @contextlib.asynccontextmanager
-    async def runtime(args, env, *, base_path, instance_name):
+    async def runtime(args, env, *, base_path, instance_name, hub=None):
         entered.append(instance_name)
         if instance_name == 'bss':
             raise RuntimeError('startup failed')
@@ -187,7 +187,7 @@ async def test_host_rolls_back_startup_and_closes_concurrently(tmp_path, monkeyp
 
     drained = asyncio.Event()
     @contextlib.asynccontextmanager
-    async def runtime(args, env, *, base_path, instance_name):
+    async def runtime(args, env, *, base_path, instance_name, hub=None):
         try:
             yield server.FastAPI()
         finally:

@@ -59,6 +59,7 @@ from .scheduler import Scheduler
 from .settings import HarnessName, InstanceDefaults, SettingsService
 from .sinks import Outbox
 from .store.postgres import PostgresStore
+from .store.postgres_hub import DEFAULT_POOL_MAX, PostgresHub
 from .store.sqlite import SQLiteStore
 from .tasks import publish_queued
 from .tools.automation import AutomationTools
@@ -408,10 +409,24 @@ def instance_configs(args: argparse.Namespace, env: Mapping[str, str]):
     return configs
 
 
+def _shared_hubs(configs: list, env: Mapping[str, str]) -> dict[str, PostgresHub]:
+    """One shared pool and LISTEN per database when hosting named instances.
+
+    An unnamed single instance keeps its own connections. HANDLER_DB_POOL_MAX is not
+    read here: production still sets it per instance for the previous image to use.
+    """
+    if not configs[0][0]:
+        return {}
+    size = int(env.get("HANDLER_DB_SHARED_POOL_MAX", str(DEFAULT_POOL_MAX)))
+    return {cfg.database_url: PostgresHub(cfg.database_url, max_size=size)
+            for _, cfg, _, _ in configs if cfg.database_url}
+
+
 def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> FastAPI:
     env = dict(os.environ if env is None else env)
     configs = instance_configs(args, env)
     configure_read_limit(env.get(READ_LIMIT_ENV))
+    hubs = _shared_hubs(configs, env)
 
     @contextlib.asynccontextmanager
     async def lifespan(host):
@@ -422,8 +437,8 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
             # MCP uses AnyIO cancel scopes: enter AND exit each instance in the
             # same task. Separate owner tasks let them drain concurrently.
             try:
-                async with instance_runtime(cfg, scoped, base_path=base,
-                                            instance_name=name) as app:
+                async with instance_runtime(cfg, scoped, base_path=base, instance_name=name,
+                                            hub=hubs.get(cfg.database_url)) as app:
                     ready.set_result(app)
                     await stop.wait()
             except BaseException as exc:
@@ -452,6 +467,8 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
             for result in results:
                 if isinstance(result, BaseException):
                     logger.error("instance lifecycle failed", exc_info=result)
+            for hub in hubs.values():
+                await hub.close()
 
     return FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -469,7 +486,8 @@ async def serve(args: argparse.Namespace) -> None:
 @contextlib.asynccontextmanager
 async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                            base_path: str = "", instance_name: str = "",
-                           registry: IntegrationRegistry | None = None):
+                           registry: IntegrationRegistry | None = None,
+                           hub: PostgresHub | None = None):
     """Own one instance and close all its resources when the host stops."""
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -500,7 +518,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
     # Legacy crontal wiring runs only when HANDLER_INTEGRATIONS is unset; once it
     # is set, Crontal comes from the `crontal` integration (or not at all).
     legacy_crontal = not integrations.configured
-    store = (PostgresStore(args.database_url, schema=args.db_schema,
+    store = (PostgresStore(args.database_url, schema=args.db_schema, hub=hub,
                            max_size=int(env.get("HANDLER_DB_POOL_MAX", "5")))
              if args.database_url
              else SQLiteStore(data_dir / "handler.db"))
