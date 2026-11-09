@@ -85,7 +85,7 @@ Runs **alongside** the legacy instance, which is untouched on port 8000 and auto
 
 | What | Where |
 |---|---|
-| Checkout | `~/repos/handler-rt` (branch `rebuild`, HTTPS remote) |
+| Checkout | `~/repos/handler-rt` (branch `main`, HTTPS remote) |
 | Data | `~/.handler-rt/` (SQLite `handler.db`, workspaces, logs) |
 | Secrets/config | `~/.handler-rt/env` (mode 600): admin key, Codex settings, users |
 | Admin user token | `~/.handler-rt/danny.token` (mode 600) |
@@ -101,8 +101,8 @@ ssh dannyliu@macbook-server 'launchctl print gui/$(id -u)/com.handler.rt | grep 
 ssh dannyliu@macbook-server 'launchctl kickstart -k gui/$(id -u)/com.handler.rt'
 ssh dannyliu@macbook-server 'tail -50 ~/.handler-rt/logs/handler-rt.log'
 
-# update to the latest rebuild
-ssh dannyliu@macbook-server 'cd ~/repos/handler-rt && git pull --ff-only origin rebuild && ~/.local/bin/uv sync --frozen && launchctl kickstart -k gui/$(id -u)/com.handler.rt'
+# update to the latest main
+ssh dannyliu@macbook-server 'cd ~/repos/handler-rt && git pull --ff-only origin main && ~/.local/bin/uv sync --frozen && launchctl kickstart -k gui/$(id -u)/com.handler.rt'
 
 # users and tokens
 ssh dannyliu@macbook-server 'cd ~/repos/handler-rt && .venv/bin/python -m handler.runtime.server user add <id> --data-dir ~/.handler-rt'

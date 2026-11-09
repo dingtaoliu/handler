@@ -1,9 +1,10 @@
 # Multi-tenant Handler and free-tier migration: design
 
-Status: **proposed, not approved for production work**. The owner reviewed this
-direction in conversation on November 8, 2026 and asked for this document so a
-fresh session can take it over. Nothing here has been built. Three owner
-decisions are still open (see [Open decisions](#open-decisions)).
+Status: **in implementation on branch `feat/multi-tenant`; nothing deployed**. The
+owner reviewed this direction in conversation on November 8, 2026, asked for this
+document, then asked for it to be implemented on a branch and settled the three
+[open decisions](#decisions). A production release still needs the owner's approval.
+Production follows `main`; the `rebuild` branch has been merged and deleted.
 
 Spans two repositories: this one (Handler) and `../hephaestus` (Crontal).
 
@@ -263,12 +264,12 @@ Deploy Handler before Crontal when Crontal depends on new routes. Each phase mus
 ship and roll back on its own. After each release, follow the checks in
 `multi-instance.md`, including that one tenant's admin token returns 401 on another.
 
-## Open decisions
+## Decisions
 
-Confirm with the owner before starting the phase indicated.
+Settled by the owner on November 8, 2026.
 
-| # | Decision | Recommendation | Needed by |
+| # | Decision | Outcome | Needed by |
 | --- | --- | --- | --- |
-| 1 | Free limit amount, period and scope | Per merchant, per calendar month, starting around 200 inputs, tuned from cost per run | Phase 3 |
-| 2 | Channels on the free plan | Chat, Crontal notifications and the forwarding intake address. Connected mailboxes and Gmail stay paid, since they poll constantly and carry the most untrusted content | Phase 3 |
-| 3 | Tenant target for the next year | Under about 100: this design. Thousands of signups: move to shared tables with row-level security now | Phase 2 |
+| 1 | Free limit amount, period and scope | 50 inputs per month "for now", so it must be configurable. Per merchant and per calendar month is this document's proposed scope; the owner specified only the amount and period | Phase 3 |
+| 2 | Channels on the free plan | Chat, Crontal notifications and the forwarding intake address. Connected mailboxes and Gmail stay paid | Phase 3 |
+| 3 | Tenant target for the next year | Under about 100: schema per tenant, as designed here | Phase 2 |
