@@ -59,9 +59,13 @@ class McpApp:
 
         @server.list_tools()
         async def list_tools() -> list[mt.Tool]:
+            request = request_ctx.get().request
+            ctx = tokens.resolve(_bearer(request.headers)) if request is not None else None
+            if ctx is None:
+                return []
             return [
                 mt.Tool(name=s.name, description=s.description, inputSchema=s.input_schema)
-                for s in gateway.specs()
+                for s in await gateway.specs_for(ctx)
             ]
 
         @server.call_tool(validate_input=False)  # the gateway validates

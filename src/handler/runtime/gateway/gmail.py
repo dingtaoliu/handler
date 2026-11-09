@@ -233,6 +233,13 @@ class GmailTools:
         self._workspace_for = workspace_for
         self._client = client or httpx.AsyncClient(timeout=60)
         self._owner_for = owner_for
+        self._tool_scopes: dict[str, tuple[str, ...]] = {}
+
+    async def available_tool_names(self, ctx: RunContext) -> set[str]:
+        """Check stored grants without refreshing credentials or making Gmail requests."""
+        scopes = await self._credentials.granted_scopes(self._owner_for(ctx))
+        return {name for name, needed in self._tool_scopes.items()
+                if scopes is not None and any(scope in scopes for scope in needed)}
 
     # ── HTTP ─────────────────────────────────────────────────────────────
 
@@ -636,6 +643,7 @@ class GmailTools:
     def _spec(self, name: str, risk: Risk, description: str, schema: dict[str, Any],
               run, *, needs: tuple[str, ...] | None = None, preview=None) -> ToolSpec:
         needs = needs or (DRAFT_SCOPES if "draft" in name else READ_SCOPES)
+        self._tool_scopes[f"gmail_{name}"] = needs
 
         async def handler(ctx: RunContext, args: dict[str, Any]) -> ToolResult:
             return await self._guard(ctx, args, run, needs)

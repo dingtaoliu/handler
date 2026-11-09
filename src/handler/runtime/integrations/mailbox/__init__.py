@@ -107,7 +107,10 @@ class MailboxIntegration(Integration):
             "mailboxes (and, read-only, mail received by the email intake: mailbox_id "
             "'intake', when it is listed by mail_list_mailboxes). Prepare replies with mail_draft_reply. Send (mail_send) only when "
             "the user asked for it: every send waits for a human's approval, so never say "
-            "an email was sent until a result says status 'sent'."))]
+            "an email was sent until a result says status 'sent'. Use the original recipient's "
+            "mailbox and its saved signature. Reuse a buyer/domain inquiry_key across duplicate "
+            "mailbox copies; inspect existing drafts before editing with mail_update_draft. "
+            "Server draft reads include untracked copies; do not claim they are editable or deleted."))]
 
     def ui_entries(self) -> list[UIManifestEntry]:
         return [UIManifestEntry("connection", "mailboxes", "Mailboxes (IMAP/SMTP)",

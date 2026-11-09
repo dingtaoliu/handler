@@ -527,3 +527,32 @@ class MailStore:
     async def get_draft(self, draft_id: str) -> dict[str, Any] | None:
         rows = await self._query("SELECT * FROM mail_drafts WHERE id = ?", (draft_id,))
         return _decode(rows[0]) if rows else None
+
+    async def reserve_draft(self, draft: dict[str, Any]) -> bool:
+        """Reserve an inquiry's identity before contacting IMAP; concurrent copies cannot append twice."""
+        now = _now()
+        count = await self._execute(
+            "INSERT INTO mail_drafts (id, account_id, conversation_id, fields, status, "
+            "thread_key, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT (id) DO NOTHING",
+            (draft["id"], draft["account_id"], draft.get("conversation_id"),
+             json.dumps(draft["fields"], ensure_ascii=False), "creating", draft.get("thread_key"),
+             draft.get("created_by"), now, now))
+        return count == 1
+
+    async def list_drafts(self, mailbox_id: str | None = None, *, limit: int = 50,
+                          offset: int = 0) -> list[dict[str, Any]]:
+        clause = " AND account_id=?" if mailbox_id else ""
+        params = (mailbox_id,) if mailbox_id else ()
+        rows = await self._query(
+            "SELECT * FROM mail_drafts WHERE status IN ('draft','creating','updating','reconcile')" + clause
+            + " ORDER BY updated_at DESC,id LIMIT ? OFFSET ?", (*params, limit, offset))
+        return [_decode(row) for row in rows]
+
+    async def claim_draft_update(self, draft: dict[str, Any], replacement_message_id: str) -> bool:
+        return await self._execute(
+            "UPDATE mail_drafts SET status='updating',updated_at=?,fields=? "
+            "WHERE id=? AND status='draft' AND fields=?",
+            (_now(), json.dumps({**draft["fields"], "_pending_server_message_id": replacement_message_id},
+                               ensure_ascii=False),
+             draft["id"], json.dumps(draft["fields"], ensure_ascii=False))) == 1

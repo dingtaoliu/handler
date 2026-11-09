@@ -50,7 +50,9 @@ async def test_enabling_on_bss_adds_mailboxes_and_keeps_everything_else(tmp_path
     assert old["connector"] == bss["connector"] and old["tools"] <= bss["tools"]
     assert bss["tools"] - old["tools"] == {
         "mail_list_mailboxes", "mail_search", "mail_read", "mail_read_thread",
-        "mail_get_attachment", "mail_draft_reply", "mail_send", "mail_remember"}
+        "mail_get_attachment", "mail_draft_reply", "mail_send", "mail_remember",
+        "mail_list_drafts", "mail_read_draft", "mail_update_draft",
+        "mail_list_server_drafts", "mail_read_server_draft"}
     assert {path for _, path in bss["routes"] - old["routes"]} == {
         "/api/mailboxes", "/api/mailboxes/presets", "/api/mailboxes/test",
         "/api/mailboxes/{mailbox_id}", "/api/mailboxes/{mailbox_id}/test",

@@ -120,3 +120,26 @@ async def test_rejected_without_valid_token(mcp_app, tokens):
         with pytest.raises(BaseException):
             async with session(f"{base}/", "nope"):
                 pass
+
+
+async def test_list_tools_uses_authenticated_run_capabilities(mcp_app, tokens, gateway):
+    from handler.runtime.gateway.base import ToolResult, ToolSpec
+    from handler.runtime.types import Risk
+
+    class Private:
+        async def available_tool_names(self, ctx):
+            return {"private_capability"} if ctx.user_id == "connected" else set()
+
+        def tools(self):
+            async def handle(ctx, args):
+                return ToolResult("ok")
+            return [ToolSpec("private_capability", "private.read", Risk.READ, "private",
+                             {"type": "object"}, handle)]
+
+    gateway.register(Private())
+    async with serve(mcp_app) as base:
+        for user_id in ("connected", "disconnected"):
+            token = tokens.issue(RunContext("r", f"chat:{user_id}:c", user_id), 600)
+            async with session(f"{base}/", token) as s:
+                names = {tool.name for tool in (await s.list_tools()).tools}
+                assert ("private_capability" in names) == (user_id == "connected")

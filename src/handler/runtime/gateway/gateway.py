@@ -89,11 +89,13 @@ class Gateway:
         self._timeout = call_timeout_seconds
         self._clock = clock
         self._tools: dict[str, ToolSpec] = {}
+        self._capabilities: dict[str, Callable] = {}
 
     def set_policy(self, policy: Policy) -> None:
         self._policy = policy
 
     def register(self, provider_or_spec: ToolProvider | ToolSpec) -> None:
+        capability = getattr(provider_or_spec, "available_tool_names", None)
         specs = (
             [provider_or_spec]
             if isinstance(provider_or_spec, ToolSpec)
@@ -103,6 +105,8 @@ class Gateway:
             if spec.name in self._tools:
                 raise ValueError(f"duplicate tool name: {spec.name}")
             self._tools[spec.name] = spec
+            if capability is not None:
+                self._capabilities[spec.name] = capability
 
     def decide(self, ctx: RunContext, spec: ToolSpec) -> tuple[Decision, str]:
         """The current policy decision for `spec` (with no arguments)."""
@@ -110,6 +114,19 @@ class Gateway:
 
     def specs(self) -> list[ToolSpec]:
         return list(self._tools.values())
+
+    async def specs_for(self, ctx: RunContext) -> list[ToolSpec]:
+        """Effective tool inventory; invocation still enforces credentials/grants."""
+        resolved: dict[Callable, set[str]] = {}
+        for check in self._capabilities.values():
+            if check not in resolved:
+                try:
+                    resolved[check] = await check(ctx)
+                except Exception:
+                    log.exception("Could not resolve connector capabilities")
+                    resolved[check] = set()
+        return [spec for spec in self.specs() if spec.name not in self._capabilities
+                or spec.name in resolved[self._capabilities[spec.name]]]
 
     # ---- calls -------------------------------------------------------
 

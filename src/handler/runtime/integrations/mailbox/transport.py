@@ -85,6 +85,7 @@ class ImapSession(Protocol):
     def fetch_header(self, uid: int) -> bytes | None: ...
     def append(self, folder: str, data: bytes, *, flags: str = "",
                when: datetime | None = None) -> None: ...
+    def delete_uid(self, uid: int) -> None: ...
     def logout(self) -> None: ...
 
 
@@ -387,6 +388,15 @@ class ImaplibSession:
             self._imap.logout()
         except Exception:  # noqa: BLE001 - best effort
             self._close()
+
+    def delete_uid(self, uid: int) -> None:
+        """Remove exactly one already-verified draft, never issue global EXPUNGE."""
+        if "UIDPLUS" not in self.capabilities:
+            raise MailError("UIDPLUS is required for targeted draft replacement")
+        typ, data = self._imap.uid("STORE", str(uid), "+FLAGS.SILENT", "(\\Deleted)")
+        self._check(typ, data, "STORE draft")
+        typ, data = self._imap.uid("EXPUNGE", str(uid))
+        self._check(typ, data, "UID EXPUNGE draft")
 
 
 class SmtplibSession:

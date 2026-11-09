@@ -16,6 +16,22 @@ from handler.runtime.integrations.mailbox.transport import (
 
 from .fake_mail import FakeMailServer, ImapSocketServer, SmtpSocketServer, make_mail, self_signed_cert
 
+
+def test_draft_replacement_uses_targeted_uid_expunge_only():
+    from unittest.mock import Mock
+    from handler.runtime.integrations.mailbox.transport import ImaplibSession
+    session = object.__new__(ImaplibSession)
+    session.capabilities = frozenset({"UIDPLUS"})
+    session._imap = Mock()
+    session._imap.uid.return_value = ("OK", [b"done"])
+    session.delete_uid(42)
+    assert [call.args for call in session._imap.uid.call_args_list] == [
+        ("STORE", "42", "+FLAGS.SILENT", "(\\Deleted)"), ("EXPUNGE", "42")]
+    session._imap.expunge.assert_not_called()
+    session.capabilities = frozenset()
+    with pytest.raises(MailError, match="UIDPLUS"):
+        session.delete_uid(42)
+
 UTC = dt.timezone.utc
 
 

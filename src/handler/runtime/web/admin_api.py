@@ -353,7 +353,7 @@ def admin_router(
                          user_id=principal.user_id, acting_as=principal.user_id)
         return [{"name": s.name, "action": s.action, "risk": str(s.risk),
                  "description": s.description, "decision": str(gateway.decide(ctx, s)[0])}
-                for s in gateway.specs()]
+                for s in await gateway.specs_for(ctx)]
 
     # ---- uploads ---------------------------------------------------------
 

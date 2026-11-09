@@ -31,6 +31,7 @@ from .message import parse_message
 from .service import MailboxService, thread_key
 from .store import MailStore
 from .transport import MailError
+from .drafts import DraftReplacementError, replace_copy, server_drafts, signature as draft_signature
 
 MAX_RESULTS = 50
 MAX_BODY_CHARS = 20_000
@@ -91,6 +92,18 @@ class MailTools:
         # IntakeArchive (intake.py) when /ingest/email copies are filed under the
         # read-only `intake` account; None when email intake is off.
         self.intake = intake
+
+    async def available_tool_names(self, ctx: RunContext) -> set[str]:
+        """Intake archives can be read, but cannot supply SMTP or draft capabilities."""
+        mailboxes = await self.mail.list_mailboxes()
+        names = {"mail_list_mailboxes"}
+        if mailboxes or self.intake is not None:
+            names.update(spec.name for spec in self.tools() if spec.risk == Risk.READ
+                         and "server_draft" not in spec.name)
+            names.add("mail_remember")
+        if mailboxes:
+            names.update(spec.name for spec in self.tools())
+        return names
 
     # ── helpers ────────────────────────────────────────────────────────────
 
@@ -462,19 +475,143 @@ class MailTools:
     async def _draft_reply(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
         mailbox, fields = await self._resolve(args)
         attachments = list(args.get("attachments") or [])
-        message, _ = self._compose(ctx, mailbox, fields, args["body"], attachments)
-        draft_id = new_id("mdr")
-        await self.mail.put_draft({
+        message, files = self._compose(ctx, mailbox, fields, args["body"], attachments)
+        inquiry_key = args.get("inquiry_key") or fields.get("in_reply_to")
+        draft_id = ("mdr_" + hashlib.sha256(str(inquiry_key).strip().casefold().encode()).hexdigest()[:16]
+                    if inquiry_key else new_id("mdr"))
+        draft = {
             "id": draft_id, "account_id": mailbox.id,
             "conversation_id": fields["conversation_id"], "thread_key": ctx.thread_key,
             "created_by": ctx.acting_as or ctx.user_id,
-            "fields": {**fields, "body": args["body"], "attachments": attachments}})
+            "fields": {**fields, "body": args["body"], "attachments": attachments,
+                       "_server_message_id": str(message["Message-ID"]),
+                       "_server_signature": draft_signature(message),
+                       "_attachment_sha256": {path: hashlib.sha256(data).hexdigest()
+                                              for path, (_, data, _) in zip(attachments, files)},
+                       "_inquiry_key": inquiry_key}}
+        if not await self.mail.reserve_draft(draft):
+            existing = await self.mail.get_draft(draft_id)
+            assert existing is not None
+            if existing["status"] != "draft":
+                return ToolResult({"draft_id": draft_id, "status": existing["status"],
+                    "message": "This inquiry already has a draft reservation or was sent. "
+                    "Inspect it with mail_read_draft; do not create another copy."}, is_error=True)
+            old = existing["fields"]
+            same = existing["account_id"] == mailbox.id and all(
+                old.get(key) == value for key, value in draft["fields"].items() if not key.startswith("_"))
+            same = same and old.get("_attachment_sha256", {}) == draft["fields"]["_attachment_sha256"]
+            if not same:
+                return ToolResult({"draft_id": draft_id, "mailbox_id": existing["account_id"],
+                    "message": "An existing draft already covers this inquiry. Read it before editing; "
+                    "no replacement or second server copy was created."}, is_error=True)
+            return ToolResult({"draft_id": draft_id, "mailbox_id": mailbox.id, "reused": True,
+                               "server_copy": old.get("_server_copy", "not verified"),
+                               "note": "Existing identical draft reused. Not sent."})
         server_copy = await self.service.save_draft_copy(mailbox, message)
+        draft["fields"]["_server_copy"] = server_copy
+        if server_copy.startswith("not saved"):
+            await self.mail.put_draft({**draft, "status": "reconcile"})
+            return ToolResult({"draft_id": draft_id, "status": "reconcile", "server_copy": server_copy,
+                "message": "Local draft retained, but the server copy is uncertain. Inspect Drafts; "
+                "do not retry creation under another key."}, is_error=True)
+        await self.mail.put_draft(draft)
         return ToolResult({"draft_id": draft_id, "mailbox_id": mailbox.id,
                            "to": fields["to"], "cc": fields["cc"],
                            "subject": fields["subject"], "server_copy": server_copy,
                            "note": "Saved as a draft for a human to review. Not sent. To "
                                    "send it later, call mail_send with this draft_id."})
+
+    async def _list_drafts(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        mailbox_id = args.get("mailbox_id")
+        if mailbox_id:
+            self._writable(await self._mailbox(mailbox_id))
+        limit = args.get("max_results", 20)
+        offset = args.get("offset", 0)
+        rows = await self.mail.list_drafts(mailbox_id, limit=limit + 1, offset=offset)
+        summaries = [{"draft_id": row["id"], "mailbox_id": row["account_id"],
+            "status": row["status"], "to": row["fields"].get("to"),
+            "subject": row["fields"].get("subject"), "updated_at": row["updated_at"],
+            "body_chars": len(row["fields"].get("body", "")),
+            "server_copy": row["fields"].get("_server_copy", "not verified")} for row in rows[:limit]]
+        return ToolResult({"drafts": summaries, "next_offset": offset + limit if len(rows) > limit else None,
+                           "scope": "Handler-managed drafts; not all drafts in the IMAP server"})
+
+    async def _list_server_drafts(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        mailbox = self._writable(await self._mailbox(args.get("mailbox_id")))
+        result = await server_drafts(self.service, mailbox, limit=args.get("max_results", 20),
+                                     offset=args.get("offset", 0))
+        return ToolResult({"mailbox_id": mailbox.id, **result})
+
+    async def _read_server_draft(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        mailbox = self._writable(await self._mailbox(args.get("mailbox_id")))
+        result = await server_drafts(self.service, mailbox, draft_ref=args["draft_ref"])
+        body = result["body"]
+        offset = args.get("offset", 0)
+        end = min(len(body), offset + MAX_BODY_CHARS)
+        return ToolResult({**result, "mailbox_id": mailbox.id, "body": body[offset:end],
+                           "body_chars": len(body), "next_offset": end if end < len(body) else None,
+                           "note": "Current IMAP copy, read without changing Seen flags. "
+                           "Untracked copies cannot be edited by mail_update_draft."})
+
+    async def _read_draft(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        draft = await self.mail.get_draft(args["draft_id"])
+        if draft is None:
+            raise ToolError("Handler draft not found")
+        self._writable(await self._mailbox(draft["account_id"]))
+        fields = draft["fields"]
+        body = fields.get("body", "")
+        offset = args.get("offset", 0)
+        end = min(len(body), offset + MAX_BODY_CHARS)
+        return ToolResult({"draft_id": draft["id"], "mailbox_id": draft["account_id"],
+            "status": draft["status"], **{k: v for k, v in fields.items() if not k.startswith("_")
+                                        and k != "body"}, "body": body[offset:end],
+            "body_chars": len(body), "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+            "next_offset": end if end < len(body) else None,
+            "server_copy": fields.get("_server_copy", "not verified"),
+            "scope": "Stored Handler draft; server edits are not reflected in this snapshot"})
+
+    async def _update_draft(self, ctx: RunContext, args: dict[str, Any]) -> ToolResult:
+        draft = await self.mail.get_draft(args["draft_id"])
+        if draft is None or draft["status"] != "draft":
+            raise ToolError("Editable Handler draft not found")
+        mailbox = self._writable(await self._mailbox(draft["account_id"]))
+        old = draft["fields"]
+        if hashlib.sha256(old.get("body", "").encode()).hexdigest() != args["body_sha256"]:
+            raise ToolError("Draft changed since read; read it again before editing")
+        fields = dict(old)
+        for key in ("to", "cc", "bcc"):
+            if key in args:
+                fields[key] = _addresses(args[key])
+        for key in ("subject", "body", "attachments"):
+            if key in args:
+                fields[key] = args[key]
+        if not fields.get("to") or not fields.get("subject", "").strip():
+            raise ToolError("Updated draft needs a recipient and subject")
+        message, files = self._compose(ctx, mailbox, fields, fields["body"], fields.get("attachments", []))
+        server_saved = str(old.get("_server_copy", "")).startswith("saved to ")
+        if "_server_copy" not in old or server_saved and not old.get("_server_signature"):
+            raise ToolError("Legacy server draft has no tracked content snapshot; refusing an unsafe replacement")
+        if not await self.mail.claim_draft_update(draft, str(message["Message-ID"])):
+            raise ToolError("Another operation changed this draft; read it again")
+        fields["_server_message_id"] = str(message["Message-ID"])
+        fields["_server_signature"] = draft_signature(message)
+        fields["_attachment_sha256"] = {path: hashlib.sha256(data).hexdigest()
+            for path, (_, data, _) in zip(fields.get("attachments", []), files)}
+        try:
+            if server_saved:
+                fields["_server_copy"] = await replace_copy(self.service, mailbox,
+                    old["_server_message_id"], old["_server_signature"], message)
+        except DraftReplacementError as exc:
+            if exc.appended:
+                fields["_replaced_message_id"] = old["_server_message_id"]
+                await self.mail.put_draft({**draft, "fields": fields, "status": "reconcile"})
+            else:
+                await self.mail.put_draft(draft)
+            raise ToolError(str(exc)) from exc
+        await self.mail.put_draft({**draft, "fields": fields})
+        return ToolResult({"draft_id": draft["id"], "mailbox_id": mailbox.id, "status": "draft",
+            "server_copy": fields.get("_server_copy", "not verified"),
+            "note": "Updated the existing draft. Nothing sent."})
 
     async def _send_fields(self, args: dict[str, Any]) -> tuple[Mailbox, dict, str, list[str]]:
         if args.get("draft_id"):
@@ -646,11 +783,54 @@ class MailTools:
                                                "mail_read."}},
                  "required": ["message_id"]}, self._get_attachment),
             self._spec(
+                "list_server_drafts", Risk.READ,
+                "List current IMAP Drafts, including drafts not created by Handler. Header-only, "
+                "paged and read-only. Use read_server_draft to inspect signature/content. "
+                "Pass mailbox_id when several mailboxes are connected.",
+                {"properties": {"mailbox_id": mailbox_id,
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "offset": {"type": "integer", "minimum": 0}}}, self._list_server_drafts),
+            self._spec(
+                "read_server_draft", Risk.READ,
+                "Read a current IMAP draft using its draft_ref from list_server_drafts, with body "
+                "paging. UIDVALIDITY is checked. Does not mark mail read or change the server copy.",
+                {"properties": {"mailbox_id": mailbox_id, "draft_ref": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0}}, "required": ["draft_ref"]},
+                self._read_server_draft),
+            self._spec(
+                "list_drafts", Risk.READ,
+                "List Handler-managed drafts without loading bodies. This is not a listing of "
+                "untracked IMAP drafts or edits made directly in another mail app. Use read_draft for a body.",
+                {"properties": {"mailbox_id": mailbox_id,
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "offset": {"type": "integer", "minimum": 0}}}, self._list_drafts),
+            self._spec(
+                "read_draft", Risk.READ,
+                "Read a Handler-managed draft, including full body via offset paging. Use to verify "
+                "recipient, signature and attachments. Reports a stored snapshot, not current IMAP edits.",
+                {"properties": {"draft_id": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0}}, "required": ["draft_id"]},
+                self._read_draft),
+            self._spec(
+                "update_draft", Risk.WRITE_INTERNAL,
+                "Update a tracked Handler draft after mail_read_draft; supply its body_sha256. "
+                "Retains its draft_id and sender mailbox, preserves omitted fields, and replaces "
+                "only its unchanged tracked IMAP copy. Requires UIDPLUS; legacy/untracked copies "
+                "or external edits are refused. Nothing sent. Do not change inquiry_key to bypass duplicates.",
+                {"properties": {"draft_id": {"type": "string"}, "body_sha256": {"type": "string"},
+                    **{key: compose[key] for key in ("to", "cc", "bcc", "subject", "body", "attachments")}},
+                 "required": ["draft_id", "body_sha256"]}, self._update_draft),
+            self._spec(
                 "draft_reply", Risk.WRITE_INTERNAL,
                 "Prepare an email (a reply with reply_to_message_id, or a new one) as a "
                 "Handler draft; it is also saved to the mailbox's Drafts folder when the "
                 "server has one. " + DRAFT_NOTE + " Returns draft_id.",
-                {"properties": compose, "required": ["body"]}, self._draft_reply),
+                {"properties": {**compose, "inquiry_key": {"type": "string", "minLength": 1,
+                    "description": "Stable buyer/domain + inquiry reference, shared across mailbox "
+                    "copies. Prevents duplicate drafts. Defaults to replied-to Message-ID. Existing "
+                    "drafts are reused only when unchanged; use mail_read_draft/mail_update_draft "
+                    "to edit the existing one. Sender changes require review."}},
+                 "required": ["body"]}, self._draft_reply),
             self._spec(
                 "send", Risk.WRITE_EXTERNAL,
                 "Send an email over SMTP from a connected mailbox: a draft (draft_id) or "
