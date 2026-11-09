@@ -21,3 +21,7 @@ No Crontal backend change or migration is required.
 Tests cover multi-parameter contact-list paths, files, template/concrete cache
 identity, methods, numeric mismatch, static specificity, hidden endpoints and
 ambiguity. Focused Crontal suite: 55 passed.
+
+Released v57, runtime `4668eab`, image `626e2f1c4455`, backup b035, rollback v56.
+Full suite 1,247 passed/2 skipped; module Pyright clean and all three instance
+health/auth checks passed.

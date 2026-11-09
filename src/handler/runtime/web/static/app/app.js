@@ -852,7 +852,8 @@ loaders.automations = loadAutomations;
 const act = {run: null, items: [], cursor: null};
 const TASK_BADGE = {queued: "yellow", running: "blue", waiting_approval: "yellow", waiting_answer: "yellow",
     succeeded: "green", failed: "red", dead: "red"};
-const taskBadge = (s) => badge(String(s || "").replace("_", " "), TASK_BADGE[s] || "gray");
+const taskBadge = (s) => badge(s === "succeeded" ? "run completed" : String(s || "").replaceAll("_", " "), s === "succeeded" ? "gray" : TASK_BADGE[s] || "gray");
+const outcomeBadge = (t) => badge(String(t.task_outcome?.outcome || "unknown").replaceAll("_", " "), t.task_outcome?.outcome === "completed" ? "green" : "gray");
 async function loadIgnoredEmail() {
     const rows = await apiOpt("/api/events?source=email&status=ignored&limit=30", []);
     const box = $("activity-ignored");
@@ -874,7 +875,7 @@ function taskRow(t) {
     const when = t.started_at || t.queued_at;
     const dur = t.duration_ms != null ? fmtDur(t.duration_ms) : t.retry_at ? "retry " + fmtTime(t.retry_at) : "-";
     return `<tr class="step-row ${t.id === act.run ? "sel" : ""}" tabindex="0" data-action="act-run" data-id="${esc(t.id)}">
-        <td>${taskBadge(t.status)}</td><td>${badge(t.thread_type, "gray")}</td>
+        <td>${taskBadge(t.status)}<div>Task: ${outcomeBadge(t)}</div></td><td>${badge(t.thread_type, "gray")}</td>
         <td><b>${esc(t.trigger_summary)}</b><div class="muted">${esc(t.thread_title)}</div>
             ${t.summary ? `<div class="muted">${esc(t.summary)}</div>` : ""}
             ${t.error ? `<div class="err-text">${esc(String(t.error).slice(0, 200))}</div>` : ""}</td>
@@ -883,7 +884,7 @@ function taskRow(t) {
 }
 function renderTasks() {
     const box = $("activity-content");
-    box.innerHTML = act.items.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Status</th><th>Type</th><th>Task</th><th>Started</th><th>Duration</th><th>Tokens in/out</th><th>Cost</th></tr></thead><tbody>` +
+    box.innerHTML = act.items.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Execution / outcome</th><th>Type</th><th>Task</th><th>Started</th><th>Duration</th><th>Tokens in/out</th><th>Cost</th></tr></thead><tbody>` +
         act.items.map(taskRow).join("") + "</tbody></table></div>" : empty("No tasks match these filters");
     $("activity-more").innerHTML = act.cursor ? `<button class="btn-small" type="button" data-action="act-more">Load more</button>` : "";
 }
@@ -931,6 +932,8 @@ async function loadSteps() {
     const head = `<div class="section-title">${taskBadge(t.status)} ${esc(t.trigger_summary)} <span class="muted mono">${esc(t.run_id)}</span></div>
         <div class="inline-actions">${open}${approvals}</div>
         <p class="muted">${esc(t.thread_title)} · ${esc(t.harness || "")}${t.model ? " · " + esc(t.model) : ""} · ${esc(fmtDur(t.duration_ms))} · ${fmtCost(t.cost_usd)}</p>
+        <p>Task outcome: ${outcomeBadge(t)} — ${esc(t.task_outcome?.reason || "No outcome recorded")}</p>
+        ${t.task_outcome?.pending_work?.length ? `<p>Remaining: ${esc(t.task_outcome.pending_work.join("; "))}</p>` : ""}
         ${t.error ? `<div class="err-text">${esc(t.error)}</div>` : ""}`;
     if (!t.steps) { box.innerHTML = head + `<p class="muted">The step trace is visible to admins only.</p>`; return; }
     const t0 = new Date(t.started_at).getTime();

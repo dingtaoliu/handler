@@ -548,8 +548,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         gateway = Gateway(store, GrantPolicy(grants_cfg), emit_event=emit_event)
         questions = QuestionService(store, emit_event=emit_event, notifier=notifier)
         from .tools.approvals import ApprovalContinuationTools
+        from .tools.task_outcomes import TaskOutcomeTools
         for provider in (memory_tools, AutomationTools(store, scheduler), ThreadTools(store, bus),
-                         ApprovalContinuationTools(store),
+                         ApprovalContinuationTools(store), TaskOutcomeTools(store),
                          NotifyTools(store, bus, notifier=notifier), QuestionTools(questions)):
             gateway.register(provider)
         tokens = RunTokens()

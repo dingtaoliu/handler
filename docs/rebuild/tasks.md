@@ -1,3 +1,7 @@
+Current business outcomes are persisted separately from this execution projection;
+see [task-outcomes.md](task-outcomes.md). A `succeeded` execution filter means
+only that the run finished normally. Historical outcomes remain unknown.
+
 # Tasks: background work view
 
 A **task** is one run of a non-chat thread (`automation`, `email`, `crontal`,

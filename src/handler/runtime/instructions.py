@@ -103,6 +103,14 @@ async def build_instruction_components(
             'questions. Read every remaining page before remembering; seeing a preview is not reading in '
             'full. Later reads return your summary and original-source reference; request force_full '
             'whenever the summary is insufficient. Never summarize away unread content.'))
+    if available_tools and "task_report_outcome" in available_tools:
+        sections.append(PromptComponent('task_outcome_guidance',
+            'A normally finished run does not prove the task succeeded. Before finishing material '
+            'work, use task_report_outcome with actual receipt checks and remaining work. Use '
+            'task_get_outcome if you need receipt facts. Completed requires all requested work '
+            'verified: compare expected source coverage/counts, not just creation of a record ID. '
+            'Use partial, blocked or awaiting_review when work is incomplete or unverified. '
+            'Do not equate SMTP acceptance with delivery or file creation with browser download.'))
     if route_catalog:
         # Last stable component: a Crontal change invalidates only what follows.
         sections.append(PromptComponent("crontal_route_catalog", route_catalog))

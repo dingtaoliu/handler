@@ -156,3 +156,18 @@ async def test_tool_request_link_can_arrive_with_completion(ledger):
          "output": "read", "status": "completed"}, at=NOW+timedelta(seconds=1)))
     call = await store.get_tool_call_usage("run-1", "late-link")
     assert call.request_id == "resp-parent"
+
+
+async def test_tool_error_flag_survives_steps_ledger_and_transcript(ledger):
+    from handler.runtime.run import transcript_message
+    store, make_recorder, _ = ledger
+    recorder = make_recorder()
+    event = RunEvent(RunEventKind.TOOL_FINISHED, {"id": "bad-call", "tool": "gmail_search",
+        "status": "completed", "is_error": True, "output": "Disconnected"}, at=NOW)
+    await recorder.on_event(event)
+    step, = await store.list_steps("run-1")
+    assert step.status == "error" and step.data["is_error"]
+    usage = await store.get_tool_call_usage("run-1", "bad-call")
+    assert usage.status == "error"
+    message = transcript_message(THREAD, "run-1", event)
+    assert any(b.get("is_error") for b in message.blocks if b["type"] == "tool_result")

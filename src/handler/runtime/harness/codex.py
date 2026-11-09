@@ -106,6 +106,11 @@ def _tool_data(item: dict[str, Any], *, finished: bool) -> dict[str, Any]:
             status=item.get("status"),
             exit_code=item.get("exit_code"),
         )
+        result = item.get("result")
+        is_error = (bool(item.get("error")) or item.get("exit_code") not in (None, 0)
+                    or isinstance(result, dict) and bool(result.get("isError") or result.get("is_error")))
+        if is_error:
+            data.update(status="error", is_error=True)
     return data
 
 

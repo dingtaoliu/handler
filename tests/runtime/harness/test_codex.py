@@ -628,3 +628,14 @@ async def test_defaults_unknown_when_catalog_fails(tmp_path):
     assert calls.read_text().splitlines() == ["debug models", "debug models --bundled"]
     await harness.defaults()
     assert len(calls.read_text().splitlines()) == 2
+
+
+def test_mcp_error_and_command_failure_cannot_appear_completed():
+    from handler.runtime.harness.codex import _event
+    event = _event({"type": "item.completed", "item": {"id": "bad", "type": "mcp_tool_call",
+        "server": "handler", "tool": "gmail_search", "status": "completed",
+        "result": {"isError": True, "content": [{"type": "text", "text": "Disconnected"}]}}}, None)
+    assert event.data["status"] == "error" and event.data["is_error"]
+    event = _event({"type": "item.completed", "item": {"id": "bad", "type": "command_execution",
+        "command": "false", "status": "completed", "exit_code": 1}}, None)
+    assert event.data["status"] == "error"

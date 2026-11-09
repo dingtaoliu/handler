@@ -41,6 +41,7 @@ from .observability.attribution import capture_attribution
 from .observability.recorder import RawSink, StepRecorder
 from .settings import SettingsService
 from .tasks import publish_task
+from .task_outcomes import bind_run_task, finish_task_run
 from .store.base import Store
 from .uploads import UploadedFile, UploadStore
 from .types import (
@@ -226,7 +227,7 @@ def transcript_message(thread_key: str, run_id: str, ev: RunEvent,
             {"type": "tool_call", "id": d.get("id"), "name": d.get("tool"), "kind": d.get("kind"),
              "input": d["input"] if d.get("input") is not None else started},
             {"type": "tool_result", "id": d.get("id"), "output": d.get("output"),
-             "is_error": d.get("status") not in (None, "completed", "ok"),
+             "is_error": bool(d.get("is_error")) or d.get("status") not in (None, "completed", "ok", "success"),
              "exit_code": d.get("exit_code")},
         ]
         if (str(d.get("tool") or "").split("__")[-1] == "write_spreadsheet"
@@ -449,6 +450,8 @@ class RunExecutor:
             logger.warning("lease lost before run start: %s", thread.key)
             return
 
+        await bind_run_task(self.store, run, events, thread)
+
         acting_as = await self._acting_as(thread)
         attribution = await capture_attribution(
             self.store, thread, run, events, instance_name=self.config.instance_name,
@@ -654,6 +657,10 @@ class RunExecutor:
             )
             if not ok:
                 raise LeaseLost(thread.key)
+            try:
+                await finish_task_run(self.store, run)
+            except Exception:
+                logger.exception("could not record task outcome after completed run")
             logger.info("run completed", extra={"cost_usd": cost, "output_tokens": usage.output_tokens})
             self._publish(thread.key, run.id, "run_finished",
                           {"status": "completed", "text": final_text, "cost_usd": cost,
@@ -934,6 +941,10 @@ class RunExecutor:
             except Exception:  # noqa: BLE001 - must not stop the thread being failed
                 logger.exception("could not save the failed run's input messages")
         failed = await self.store.fail(lease, run.error, retry_in)
+        try:
+            await finish_task_run(self.store, run)
+        except Exception:
+            logger.exception("could not record failed task outcome")
         logger.warning("run failed", extra={"error": run.error, "retry_in": retry_in})
         self._publish(thread.key, run.id, "run_finished",
                       {"status": "failed", "error": run.error, "retry_in": retry_in})

@@ -66,6 +66,8 @@ async def test_task_status_derivation_and_pagination(domain_store, clock):
                         "automation:done": "succeeded"}
     by_key = {i["thread_key"]: i for i in page["items"]}
     assert by_key["automation:done"]["summary"] == "All good"
+    assert by_key["automation:done"]["execution_status"] == "completed"
+    assert by_key["automation:done"]["task_outcome"]["outcome"] == "unknown"
     assert by_key["crontal:rfq:1"]["trigger_summary"] == "rfq 1 · rfq_published"
     assert by_key["email:queued"]["trigger_summary"] == "Email from a@b.c: Hi"
     assert by_key["crontal:rfq:1"]["pending_approval_ids"]

@@ -18,6 +18,7 @@ from ..types import Decision, Risk
 class ToolResult:
     content: str | dict[str, Any] | list[Any]
     is_error: bool = False
+    receipt_id: str | None = None
 
 
 ToolHandler = Callable[[RunContext, dict[str, Any]], Awaitable[ToolResult]]
