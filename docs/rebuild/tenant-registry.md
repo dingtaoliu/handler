@@ -1,5 +1,8 @@
 # Tenant registry, wake on demand and run limits
 
+Monthly input limits, free-plan cost limits and spooled email are in
+[plan-limits.md](plan-limits.md).
+
 Multi-tenant Phase 2 (`multi-tenant-design.md`, Sections 2 to 4). **Opt-in:** set
 `HANDLER_TENANT_REGISTRY=1`. Without it, env-defined hosting (`multi-instance.md`)
 is unchanged, and single-instance, SQLite and personal deployments never reach
@@ -47,7 +50,8 @@ as CLI flags are not imported, apart from host, port, data dir, database and sch
 | `POST /platform/tenants/{merchant_id}/enable` | Allows it again and runs whatever queued |
 | `GET /platform/tenants`, `GET /platform/tenants/{merchant_id}` | Read, never including secrets |
 
-Body fields, all optional: `plan`, `limits`, `integrations`, `config`, `secrets`.
+Body fields, all optional: `plan`, `limits` (see `plan-limits.md`), `integrations`,
+`config`, `secrets`.
 A `null` value in `config` or `secrets` removes that key. Only these keys are
 accepted:
 
@@ -86,7 +90,7 @@ so a restart resumes those tenants.
 
 | Source | Guarantee |
 |---|---|
-| HTTP (chat, email intake, Crontal webhooks) | The request activates the tenant first. If that fails it gets 503 with `Retry-After`, nothing was accepted, and a durable retry is recorded |
+| HTTP (chat, email intake, Crontal webhooks) | The request activates the tenant first. If that fails it gets 503 with `Retry-After`, nothing was accepted, and a durable retry is recorded. Email is instead spooled durably and acknowledged |
 | Another process (CLI, a store with its own connections) | Writes `next_wake_at` **in the same transaction as the work**, so the wake can't be lost. The notification only makes it faster |
 | Schedules, retries, expiries | `next_wake_at`, written at stop |
 | Listener outage | The durable wake above; reconnecting prompts an immediate scan |
