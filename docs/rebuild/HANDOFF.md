@@ -13,6 +13,32 @@ image `d38375a1d3b3`, backup **b032**, rollback **v53**. Full suite **1,230 pass
 2 skipped**; live synthetic BSS artifact persistence/download and all three
 instance health/auth checks passed. See [csv-spreadsheets.md](csv-spreadsheets.md).
 
+Mail capability filtering and draft tooling released as **v55**, runtime `9c5c030`,
+image `1cabdadd96ac`, backup **b033**, rollback **v54**. Full suite **1,242 passed,
+2 skipped**; effective BSS user 2 inventory and all three health/auth checks passed.
+See [mail-capabilities-and-drafts.md](mail-capabilities-and-drafts.md) for limits
+and interruption recovery; no production SMTP or draft mutation was used in tests.
+
+Context reuse released as **v56**, runtime `39baef4`, image `647f2f3e823d`,
+backup **b034**, rollback **v55**. **1,245 passed/2 skipped**; all instances healthy.
+Live BSS chat/automation share a 3,613-token common prefix; see
+[context-reuse.md](context-reuse.md). Provider savings are not yet measured.
+
+Route normalization released as **v57** (`4668eab`, image `626e2f1c4455`),
+backup **b035**, rollback **v56**. **1,247 passed/2 skipped**; all instances healthy.
+Live file/contact brace aliases resolve to registered contracts. See
+[route-normalization.md](route-normalization.md).
+
+Business outcomes released as Handler **v58** (`b0a7971`, image `c72d79a1a0fa`)
+and Crontal **v122** (`0c7a849`, image `5f523db6bc51`), backup **b037**, rollback
+Handler **v57** / Crontal **v121**. **1,261 passed/2 skipped**, new outcome modules
+Pyright clean; 113 Crontal integration tests, frontend build and i18n passed.
+All instance health/isolation/schema checks and both users' Crontal proxies passed;
+new frontend bundle verified. See [task-outcomes.md](task-outcomes.md) and the
+[latest instruction token/% breakdown](../audits/bss-prompt-components-2026-11-09.md).
+Initial authorized sequence delivered; investigative/schema/cost-measurement
+follow-ups are recorded in the BSS handoff. No historical RFQ repair was made.
+
 ## 2026-11-08 native PDF file transport
 
 Native OpenAI `read_file` now uploads intact PDFs and returns file references,

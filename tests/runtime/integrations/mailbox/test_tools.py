@@ -431,3 +431,14 @@ async def test_remember_rejects_guessed_receipt_even_with_full_coverage(gw):
             "full_read_receipt": receipt, "summary": "Original body."})
         assert result.is_error
     assert "body" in (await call(gw, "mail_read", {"message_id": ref})).content
+
+
+async def test_search_projection_retains_read_refs_and_original_body(gw):
+    import json
+    full = await call(gw, "mail_search", {"text": "圆钢"})
+    compact = await call(gw, "mail_search", {"text": "圆钢", "fields": ["from", "to"]})
+    hit, = compact.content["messages"]
+    assert set(hit) == {"id", "mailbox_id", "from", "to"}
+    assert len(json.dumps(compact.content)) < len(json.dumps(full.content)) / 2
+    read = await call(gw, "mail_read", {"message_id": hit["id"], "mailbox_id": hit["mailbox_id"]})
+    assert "请报价 316L" in read.content["body"]

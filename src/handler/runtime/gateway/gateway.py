@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from ..context import RunContext
+from ..task_outcomes import capture_receipt
 from ..types import (
     Approval,
     ApprovalStatus,
@@ -133,6 +134,27 @@ class Gateway:
     async def call(
         self, ctx: RunContext, tool_name: str, args: dict[str, Any] | None
     ) -> ToolResult:
+        result = await self._call(ctx, tool_name, args)
+        if result.receipt_id is None:
+            await self._capture(ctx, tool_name, args or {}, result)
+        return result
+
+    async def _capture(self, ctx: RunContext, tool: str, args: dict, result: ToolResult) -> None:
+        status = "error" if result.is_error else "ok"
+        if isinstance(result.content, dict) and result.content.get("status") == "pending_approval":
+            status = "pending"
+        try:
+            result.receipt_id = await capture_receipt(self._store, ctx, tool, args, status, result.content)
+            if result.receipt_id and isinstance(result.content, dict):
+                result.content = {**result.content, "handler_receipt_id": result.receipt_id}
+        except Exception:
+            # Business actions may already have run. Do not turn a reporting
+            # failure into a retryable action error (and duplicate its effects).
+            log.exception("Could not record task receipt for %s", tool)
+
+    async def _call(
+        self, ctx: RunContext, tool_name: str, args: dict[str, Any] | None
+    ) -> ToolResult:
         args = args or {}
         spec = self._tools.get(tool_name)
         if spec is None:
@@ -200,6 +222,7 @@ class Gateway:
             result_size=len(result_text(result)), duration_ms=duration_ms,
             error=error, approval_id=approval_id,
         )
+        await self._capture(ctx, spec.name, args, result)
         return result
 
     async def _audit(
@@ -322,6 +345,9 @@ class Gateway:
     async def _audit_decision(
         self, approval: Approval, status: str, decision: Decision, error: str
     ) -> None:
+        await self._capture(RunContext(approval.run_id, approval.thread_key,
+                                      user_id=approval.requested_by, acting_as=approval.requested_by),
+                            approval.tool, approval.args, ToolResult(error, is_error=True))
         try:
             await self._store.add_audit(AuditEntry(
                 run_id=approval.run_id, thread_key=approval.thread_key,

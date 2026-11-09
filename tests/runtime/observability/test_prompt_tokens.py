@@ -22,3 +22,12 @@ def test_additive_counts_match_rendered_text_and_include_unicode():
 def test_empty_and_special_token_text_are_valid():
     assert prompt_token_breakdown([])["total_tokens"] == 0
     assert prompt_token_breakdown([PromptComponent("data", "<|endoftext|>")])["total_tokens"] > 0
+
+
+def test_stable_prefix_fingerprint_ignores_changing_context():
+    rules = PromptComponent("rules", "Keep all source facts.")
+    a = [rules, PromptComponent("speaker", "Alice", True)]
+    b = [rules, PromptComponent("speaker", "Bob", True)]
+    assert prompt_token_breakdown(a)["stable_prefix"] == prompt_token_breakdown(b)["stable_prefix"]
+    assert render_components(a) == "Keep all source facts.\n\nAlice"
+    assert prompt_token_breakdown([PromptComponent("rules", "Changed")])["stable_prefix"] != prompt_token_breakdown(a)["stable_prefix"]

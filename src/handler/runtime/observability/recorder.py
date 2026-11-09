@@ -143,6 +143,7 @@ class StepRecorder:
             "output": _preview(output, self.preview_chars) if output is not None else None,
             "output_size": _size(output),
             "exit_code": d.get("exit_code"),
+            "is_error": bool(d.get("is_error")) or d.get("status") in ("error", "failed"),
         }
         step = self._open.pop(str(d.get("id")), None)
         if step is None:  # finished without a start event
@@ -163,6 +164,8 @@ class StepRecorder:
     def _apply_finish(step: RunStep, ev: RunEvent, summary: dict[str, Any]) -> None:
         step.ended_at = ev.at
         status = str(ev.data.get("status", "ok"))
+        if ev.data.get("is_error"):
+            status = "error"
         step.status = "ok" if status in ("ok", "completed", "success") else "error"
         step.data.update(summary)
         step.data["tool_status"] = status
@@ -198,7 +201,7 @@ class StepRecorder:
             row.input_tokens_estimate = _text_metrics(d.get("input"))[0]
         else:
             row.ended_at = ev.at
-            row.status = str(d.get("status") or "unknown")
+            row.status = "error" if d.get("is_error") else str(d.get("status") or "unknown")
             tokens, size, images = _text_metrics(d.get("output"))
             row.output_tokens_estimate, row.output_bytes, row.output_images = tokens, size, images
             row.single_read_context_cost_estimate_usd = self.prices.cost(

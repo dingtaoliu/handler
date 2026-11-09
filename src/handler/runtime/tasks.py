@@ -2,7 +2,8 @@
 
 A task is one run of a non-chat thread (automation, email, crontal, gmail, ...),
 or a non-chat thread with pending events that no run has picked up yet
-("queued"). Everything is derived from the store; see store/tasks.py and
+("queued"). Execution is derived from the store; business outcomes are separately persisted
+and receipt-backed (task_outcomes.py). See store/tasks.py and
 docs/rebuild/tasks.md.
 """
 
@@ -17,6 +18,7 @@ from typing import Any
 
 from .bus import BusMessage, RunEventBus
 from .store.tasks import RUN_STATUSES, TASK_STATUSES
+from .task_outcomes import outcome_view
 from .types import Event, ThreadSpec, ThreadType, utcnow
 
 logger = logging.getLogger("handler.runtime.tasks")
@@ -226,6 +228,12 @@ async def _items(store: Any, rows: list[dict], queued: list[dict], user_id: str 
                          key=lambda e: (e["received_at"], e["id"]))
         items.append(_run_item(row, trigger, titles, approvals.get(row["run_id"], []), now,
                                questions.get(row["run_id"], [])))
+        view = await outcome_view(store, row["run_id"])
+        if view:
+            view.pop("receipts", None)
+        items[-1]["task_outcome"] = view or {"outcome": "unknown",
+            "reason": "No task outcome evidence recorded for this historical run"}
+        items[-1]["execution_status"] = str(row["run_status"])
     return items
 
 

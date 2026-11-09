@@ -1,7 +1,7 @@
 """Render shared settings and memory for any harness."""
 
 import asyncio
-from typing import Any
+from typing import AbstractSet, Any
 
 from .gateway.crontal_identity import identity_prompt
 from .mail.instructions import DEFAULT_EMAIL_INSTRUCTIONS
@@ -15,7 +15,7 @@ async def build_instructions(
     settings: SettingsService, memory_tools: MemoryTools, *,
     speaker: str | None, thread_type: ThreadType,
     crontal_identity: Any = None, thread_key: str | None = None, events: Any = None,
-    available_tools: set[str] | None = None, harness: str | None = None,
+    available_tools: AbstractSet[str] | None = None, harness: str | None = None,
     crontal_catalog: Any = None,
 ) -> str:
     return render_components(await build_instruction_components(
@@ -28,7 +28,7 @@ async def build_instruction_components(
     settings: SettingsService, memory_tools: MemoryTools, *,
     speaker: str | None, thread_type: ThreadType,
     crontal_identity: Any = None, thread_key: str | None = None, events: Any = None,
-    available_tools: set[str] | None = None, harness: str | None = None,
+    available_tools: AbstractSet[str] | None = None, harness: str | None = None,
     crontal_catalog: Any = None,
 ) -> list[PromptComponent]:
     """Stable rules precede changing memory; custom persona is kept verbatim.
@@ -47,7 +47,7 @@ async def build_instruction_components(
     guidance = (await email_instructions(settings) if thread_type == ThreadType.EMAIL
                 else _GUIDANCE.get(thread_type, ""))
     if guidance:
-        sections.append(PromptComponent("thread_guidance", guidance))
+        sections.append(PromptComponent("thread_guidance", guidance, True))
     sections.append(PromptComponent("ask_user_rules", ASK_USER_GUIDANCE))
 
     def has_tools(prefix: str) -> bool:
@@ -81,7 +81,7 @@ async def build_instruction_components(
             "Scheduled firings start fresh sessions. Read the prior job's checkpoint from memory if needed; "
             'do not assume you saw earlier reports. Before finishing, save any watermark, decisions, '
             'unresolved work and source references the next firing needs using memory_save. Advance a '
-            'success watermark only after the requested work and delivery succeed.'))
+            'success watermark only after the requested work and delivery succeed.', True))
     if efficiency["bounded_model_tasks"] and harness == "openai_agents":
         sections.append(PromptComponent('bounded_model_guidance',
             'Use bounded_model_task for self-contained classification, extraction or drafting when it saves '
@@ -103,13 +103,23 @@ async def build_instruction_components(
             'questions. Read every remaining page before remembering; seeing a preview is not reading in '
             'full. Later reads return your summary and original-source reference; request force_full '
             'whenever the summary is insufficient. Never summarize away unread content.'))
+    if available_tools and "task_report_outcome" in available_tools:
+        sections.append(PromptComponent('task_outcome_guidance',
+            'A normally finished run does not prove the task succeeded. Before finishing material '
+            'work, use task_report_outcome with actual receipt checks and remaining work. Use '
+            'task_get_outcome if you need receipt facts. Completed requires all requested work '
+            'verified: compare expected source coverage/counts, not just creation of a record ID. '
+            'Use partial, blocked or awaiting_review when work is incomplete or unverified. '
+            'Do not equate SMTP acceptance with delivery or file creation with browser download.'))
     if route_catalog:
         # Last stable component: a Crontal change invalidates only what follows.
         sections.append(PromptComponent("crontal_route_catalog", route_catalog))
     sections.extend(await memory_components(memory_tools, thread_key=thread_key, events=events))
     if speaker is not None:
         sections.append(PromptComponent("speaker", f"You are talking with {speaker}", True))
-    return sections
+    # Keep common rules identical across chats and scheduled firings. Changing
+    # thread context and fresh memory follow them; none is omitted or cached.
+    return [c for c in sections if not c.dynamic] + [c for c in sections if c.dynamic]
 
 
 async def memory_components(memory_tools: MemoryTools, *, thread_key: str | None = None,

@@ -43,7 +43,7 @@ UNTRUSTED_THREAD_TYPES = frozenset({"email", "crontal", "gmail", "mail"})
 # them to pick an answer (the record is flagged untrusted for the UI).
 INSIDE_ACTIONS = frozenset({
     "thread.set_title", "notify.send", "question.ask", "gmail.create_draft", "gmail.update_draft",
-    "mail.draft_reply", "mail.update_draft", "mail.remember", "approval.continuation",
+    "mail.draft_reply", "mail.update_draft", "mail.remember", "approval.continuation", "task.report",
 })
 # Persisting actions the owner allows unasked on untrusted threads. memory.save
 # only appends (nothing existing is lost), the agent is prompted to save only
