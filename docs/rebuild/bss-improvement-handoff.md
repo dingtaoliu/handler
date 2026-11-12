@@ -8,12 +8,13 @@ remaining quota. Do not create background jobs merely to keep this work running.
 
 ## Current state
 
-- The authorized initial implementation/analysis sequence is delivered.
-  Investigative/product follow-ups below remain open.
+- The authorized initial sequence and the tubular/coverage follow-ups are
+  delivered. Historical repair, page-batched document continuation and further
+  measured cost optimization remain follow-ups; see the current notes below.
 - Handler **v58**, code `b0a7971`, image `c72d79a1a0fa` (2,151,469,157 bytes).
-- Crontal **v122**, code `0c7a849`, image `5f523db6bc51` (741,323,571 bytes).
-- Backup **b037**; rollback Handler **v57**, Crontal **v121**. Protected config
-  snapshots and read-only verification scripts are in `/tmp/bss-item7-release/`
+- Crontal **v124**, runtime `dab8c97`, image `4bc02f43ac46` (741,381,019 bytes).
+- Latest backup **b039**; current Crontal rollback **v123**, Handler stays **v58**. Protected config
+  snapshots and read-only verification scripts are in `/tmp/bss-coverage-release/`
   (directory mode 0700, configs 0600). Never commit/print those configs.
 - Handler repo `/Users/dannyliu/dev/repos/handler`, branch `main`; Crontal repo
   `/Users/dannyliu/dev/repos/hephaestus`, branch `main`. Runtime/frontend commits
@@ -27,7 +28,7 @@ remaining quota. Do not create background jobs merely to keep this work running.
 | --- | --- | --- |
 | 1. Incomplete RFQ | Initial investigation complete; follow-ups open | See [investigation](../audits/bss-rfq562-investigation.md): independently verified 102 rows, only first 16 imported, downstream draft quote 232; actor/exact omission mechanism unknown; no production repair |
 | 2. CSV tool/delivery | Deployed v54 | See [CSV tool](csv-spreadsheets.md). 1,230 passed/2 skipped; 17 focused checks; new modules Pyright clean. Live synthetic S3 artifact downloaded through BSS HTTP endpoint with correct Unicode/values and owner; cleaned up. Tool advertised with allow decision; all three instances healthy |
-| 3. RFQ fidelity | Requested deeper analysis complete | Live definitions and actual stored lines compared in design section 3. No matching hollow-section shape; missing pipe attributes and unit metadata. Model/schema migration and historical repairs remain separate reviewed follow-ups |
+| 3. RFQ fidelity | Deployed Crontal v123; coverage safeguards v124 | Additive pipe/SHS/RHS geometry, source dimension/piece-length units, non-writing mapping validation and filtered catalogue; future spreadsheet row reconciliation/confirmation gates. See November 12 evidence below. No historical product/RFQ repair |
 | 4. Connector/draft tools | Deployed v55 | See [mail tooling](mail-capabilities-and-drafts.md). 1,242 passed/2 skipped; latest focused 37 passed; drafts module Pyright clean. Live BSS user 2 inventory hides disconnected Gmail, exposes new draft tools; all three health/auth checks passed. No customer drafts changed or SMTP messages sent for testing |
 | 5. Context/caching | Deployed v56 | Released v56; all three health/auth checks passed. At v56 BSS chat/automation shared a 3,613-token stable prefix; latest v58 metrics are below. See [context reuse](context-reuse.md). 1,245 passed/2 skipped; prompt modules Pyright clean. Effective per-run tool guidance, common prefix, bounded local compilation, prefix metrics and optional mail field projection. Implicit caching/200k compaction unchanged; cost savings still require comparable production measurements |
 | 6. Route normalization | Deployed v57 | See [route normalization](route-normalization.md); 55 focused checks and 1,247 full suite passed, 2 skipped; module Pyright clean |
@@ -36,7 +37,7 @@ remaining quota. Do not create background jobs merely to keep this work running.
 ## Verification/deployment
 
 Handler tests: `PYTHONPATH=src .venv/bin/python -m pytest tests/runtime -q -p no:cacheprovider`.
-Current **1,261 passed, 2 skipped**. Run focused tests as changes are made and
+Current default **1,261 passed, 4 skipped**; two new opt-in real Dovecot tests passed separately. Run focused tests as changes are made and
 the complete suite before a release. New modules should pass Pyright using
 `--pythonpath .venv/bin/python`; the native harness already has unrelated errors.
 Commit/push finished work and follow `HANDOFF.md` deployment instructions.
@@ -53,8 +54,7 @@ dependencies: record findings and reproduce read-only queries as needed.
 Latest release health checks use `/i/{main,bss,yeup}/healthz` and authenticated
 `/api/settings/threads`; unauthenticated settings must return 401. Use
 `heroku releases` to inspect version; avoid `releases:info`, which can expose
-configuration secrets. Backup before deployment. Last backup **b037**; rollback
-Handler v57 / Crontal v121. Excel/Sheets interactive imports and browser-click testing have
+configuration secrets. Backup before deployment. Latest backup **b039**; current Crontal rollback **v123**, Handler unchanged **v58**. Excel/Sheets interactive imports and browser-click testing have
 not been run; API isolation and compatibility serialization were tested.
 
 ## Final rollout evidence (November 9)
@@ -77,38 +77,62 @@ not been run; API isolation and compatibility serialization were tested.
   [component counts and percentages](../audits/bss-prompt-components-2026-11-09.md).
   Tool schemas/history are excluded. Do not claim a production cost reduction yet.
 
+## November 12 continuation and takeover
+
+- Crontal v123 (`f2d766a`, image `d4fc1df55f8b`, backup b038) delivered the
+  tubular catalogue/unit/preflight changes. All **665 backend tests / 22
+  subtests**, frontend build/i18n and PostgreSQL migration checks passed. Existing
+  custom metadata/inactive definitions were preserved. Typed commercial fields
+  outside that scope remain unsupported; retain source/quality text rather than
+  invent supported structured fields.
+- Crontal **v124** (`dab8c97`, image `4bc02f43ac46`, 741,381,019 bytes), backup
+  **b039**, migration **z1coverage20261112 (head)**, adds deterministic CSV/XLS/XLSX
+  inventories, bounded row batches, strict reconciliation, exact source quantity/
+  unit preservation, transactional line/evidence persistence, confirmation/quote
+  gates and trusted confirmation attribution. Full evidence is opt-in; ordinary
+  reads return a compact summary. See [coverage design/status](rfq-coverage-next-design.md)
+  and sibling Crontal `docs/rfq-source-coverage-work.md` for contracts and limits.
+- **684 backend tests / 22 subtests**, frontend build/i18n and disposable
+  PostgreSQL upgrade/downgrade/upgrade passed. Live health, ownership 200/404/401,
+  new frontend bundle, all Handler instances' health/isolation, and both users'
+  proxies passed. Historical RFQs562–564, their lines and quote232 are unchanged;
+  historical coverage/confirmation audit remains NULL. No new customer model turn
+  or mail was used for verification. Crontal rollback **v123**; keep additive
+  audit columns. Handler runtime remains **v58** with no new runtime release.
+- Read-only XLS reproduction found all sections in the 27,202-character converted
+  source, plus the original 1,556-character pasted context. It does not reproduce
+  a 60k truncation. AgentLog331 identifies **gpt-5.6-luna**, 15,140 input / 6,363
+  output tokens and BSS AI extraction identity, not the confirmation actor.
+  Historical raw request/response/finish reason remain unavailable. Protected
+  repair inventory prepares 16 preserved + 86 proposed rows, not an executed repair.
+- Two opt-in real Dovecot 2.4.4 TLS tests passed with disposable synthetic mailboxes:
+  draft reuse/update, Unicode/signature/attachment preservation, unrelated deleted
+  draft retained, external edits refused, no SMTP transport. Default Handler suite
+  **1,261 passed / 4 skipped**; no runtime changes/redeploy needed for these tests.
+- The November 9 zero-cohort observation is superseded: **1,238 requests / 190
+  distinct BSS runs**, **$19.6387** estimated model cost since v56. Same-model
+  chat cost/run increased; Terra mail cost/run is roughly flat. No overall saving
+  can be claimed. Four bounded helpers cost **$0.0737**. A new hourly inquiry-filing
+  schedule contributes **60 runs / 451 requests / $3.6312**; it was not disabled.
+  [Updated measurements and tool-token percentages](../audits/bss-cost-followup-2026-11-09.md).
+- HTTP202 audit found only existing received-RFQ create/retry business jobs; their
+  resource IDs already have a task-outcome adapter. Legacy MCP 202 is transport
+  acknowledgement. No extra poller or job adapter was added.
+
 ## Follow-up work for a future agent
 
-1. Keep BSS-001 open: identify who confirmed RFQ562 and recover raw extraction
-   request/response if possible. The initial investigation proves 102 source rows
-   versus 16 stored, but not the exact model omission mechanism. Do not repair the
-   historical RFQ/quote without separately reviewed scope and provenance.
-2. Review the RFQ shape/attribute/unit/provenance proposals with the owner before
-   selecting migrations or backfilling records. Item 3 authorized deeper analysis.
-3. Compare detailed request/cache/token/tool-result ledger measurements on similar
-   tasks. Evaluate earlier checkpoints/compaction only with source coverage and
-   multi-turn quality tests; 200k compaction and the main model remain unchanged.
-4. Test draft replacement against a dedicated real mailbox (fake IMAP/SMTP tests
-   passed); do not use customer mail for a smoke test.
-5. Extend async resource adapters beyond received RFQs if needed. Unknown jobs
-   stay unverified. Receipt facts cannot establish complete source coverage or
-   recipient delivery; keep those verification limits explicit.
-
-## Remaining-item continuation — November 9
-
-Owner renewed the remaining work after usage reset. New findings are in the RFQ
-investigation and [cost follow-up](../audits/bss-cost-followup-2026-11-09.md):
-production XLS conversion is ~27k characters (not a 60k-cap reproduction), the
-extraction log identifies gpt-5.6-luna/15,140 input/6,363 output, and quote232 has
-zero pricing rows. No durable confirmation actor/raw response evidence exists.
-No requests have been metered since v56, so no production cost comparison is yet
-possible. No customer turn/model call was manufactured to fill that cohort.
-
-Real Dovecot TLS integration tests passed (2 cases); opt-in tests are local and
-SMTP is forbidden. Handler has only docs/test changes, no runtime release needed.
-
-Active work: additive tubular catalogue/unit fields, non-writing received-RFQ
-mapping validation, and unit-aware quote formatting in Crontal. No historical
-RFQ/product/quote repair or conversion is planned. Changes are currently local;
-tests/build/migration validation and a backed-up release remain to be completed.
-Unrelated Handler untracked files stay untouched.
+1. Keep BSS-001 open: exact historical omission/confirmation mechanism remains
+   unresolved. Do not assert the 60k cap caused it or invent the confirmation
+   actor. No raw historical provider payload was retained. A repair needs reviewed
+   products/source links and quote provenance, using the protected local inventory
+   only as preparation. RFQ562/quote232 were not modified.
+2. New spreadsheet coverage is preventive. Document extraction still has the
+   existing 12-page scanned-PDF and 100-item caps, now blocked when partial. Design
+   page-batched continuation and reviewed in-place partial recovery separately;
+   do not add an override that silently accepts missing source. Handler's native
+   PDF reader already preserves all pages and is a separate implementation.
+3. Investigate the new hourly automation's empty/redundant firings and repeated
+   API/memory reads before changing behavior. Preserve pending work/amendments and
+   verified receipts. Use outcome/task complexity matched cohorts; keep full unread
+   mail and full-read-gated summaries. The main model/200k compaction threshold were
+   not changed in this follow-up. No warming jobs or extra agents were introduced.
