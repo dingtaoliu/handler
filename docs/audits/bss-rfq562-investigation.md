@@ -78,3 +78,42 @@ Even a complete 102-line model result would encounter the separate 100-item cap.
 Initial source/count/downstream investigation is complete. Historical actor and
 exact model omission mechanism remain open. Temporary sensitive evidence is in
 `/tmp/bss-rfq562-investigation/`; this report contains the durable findings.
+
+## Follow-up investigation — November 9
+
+The existing production application image was used **offline**, with networking
+ disabled and the original XLS mounted read-only; no model call or dependency
+ installation was needed. Its pinned MarkItDown 0.1.7 / xlrd 2.0.2 converter reads
+379 physical rows and 7 columns into **27,202 characters** (381 Markdown lines),
+SHA-256 `e55e845383c6e2795539a4234b0cadef2c15912d743606037a2b137ee05bc817`.
+The later Fremantle, Brisbane and Melbourne product rows all appear within that
+text. The original Handler upload also supplied 1,556 characters of pasted
+context. This reproduction is comfortably below the 60,000-character cap;
+it does **not** support attributing the 16-line result to that input cap.
+The historical raw request remains unavailable, so this is a reproduction of
+current pinned conversion, not a claim to have recovered the exact request.
+
+The database retains extraction AgentLog **331**, created
+2026-11-08 19:43:46.750572 UTC: **gpt-5.6-luna**, **15,140 input tokens**, **6,363
+output tokens**, under BSS AI user 332. It retains only purpose/usage metadata,
+not request text, raw model output, finish reason or provider request ID.
+The extraction service code confirms this deliberate payload omission. Therefore
+this log identifies the extraction model/actor but **not the confirmation actor**
+or the precise model-side stopping reason. The extractor is a separate, cheaper
+model call from the Handler main agent; changing Handler's main model alone would
+not fix it.
+
+No Heroku log drain is configured. No durable request/change audit was found for
+the confirmation. Without retained request or field-change evidence, actor
+attribution cannot responsibly be completed from the current records.
+
+Quote 232 was rechecked read-only: DRAFT, not saved, not locked, with **zero
+pricing rows**. This establishes an unpriced dependent draft, not a sent quote.
+A repair plan should preserve it and require review of all 102 source lines before
+any pricing or external delivery. No production record was changed.
+
+Next preventive design: source-row inventory and bounded extraction with explicit
+coverage accounting, not simply a stronger model or a higher item cap. Preserve
+warnings and block confirmation when known coverage is incomplete; retain
+provider response ID/finish reason, source hash and counts for future diagnosis
+without copying full sensitive document/model payloads into logs.
