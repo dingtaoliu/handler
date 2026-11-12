@@ -14,11 +14,17 @@ from typing import Any
 
 PLAN_LIMITS_ENV = "HANDLER_PLAN_LIMITS"
 LIMIT_KEYS = frozenset({"monthly_inputs", "fix_model", "model", "max_run_tokens",
-                        "max_run_turns", "connected_mail"})
+                        "max_run_turns", "connected_mail", "email", "automations", "allow_codex", "strict_grants",
+                        "console", "max_upload_bytes", "max_workspace_bytes"})
+_INT_KEYS = ("monthly_inputs", "max_run_tokens", "max_run_turns", "max_upload_bytes",
+             "max_workspace_bytes")
 DEFAULT_PLAN_TABLE: dict[str, dict[str, Any]] = {
     "paid": {},
-    "free": {"monthly_inputs": 50, "fix_model": True, "max_run_tokens": 200_000,
-             "max_run_turns": 15, "connected_mail": False},
+    "free": {"monthly_inputs": 50, "fix_model": True, "model": "gpt-6.1-terra",
+             "max_run_tokens": 200_000, "max_run_turns": 15, "connected_mail": False,
+             "email": False, "automations": False, "allow_codex": False,
+             "strict_grants": True, "console": False, "max_upload_bytes": 100 * 1024 * 1024,
+             "max_workspace_bytes": 200 * 1024 * 1024},
 }
 # What happens to an event type at the limit. Anything not listed is internal
 # (approval.resolved and the like) and is never counted.
@@ -36,6 +42,13 @@ class PlanLimits:
     max_run_tokens: int | None = None
     max_run_turns: int | None = None
     connected_mail: bool = True
+    email: bool = True  # any inbound mail; off, it isn't stored at all
+    automations: bool = True
+    allow_codex: bool = True
+    strict_grants: bool = False
+    console: bool = True
+    max_upload_bytes: int | None = None
+    max_workspace_bytes: int | None = None
 
 
 class LiveLimits:
@@ -77,20 +90,22 @@ def parse_plan_table(raw: str | None) -> dict[str, dict[str, Any]]:
         if not isinstance(parsed, dict):
             raise ValueError(f"{PLAN_LIMITS_ENV} must be a JSON object of plans")
         for plan, values in parsed.items():
-            check_limit_keys(values, f"{PLAN_LIMITS_ENV}[{plan}]")
+            check_limit_keys(values, f"{PLAN_LIMITS_ENV}[{plan}]", tenant=False)
             table.setdefault(plan, {}).update(values)
     return table
 
 
-def check_limit_keys(values: Any, where: str) -> None:
+def check_limit_keys(values: Any, where: str, *, tenant: bool = True) -> None:
     if not isinstance(values, Mapping):
         raise ValueError(f"{where} must be an object")
     for key, value in values.items():
-        if key == "max_runs":  # the run gate's own per-tenant override
+        if key == "max_runs":  # the run gate's per-tenant override; plans use HANDLER_PLAN_RUN_CAPS
+            if not tenant:
+                raise ValueError(f"{where}: set run caps per plan in HANDLER_PLAN_RUN_CAPS")
             continue
         if key not in LIMIT_KEYS:
             raise ValueError(f"{where}: unknown limit {key!r}")
-        if key in ("monthly_inputs", "max_run_tokens", "max_run_turns") and value is not None and (
+        if key in _INT_KEYS and value is not None and (
                 isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise ValueError(f"{where}: {key} must be a non-negative integer or null")
 
@@ -105,9 +120,11 @@ def resolve_limits(plan: str, overrides: Mapping[str, Any],
 
 def upgrade_required(feature: str, limits: PlanLimits) -> dict[str, Any]:
     """The stable body of a 403 for a channel this plan doesn't include."""
+    what = {"mailbox": "Connected mailboxes are", "gmail": "Gmail connections are",
+            "console": "The assistant admin console is", "email": "Email is",
+            "automations": "Automations are"}[feature]
     return {"error": "plan_requires_upgrade", "feature": feature, "plan": limits.plan,
-            "message": "Connected mailboxes and Gmail are not included in the "
-                       f"{limits.plan} plan. Upgrade to connect one."}
+            "message": f"{what} not included in the {limits.plan} plan. Upgrade to use it."}
 
 
 def period_of(now: datetime) -> str:

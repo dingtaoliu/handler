@@ -36,6 +36,7 @@ from urllib.parse import quote
 import httpx
 
 from .. import documents
+from ..storage import ensure_workspace_room
 from ..context import RunContext
 from ..types import Risk
 from .base import ToolResult, ToolSpec
@@ -387,6 +388,7 @@ class GmailTools:
         target_dir = workspace / "downloads" / "gmail" / _safe_name(message_id)
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / _safe_name(name)
+        ensure_workspace_room(target, len(data))
         target.write_bytes(data)
         return str(target.relative_to(workspace))
 

@@ -38,6 +38,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from .. import documents
+from ..storage import ensure_workspace_room
 from ..context import RunContext
 from ..types import Risk
 from ..uploads import sanitize_filename
@@ -426,6 +427,7 @@ class CrontalApiTools:
         target = target_dir / name
         if target.exists():
             target = target_dir / f"{time.time_ns()}-{name}"
+        ensure_workspace_room(target, len(data))
         target.write_bytes(data)
         return str(target.relative_to(workspace))
 

@@ -76,11 +76,17 @@ class Scheduler:
         self.max_sleep_seconds = max_sleep_seconds
         self._wake = asyncio.Event()
         self.on_skipped: Callable[[Schedule, OverLimit], Awaitable[None]] | None = None
+        self.paused: Callable[[], bool] | None = None  # a plan without automations
 
     def wake(self) -> None:
         self._wake.set()
 
+    def _is_paused(self) -> bool:
+        return self.paused is not None and self.paused()
+
     async def tick(self) -> int:
+        if self._is_paused():
+            return 0  # schedules are kept, and resume when the plan allows them
         now = self.clock().astimezone(timezone.utc)
         fired = 0
         while schedules := await self.store.due_schedules(now):
@@ -137,7 +143,7 @@ class Scheduler:
                 await self.tick()
             except Exception:
                 logger.exception("scheduler tick failed")
-            next_due = await self.store.next_due_at()
+            next_due = None if self._is_paused() else await self.store.next_due_at()
             delay = self.max_sleep_seconds
             if next_due is not None:
                 delay = min(delay, max(0.0, (next_due - self.clock()).total_seconds()))

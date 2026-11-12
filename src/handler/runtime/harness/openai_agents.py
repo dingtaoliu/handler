@@ -47,6 +47,7 @@ from .. import documents
 from ..images import sniff_file
 from ..settings import HARNESS_DEFAULT_MODELS
 from ..types import TokenUsage, utcnow
+from ..storage import StorageLimitReached, ensure_workspace_room
 from .base import RUN_LIMIT_NOTICE, HarnessError, RunEvent, RunEventKind, RunRequest
 from .pdf_files import PDFFiles
 
@@ -150,6 +151,10 @@ def workspace_tools(workspace: Path, *, client: openai.AsyncOpenAI | None = None
     def write_file(path: str, content: str) -> str:
         """Create or overwrite a UTF-8 text file in the workspace."""
         target = _confined(workspace, path)
+        try:
+            ensure_workspace_room(target, len(content.encode()))
+        except StorageLimitReached as exc:
+            return f"error: {exc}"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return f"wrote {len(content)} chars to {path}"

@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import re
 import secrets
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .images import sniff
+from .storage import StorageLimitReached, directory_size
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_FILES_PER_REQUEST = 10
@@ -59,8 +61,9 @@ def _safe_part(value: str) -> str:
 
 
 class UploadStore:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, limit: Callable[[], int | None] | None = None) -> None:
         self.root = Path(root)
+        self._limit = limit  # total bytes this tenant may keep, if limited
 
     def _dir(self, user_id: str, file_id: str) -> Path:
         return self.root / _safe_part(user_id) / file_id
@@ -78,6 +81,8 @@ class UploadStore:
         path = directory / name
         size = 0
         head = b""
+        allowed = self._limit() if self._limit is not None else None
+        kept = directory_size(self.root) if allowed is not None else 0
         try:
             with path.open("wb") as out:
                 for chunk in chunks:
@@ -86,6 +91,8 @@ class UploadStore:
                     size += len(chunk)
                     if size > max_bytes:
                         raise UploadTooLarge(f"{name} exceeds {max_bytes} bytes")
+                    if allowed is not None and kept + size > allowed:
+                        raise StorageLimitReached("upload", allowed)
                     out.write(chunk)
             # A recognised image gets its real type (pasted files often claim none).
             meta = UploadedFile(file_id, user_id, name, size,

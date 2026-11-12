@@ -110,7 +110,8 @@ async def _insert(conn: AsyncConnection, table: str, values: dict[str, Any]) -> 
     await conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", values)
 
 
-async def earliest_work_at(conn: AsyncConnection, sinks: Sequence[str] | None) -> datetime | None:
+async def earliest_work_at(conn: AsyncConnection, sinks: Sequence[str] | None,
+                           *, schedules: bool = True) -> datetime | None:
     """When this schema next needs a runtime: queued work, schedules, outbox, expiries.
 
     `sinks` limits outbox rows to those a runtime can deliver (None: all of them).
@@ -127,12 +128,12 @@ async def earliest_work_at(conn: AsyncConnection, sinks: Sequence[str] | None) -
         "(SELECT MIN(GREATEST(COALESCE(available_at, pending_since), "
         " COALESCE(lease_until, pending_since))) FROM threads "
         " WHERE pending_since IS NOT NULL AND NOT dead), "
-        "(SELECT MIN(next_run_at) FROM schedules WHERE enabled), "
+        "(SELECT MIN(next_run_at) FROM schedules WHERE enabled AND %(schedules)s), "
         "(SELECT MIN(next_attempt_at) FROM deliveries WHERE status = 'pending' "
         " AND (%(all)s OR sink = ANY(%(sinks)s))), "
         "(SELECT MIN(expires_at) FROM approvals WHERE status = 'pending'), "
         "(SELECT MIN(expires_at) FROM questions WHERE status = 'pending')) AS due",
-        {"all": sinks is None, "sinks": list(sinks or [])})
+        {"all": sinks is None, "sinks": list(sinks or []), "schedules": schedules})
     return (await cursor.fetchone())["due"]
 
 
@@ -594,9 +595,10 @@ class PostgresCore(PostgresUsage):
             self._wake.set()
         return failed
 
-    async def earliest_work(self, sinks: Sequence[str] | None = None) -> datetime | None:
+    async def earliest_work(self, sinks: Sequence[str] | None = None,
+                            *, schedules: bool = True) -> datetime | None:
         async with self._conn() as conn:
-            return await earliest_work_at(conn, sinks)
+            return await earliest_work_at(conn, sinks, schedules=schedules)
 
     async def has_claimable(self, lane: Lane) -> bool:
         async with self._conn() as conn:
@@ -648,6 +650,12 @@ class PostgresCore(PostgresUsage):
             Thread, f"SELECT {_columns(Thread)} FROM threads {where}"
             "ORDER BY COALESCE((SELECT MAX(created_at) FROM messages WHERE thread_key=threads.key), threads.created_at) DESC, seq DESC LIMIT %s", tuple(parameters),
         )
+
+    async def move_thread_harness(self, key: str, old: str, new: str) -> None:
+        """Change harness and drop the session, which belonged to the old one."""
+        async with self._conn() as conn:
+            await conn.execute("UPDATE threads SET harness = %s, session_id = NULL "
+                               "WHERE key = %s AND harness = %s", (new, key, old))
 
     async def set_session(self, lease: Lease, session_id: str) -> bool:
         async def write(conn: AsyncConnection) -> bool:

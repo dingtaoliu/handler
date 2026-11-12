@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ... import documents
+from ...storage import ensure_workspace_room
 from ...context import RunContext
 from ...gateway.base import ToolResult, ToolSpec
 from ...gateway.gmail import _email_summary, reply_subject
@@ -164,6 +165,7 @@ class MailTools:
         workspace = self._workspace_for(ctx.thread_key)
         target = workspace / relative
         target.parent.mkdir(parents=True, exist_ok=True)
+        ensure_workspace_room(target, len(data))
         target.write_bytes(data)
         return str(target.relative_to(workspace))
 

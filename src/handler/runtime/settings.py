@@ -290,6 +290,7 @@ class SettingsService:
         self.store = store
         self.defaults = defaults or InstanceDefaults()
         self.harness_defaults = harness_defaults
+        self.only_harness: str | None = None  # a plan that allows just this harness
         # What a section holds before anything is saved, when it isn't the
         # model's own defaults (e.g. Crontal's memory kinds; see
         # Integration.settings_defaults). Saved versions always win.
@@ -313,7 +314,7 @@ class SettingsService:
     async def resolve_thread(self, entry: dict, *, harness: str | None = None,
                              thread_model: str | None = None) -> dict:
         """Concrete harness/model/effort a run uses with no per-message override."""
-        harness = harness or entry.get("harness") or HarnessName.CODEX.value
+        harness = self.only_harness or harness or entry.get("harness") or HarnessName.CODEX.value
         fallback = await self.fallback(harness)
         return {
             "harness": harness,
@@ -346,6 +347,8 @@ class SettingsService:
         """Live lookup of the harness configured for new threads of a type."""
 
         async def lookup() -> str:
+            if self.only_harness:
+                return self.only_harness
             threads, _ = await self.get("threads")
             return (threads.get(thread_type) or {}).get("harness") or HarnessName.CODEX.value
 

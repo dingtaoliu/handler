@@ -24,6 +24,7 @@ from ..memory import MemoryTools, normalize_links
 from ..scheduler import Scheduler, parse_spec
 from ..settings import resolve_harness
 from ..store.base import Store
+from ..storage import StorageLimitReached
 from ..tenancy.limits import OverLimit
 from ..types import Event, Lane, MemoryTopic, Run, RunStep, Schedule, ThreadSpec, ThreadType, TokenUsage
 from ..uploads import (
@@ -385,6 +386,10 @@ def admin_router(
                 except UploadTooLarge:
                     raise HTTPException(
                         413, f"{f.filename or 'file'} is larger than {MAX_FILE_BYTES} bytes")
+                except StorageLimitReached as exc:
+                    for meta in saved:
+                        uploads.delete(meta)
+                    return JSONResponse(exc.payload(), status_code=413)
         except HTTPException:
             for meta in saved:
                 uploads.delete(meta)

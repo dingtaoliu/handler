@@ -393,6 +393,9 @@ def _has_rollout(home: Path, session_id: str) -> bool:
                for path in (home / directory).rglob("rollout-*.jsonl"))
 
 
+CODEX_HARNESS, NATIVE_HARNESS = "codex", "openai_agents"
+
+
 class RunExecutor:
     _active_runs = 0  # across every instance in this process, for the memory logs
 
@@ -435,6 +438,8 @@ class RunExecutor:
 
     async def execute(self, lease: Lease) -> None:
         thread = await self.store.get_thread(lease.thread_key)
+        if thread is not None:
+            await self._enforce_plan_harness(thread)
         events = await self.store.pending_events(lease.thread_key)
         if thread is None or not events:
             await self.store.complete(lease, run_id="", event_ids=[])
@@ -887,6 +892,14 @@ class RunExecutor:
             if resolved:
                 return resolved
         return thread.owner_user_id
+
+    async def _enforce_plan_harness(self, thread: Thread) -> None:
+        """A plan without Codex moves any thread on it to the native harness, for good."""
+        if (self.config.plan_limits is None or self.config.plan_limits.current.allow_codex
+                or thread.harness != CODEX_HARNESS):
+            return
+        await self.store.move_thread_harness(thread.key, CODEX_HARNESS, NATIVE_HARNESS)
+        thread.harness, thread.session_id = NATIVE_HARNESS, None  # its session was Codex's
 
     @staticmethod
     def _over_token_limit(harness: Harness, req: RunRequest, recorder: _RunRecorder) -> bool:

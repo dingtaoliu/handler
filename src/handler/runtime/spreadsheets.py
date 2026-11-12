@@ -11,6 +11,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from .storage import ensure_workspace_room
+
 MAX_ROWS = 50_000
 MAX_COLUMNS = 100
 MAX_BYTES = 10 * 1024 * 1024
@@ -95,6 +97,7 @@ def write_csv(workspace: Path, path: str, columns: list[dict], rows: list[dict],
     data = "".join(lines).encode("utf-8-sig")
     if len(data) > MAX_BYTES:
         raise ValueError(f"CSV exceeds {MAX_BYTES} bytes")
+    ensure_workspace_room(target, len(data))
     target.parent.mkdir(parents=True, exist_ok=True)
     # Stage the entire validated export; link provides atomic no-clobber creation.
     fd, staging = tempfile.mkstemp(prefix=".csv-", dir=target.parent)

@@ -90,13 +90,53 @@ def always_ask_reason(spec: ToolSpec, args: dict[str, Any]) -> str | None:
         return "could not tell whether it destroys data"
 
 
+def strict_floor(ctx: RunContext, spec: ToolSpec, args: dict[str, Any],
+                 decision: Decision, reason: str) -> tuple[Decision, str]:
+    """The floor for plans with `strict_grants`; settings can only tighten it.
+
+    Reads and writes kept inside Handler follow the normal rules. Code never runs.
+    Calls into Crontal always need a person, and on threads fed by outside input,
+    one that reaches outside the merchant or destroys data is refused outright.
+    """
+    if spec.risk == Risk.EXEC:
+        return Decision.DENY, "running code is not included in this plan"
+    if spec.risk != Risk.WRITE_EXTERNAL or decision == Decision.DENY:
+        return decision, reason
+    if thread_type_of(ctx) in UNTRUSTED_THREAD_TYPES:
+        why = always_ask_reason(spec, args)
+        if why is None and spec.outward is None:
+            why = "acts outside the merchant"  # unclassified, so every call counts as outward
+        elif why is None:
+            try:
+                why = spec.outward(args)
+            except Exception:  # a classifier bug must not let a call through
+                log.exception("outward check for %s failed", spec.name)
+                why = "could not tell whether it leaves the merchant"
+        if why:
+            return Decision.DENY, f"on this plan a thread fed by outside input can't: it {why}"
+    return Decision.ASK, f"{reason} would allow, but this plan needs approval"
+
+
 class GrantPolicy:
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(self, config: dict[str, Any] | None = None, *, plan_limits: Any = None) -> None:
         config = config or {}
+        self._plan_limits = plan_limits
         self._defaults = {**DEFAULT_RISK_DECISIONS, **(config.get("defaults") or {})}
         self._actions: dict[str, str] = dict(config.get("actions") or {})
 
     def decide(
+        self, ctx: RunContext, spec: ToolSpec, args: dict[str, Any]
+    ) -> tuple[Decision, str]:
+        decision, reason = self._decide_with_floors(ctx, spec, args)
+        if self._plan_limits is not None:
+            limits = self._plan_limits.current
+            if spec.action.startswith("automation.") and not limits.automations:
+                return Decision.DENY, "automations are not included in this plan"
+            if limits.strict_grants:
+                return strict_floor(ctx, spec, args, decision, reason)
+        return decision, reason
+
+    def _decide_with_floors(
         self, ctx: RunContext, spec: ToolSpec, args: dict[str, Any]
     ) -> tuple[Decision, str]:
         decision, reason = self._decide(spec)

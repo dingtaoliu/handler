@@ -41,6 +41,52 @@ def _csv_values(values: list[str] | None) -> list[str] | None:
     return [part for part in flat if part] or None
 
 
+def render_page(path: Path, request: Request, instance_name: str, build: str) -> HTMLResponse:
+    base = request.scope.get("root_path", "").rstrip("/")
+    # Serialize trusted server config, keeping script contexts safe even under
+    # an externally supplied ASGI root path.
+    config = json.dumps({"base": base, "instance": instance_name, "build": build}).replace("<", "\\u003c")
+    bootstrap = f"<script>window.HANDLER_CONFIG={config};</script>"
+    content = path.read_text().replace("<script", bootstrap + "<script", 1)
+    content = content.replace('href="/', f'href="{base}/').replace('src="/', f'src="{base}/')
+    return HTMLResponse(content, headers={"Cache-Control": "no-store"})
+
+
+def public_pages(instance_name: str, build: str) -> APIRouter:
+    """The sign-in page and app shell: no credentials, no store, no runtime needed."""
+    router = APIRouter()
+
+    @router.get("/")
+    @router.get("/app")
+    @router.get("/app/")
+    async def app_shell(request: Request) -> HTMLResponse:
+        # Unauthenticated shell: it redirects to /login without a token, and
+        # every data call carries one.
+        return render_page(APP_DIR / "index.html", request, instance_name, build)
+
+    @router.get("/app/static/{name}")
+    async def app_asset(name: str) -> FileResponse:
+        path = APP_DIR / name
+        if name != path.name or name == "index.html" or not path.is_file():
+            raise HTTPException(404, "not found")
+        return FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+    @router.get("/login")
+    async def login(request: Request) -> HTMLResponse:
+        return render_page(TIMELINE_HTML.with_name("login.html"), request, instance_name, build)
+
+    return router
+
+
+def public_shell(instance_name: str) -> FastAPI:
+    """The public pages alone, so a sleeping tenant can show them without waking."""
+    build = ui_build()
+    shell = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    shell.add_middleware(BuildHeaderMiddleware, build=build)
+    shell.include_router(public_pages(instance_name, build))
+    return shell
+
+
 def ui_build() -> str:
     """Fingerprint of the shipped browser UI (the files under static/)."""
     digest = hashlib.sha256()
@@ -356,38 +402,13 @@ def create_app(
         )
 
     def html(path: Path, request: Request) -> HTMLResponse:
-        base = request.scope.get("root_path", "").rstrip("/")
-        # Serialize trusted server config, keeping script contexts safe even under
-        # an externally supplied ASGI root path.
-        config = json.dumps({"base": base, "instance": instance_name, "build": build}).replace("<", "\\u003c")
-        bootstrap = f"<script>window.HANDLER_CONFIG={config};</script>"
-        content = path.read_text().replace("<script", bootstrap + "<script", 1)
-        content = content.replace('href="/', f'href="{base}/').replace('src="/', f'src="{base}/')
-        return HTMLResponse(content, headers={"Cache-Control": "no-store"})
-
-    @router.get("/")
-    @router.get("/app")
-    @router.get("/app/")
-    async def app_shell(request: Request) -> HTMLResponse:
-        # Unauthenticated shell: it redirects to /login without a token, and
-        # every data call carries one.
-        return html(APP_DIR / "index.html", request)
-
-    @router.get("/app/static/{name}")
-    async def app_asset(name: str) -> FileResponse:
-        path = APP_DIR / name
-        if name != path.name or name == "index.html" or not path.is_file():
-            raise HTTPException(404, "not found")
-        return FileResponse(path, headers={"Cache-Control": "no-cache"})
-
-    @router.get("/login")
-    async def login(request: Request) -> HTMLResponse:
-        return html(TIMELINE_HTML.with_name("login.html"), request)
+        return render_page(path, request, instance_name, build)
 
     @router.get("/timeline")
     async def timeline(request: Request, _: Principal = principal_dep) -> HTMLResponse:
         return html(TIMELINE_HTML, request)
 
     app.include_router(router)
+    app.include_router(public_pages(instance_name, build))
     app.include_router(auth_router(auth, instance_name))
     return app
