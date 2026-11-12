@@ -55,6 +55,9 @@ class Dispatcher:
 
     async def claim_once(self) -> int:
         """Fill free slots in every lane. Returns the number of runs started."""
+        # Cleared here, not before sleeping: a slot freed while this pass awaits the
+        # store must still wake the next wait, or the work waits for the idle poll.
+        self._slot_freed.clear()
         started = 0
         self._queued_at_gate = False
         for lane, cap in self.capacity.items():
@@ -116,7 +119,6 @@ class Dispatcher:
             logger.info("dispatcher stopped")
 
     async def _wait(self, stop: asyncio.Event) -> None:
-        self._slot_freed.clear()
         waiters = [
             asyncio.create_task(self.store.wait_for_work(self.idle_poll_seconds)),
             asyncio.create_task(self._slot_freed.wait()),
