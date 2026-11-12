@@ -17,33 +17,97 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
+import json
 import logging
 import re
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any
+from urllib.parse import parse_qsl
 
 import httpx
 from psycopg.errors import UndefinedTable
 from starlette._utils import get_route_path
 from starlette.responses import JSONResponse
 
+from ..gateway.google_oauth import CALLBACK_PATH
+from ..gateway.secret_box import SecretBox
+from ..store.sqlite_users import hash_token
+from ..web.app import public_shell
+from ..web.auth_api import ticket_hash
 from ..web.email_ingest import MAX_EMAIL_BYTES, sign_email, verify_email
-from .limits import PlanLimits
+from ..web.ingest import verify as verify_crontal
+from .limits import PlanLimits, upgrade_required
+from .plan_guard import plan_refusal
 from .registry import Tenant, TenantRegistry
 
 logger = logging.getLogger("handler.runtime.tenancy")
 
 ROOT_TENANT = "main"
-# Integrations that poll for input, so their tenant can never sleep.
+# Integrations that may poll for input. A tenant is pinned awake only while one
+# of them has something to poll: an enabled connected mailbox. Gmail has no
+# poller (it is read on demand), so it never pins a tenant.
 PINNED_INTEGRATIONS = frozenset({"mailbox", "gmail", "google"})
+POLLING_INTEGRATIONS = frozenset({"mailbox"})
 _INSTANCE_PATH = re.compile(r"^/i/([a-z][a-z0-9_]{0,31})(/.*)$")
 ACTIVATION_RETRY_SECONDS = 30.0
 SPOOL_RETRY_SECONDS = 300.0
+SPOOL_RETRY_MAX_SECONDS = 86_400.0
+SPOOL_MAX_ATTEMPTS = 12
+DEFAULT_MAX_ACTIVE = 40
+BAD_CREDENTIAL_SECONDS = 60.0
+MAX_BAD_CREDENTIALS = 4096
+NAME_REFRESH_SECONDS = 60.0
 REPLAYED_HEADERS = ("content-type", "x-handler-envelope-from", "x-handler-envelope-to",
                     "x-handler-auth-results", "x-handler-forwarded")
+
+
+class AtCapacity(Exception):
+    """Every active-tenant place is held by a tenant that can't be stopped now."""
+
+
+class _Answered(Exception):
+    """The response was already sent."""
+
+
+def _headers(scope) -> dict[str, str]:
+    return {key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])}
+
+
+def _bearer(scope, headers: dict[str, str]) -> str | None:
+    scheme, _, token = headers.get("authorization", "").partition(" ")
+    if scheme.lower() == "bearer" and token:
+        return token
+    return dict(parse_qsl(scope.get("query_string", b"").decode("latin-1"))).get("access_token")
+
+
+def _carries_credential(scope) -> bool:
+    headers = _headers(scope)
+    return bool(_bearer(scope, headers)) or any(
+        name in headers for name in ("x-handler-signature", "x-crontal-signature"))
+
+
+def _is_public_page(path: str) -> bool:
+    return path in ("/", "/app", "/app/", "/login") or path.startswith("/app/static/")
+
+
+def _replaying(body: bytes, receive):
+    """A `receive` that gives the already-read body, then defers to the real one."""
+    delivered = False
+
+    async def replay():
+        nonlocal delivered
+        if delivered:
+            return await receive()
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return replay
 
 
 @dataclass
@@ -65,10 +129,17 @@ class _Slot:
     last_activity: float = field(default_factory=monotonic)
     stale: bool = False  # its config changed; restart once quiescent
     recover: bool = False  # a stop could not record its state
+    shell: Any = None  # the public pages, built when first asked for
+
+    polls: bool = False  # last seen with an enabled connected mailbox
 
     @property
     def pinned(self) -> bool:
-        return bool(PINNED_INTEGRATIONS.intersection(self.tenant.integrations or ()))
+        return self.polls and self.may_poll
+
+    @property
+    def may_poll(self) -> bool:
+        return bool(POLLING_INTEGRATIONS.intersection(self.tenant.integrations or ()))
 
     def touch(self) -> None:
         self.last_activity = monotonic()
@@ -81,13 +152,19 @@ class TenantHost:
     def __init__(self, registry: TenantRegistry, runtime_for: RuntimeFactory, *,
                  idle_seconds: float = 600.0, scan_seconds: float = 15.0,
                  boot_grace_seconds: float = 120.0, concurrent_activations: int = 4,
-                 limits_for: Callable[[Tenant], PlanLimits] | None = None) -> None:
+                 limits_for: Callable[[Tenant], PlanLimits] | None = None,
+                 max_active: int = DEFAULT_MAX_ACTIVE) -> None:
         self.registry = registry
         self._runtime_for = runtime_for
         self.idle_seconds = idle_seconds
         self.scan_seconds = scan_seconds
         self.boot_grace_seconds = boot_grace_seconds
         self._limits_for = limits_for
+        self.max_active = max_active
+        self._occupied: set[str] = set()  # running or being started
+        self._bad_credentials: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._credential_checks = asyncio.Semaphore(4)
+        self._names_read_at = 0.0
         self._starting = asyncio.Semaphore(concurrent_activations)
         self._slots: dict[str, _Slot] = {}
         self._by_schema: dict[str, _Slot] = {}
@@ -100,9 +177,20 @@ class TenantHost:
         if scope["type"] not in ("http", "websocket"):
             return
         name, child = self._route(scope)
-        slot = await self._slot(name) if name else None
+        slot = self._slots.get(name) if name else None  # never a query: see load()
         if slot is None:
             await self._refuse(scope, receive, send, 404, "instance not found")
+            return
+        limits = self._plan(slot)
+        if limits is not None and not limits.email and self._is_email_ingest(child):
+            # Before the spool: on this plan mail is not a channel, so nothing is kept.
+            await JSONResponse(upgrade_required("email", limits), 403)(scope, receive, send)
+            return
+        if get_route_path(child) == "/healthz" and scope["type"] == "http":
+            if slot.tenant.enabled:
+                await JSONResponse({"ok": True})(scope, receive, send)
+            else:
+                await self._refuse(scope, receive, send, 404, "instance not found")
             return
         if not slot.tenant.enabled:
             if not await self._spool_email(slot, child, receive, send):
@@ -110,11 +198,18 @@ class TenantHost:
             return
         task = asyncio.current_task()
         slot.in_flight.add(task)  # before any await: a stop must see this request
+        credentialed = _carries_credential(child)
         try:
+            if self._sleeping(slot):
+                try:
+                    receive = await self._admit(slot, child, receive, send)
+                except _Answered:
+                    return
             try:
                 runtime = None if self._closing else await self._runtime(slot)
-            except Exception:
-                logger.exception("tenant activation failed", extra={"tenant": slot.tenant.name})
+            except Exception as exc:
+                if not isinstance(exc, AtCapacity):
+                    logger.exception("tenant activation failed", extra={"tenant": slot.tenant.name})
                 if not await self._spool_email(slot, child, receive, send):
                     await self._refuse(scope, receive, send, 503, "instance unavailable",
                                        headers={"Retry-After": "5"})
@@ -127,11 +222,24 @@ class TenantHost:
                                   else (404, "instance not found"))
                 await self._refuse(scope, receive, send, status, detail)
                 return
-            slot.touch()
+            if credentialed:  # an anonymous probe must not keep a tenant awake
+                slot.touch()
             await runtime.app(child, receive, send)
         finally:
             slot.in_flight.discard(task)
-            slot.touch()
+            if credentialed:
+                slot.touch()
+
+    def _plan(self, slot: _Slot) -> PlanLimits | None:
+        return self._limits_for(slot.tenant) if self._limits_for is not None else None
+
+    def _schedules_count(self, slot: _Slot) -> bool:
+        limits = self._plan(slot)
+        return limits is None or limits.automations
+
+    @staticmethod
+    def _sleeping(slot: _Slot) -> bool:
+        return slot.runtime is None or slot.lock.locked()
 
     @staticmethod
     def _route(scope) -> tuple[str | None, dict]:
@@ -151,6 +259,89 @@ class TenantHost:
             await send({"type": "websocket.close", "code": 1013 if status == 503 else 1008})
             return
         await JSONResponse({"detail": detail}, status, headers)(scope, receive, send)
+
+    # --- who may wake a sleeping tenant --------------------------------------
+    async def _admit(self, slot: _Slot, scope, receive, send):
+        """Decide whether this request may start the tenant; returns `receive` to use.
+
+        Only a credential that checks out can wake a tenant. Admin keys and webhook,
+        email and OAuth signatures are checked from its sealed secrets; user tokens and
+        sign-in tickets by hash in its own table. Public pages are served from here.
+        """
+        path = get_route_path(scope)
+        limits = self._plan(slot)
+        refusal = plan_refusal(path, limits) if limits is not None else None
+        if refusal is not None:
+            await JSONResponse(refusal, 403)(scope, receive, send)
+            raise _Answered
+        if scope["type"] == "http" and scope["method"] in ("GET", "HEAD") and _is_public_page(path):
+            if slot.shell is None:
+                slot.shell = public_shell(slot.tenant.name)
+            await slot.shell(scope, receive, send)
+            raise _Answered
+        headers = _headers(scope)
+        secrets = self.registry.unseal(slot.tenant)
+        method = scope.get("method")
+        if method == "POST" and path in ("/ingest/email", "/ingest/crontal", "/login/ticket"):
+            body = await self._read_body(receive)
+            if body is None:
+                await self._refuse(scope, receive, send, 413, "email too large")
+                raise _Answered
+            receive = _replaying(body, receive)
+            if await self._body_checks_out(slot, path, headers, secrets, body):
+                return receive
+        elif method == "GET" and path == CALLBACK_PATH:
+            state = dict(parse_qsl(scope.get("query_string", b"").decode("latin-1"))).get("state")
+            box = SecretBox.from_env(secrets)
+            if state and box is not None and box.verify(state) is not None:
+                return receive
+        else:
+            token = _bearer(scope, headers)
+            if token and await self._token_checks_out(slot, token, secrets):
+                return receive
+        await self._refuse(scope, receive, send, 401, "authentication required")
+        raise _Answered
+
+    async def _body_checks_out(self, slot: _Slot, path: str, headers: dict[str, str],
+                               secrets: dict[str, str], body: bytes) -> bool:
+        if path == "/ingest/email":
+            secret = secrets.get("HANDLER_EMAIL_SECRET")
+            return bool(secret) and verify_email(secret, headers.get("x-handler-timestamp"),
+                                                 headers.get("x-handler-signature"), body)
+        if path == "/ingest/crontal":
+            secret = secrets.get("HANDLER_WEBHOOK_SECRET")
+            return bool(secret) and verify_crontal(secret, headers.get("x-crontal-signature"), body)
+        try:
+            ticket = json.loads(body).get("ticket")
+        except (ValueError, AttributeError):
+            return False
+        return isinstance(ticket, str) and await self._on_file(
+            slot, "sign_in_tickets", "ticket_hash", ticket_hash(slot.tenant.name, ticket))
+
+    async def _token_checks_out(self, slot: _Slot, token: str, secrets: dict[str, str]) -> bool:
+        admin_key = secrets.get("HANDLER_ADMIN_KEY", "")
+        if admin_key and hmac.compare_digest(token.encode(), admin_key.encode()):
+            return True
+        return await self._on_file(slot, "user_tokens", "token_hash", hash_token(token))
+
+    async def _on_file(self, slot: _Slot, table: str, column: str, digest: str) -> bool:
+        """Look a hashed credential up, at most a few at once and failures remembered."""
+        key = (slot.tenant.name, digest)
+        now = monotonic()
+        if self._bad_credentials.get(key, 0.0) > now:
+            return False
+        async with self._credential_checks:
+            try:
+                found = await self.registry.credential_exists(
+                    slot.tenant.schema_name, table, column, digest)
+            except UndefinedTable:  # never started: it has no such credential
+                found = False
+        if not found:
+            self._bad_credentials[key] = now + BAD_CREDENTIAL_SECONDS
+            self._bad_credentials.move_to_end(key)
+            while len(self._bad_credentials) > MAX_BAD_CREDENTIALS:
+                self._bad_credentials.popitem(last=False)
+        return found
 
     # --- email a tenant can't take right now ---------------------------------
     @staticmethod
@@ -227,7 +418,10 @@ class TenantHost:
         slot.in_flight.add(task)
         name = slot.tenant.name
         try:
-            runtime = await self._runtime(slot)
+            try:
+                runtime = await self._runtime(slot)
+            except AtCapacity:
+                return  # the next scan tries again
             secret = self.registry.unseal(slot.tenant).get("HANDLER_EMAIL_SECRET")
             if runtime is None or not secret:
                 return
@@ -244,26 +438,34 @@ class TenantHost:
                             **headers, "x-handler-timestamp": timestamp,
                             "x-handler-signature": signature})
                     except Exception as exc:  # noqa: BLE001 - stays spooled
-                        await self.registry.spool_failed(name, digest, repr(exc), SPOOL_RETRY_SECONDS)
+                        await self._replay_failed(name, digest, repr(exc))
                         continue
                     if response.status_code < 300:
                         await self.registry.spool_delivered(name, digest)
                     else:
-                        logger.warning("spooled email replay refused", extra={
-                            "tenant": name, "status": response.status_code})
-                        await self.registry.spool_failed(
-                            name, digest, f"{response.status_code}: {response.text}",
-                            SPOOL_RETRY_SECONDS)
+                        await self._replay_failed(name, digest,
+                                                  f"{response.status_code}: {response.text}")
         finally:
             slot.in_flight.discard(task)
             slot.touch()
 
-    async def _slot(self, name: str) -> _Slot | None:
-        slot = self._slots.get(name)
-        if slot is not None:
-            return slot
-        tenant = await self.registry.get(name)
-        return self._remember(tenant) if tenant else None
+    async def _replay_failed(self, name: str, digest: str, error: str) -> None:
+        attempts = await self.registry.spool_failed(
+            name, digest, error, SPOOL_RETRY_SECONDS, SPOOL_RETRY_MAX_SECONDS, SPOOL_MAX_ATTEMPTS)
+        extra = {"tenant": name, "digest": digest, "attempts": attempts, "error": error[:300]}
+        if attempts >= SPOOL_MAX_ATTEMPTS:
+            logger.error("spooled email gave up after repeated failures; row kept", extra=extra)
+        else:
+            logger.warning("spooled email replay failed", extra=extra)
+
+    async def load(self) -> None:
+        """Know every tenant before serving, so a lookup never needs the database."""
+        for tenant in await self.registry.list():
+            self._remember(tenant)
+        self._names_read_at = monotonic()
+
+    def _slot(self, name: str) -> _Slot | None:
+        return self._slots.get(name)
 
     def _remember(self, tenant: Tenant) -> _Slot:
         slot = self._slots.get(tenant.name)
@@ -289,7 +491,9 @@ class TenantHost:
 
     @staticmethod
     def _log_failure(task: asyncio.Task[Any]) -> None:
-        if not task.cancelled() and task.exception() is not None:
+        if not task.cancelled() and isinstance(task.exception(), AtCapacity):
+            logger.warning("tenant not started: at the active tenant limit")
+        elif not task.cancelled() and task.exception() is not None:
             logger.error("tenant lifecycle step failed", exc_info=task.exception())
 
     async def _activate(self, slot: _Slot) -> _Runtime | None:
@@ -297,12 +501,19 @@ class TenantHost:
             if slot.runtime is not None or not slot.tenant.enabled or self._closing:
                 return slot.runtime
             name = slot.tenant.name
+            try:
+                await self._reserve_capacity(slot)
+            except AtCapacity:
+                with suppress(Exception):
+                    await self.registry.activation_failed(name, ACTIVATION_RETRY_SECONDS)
+                raise
             async with self._starting:
                 # Before the start: a crash from here on is recovered at boot.
                 await self.registry.mark_active(name)
                 try:
                     slot.runtime = await self._start(slot)
                 except BaseException:
+                    self._occupied.discard(name)
                     with suppress(Exception):
                         await self.registry.activation_failed(name, ACTIVATION_RETRY_SECONDS)
                     raise
@@ -310,6 +521,22 @@ class TenantHost:
             slot.touch()
             logger.info("tenant activated", extra={"tenant": name})
             return slot.runtime
+
+    async def _reserve_capacity(self, slot: _Slot) -> None:
+        """Claim one of the active-tenant places, stopping quiescent LRU tenants if needed."""
+        tried: set[str] = set()
+        while True:
+            if len(self._occupied) < self.max_active:
+                self._occupied.add(slot.tenant.name)  # no await since the check
+                return
+            victims = [s for s in self._slots.values()
+                       if s.runtime is not None and not s.pinned and not s.in_flight
+                       and not s.lock.locked() and s.tenant.name not in tried]
+            if not victims:
+                raise AtCapacity(slot.tenant.name)
+            victim = min(victims, key=lambda s: s.last_activity)
+            tried.add(victim.tenant.name)
+            await self._deactivate(victim)
 
     async def _start(self, slot: _Slot) -> _Runtime:
         tenant = await self.registry.get(slot.tenant.name) or slot.tenant
@@ -339,7 +566,8 @@ class TenantHost:
         if slot.in_flight or parts.dispatcher.active_count:
             slot.touch()
             return False
-        due = await parts.store.earliest_work(list(parts.outbox.sinks))
+        due = await parts.store.earliest_work(list(parts.outbox.sinks),
+                                              schedules=self._schedules_count(slot))
         if due is not None and due <= parts.store._clock():
             return False
         if parts.workspace_sync.dirty:
@@ -365,10 +593,12 @@ class TenantHost:
             runtime.stop.set()
             await asyncio.gather(runtime.owner, return_exceptions=True)
             slot.runtime, slot.stale = None, False
+            self._occupied.discard(name)
             try:
                 # The wake goes first: if we die before active_since clears, the
                 # next boot still activates this tenant.
-                await self.registry.write_next_wake(name, schema, sinks)
+                await self.registry.write_next_wake(name, schema, sinks,
+                                                    schedules=self._schedules_count(slot))
                 await self.registry.clear_active(name)
             except Exception:
                 slot.recover = True
@@ -414,6 +644,7 @@ class TenantHost:
         parts = runtime.app.state.lifecycle
         parts.limits.current = self._limits_for(slot.tenant)
         await parts.store.release_held_inputs()
+        parts.scheduler.wake()  # schedules kept on a plan without them resume now
 
     # --- the one scanning task ----------------------------------------------
     async def run(self) -> None:
@@ -434,9 +665,10 @@ class TenantHost:
                 await asyncio.wait_for(self._scan_now.wait(), self.scan_seconds)
 
     async def boot(self) -> None:
-        tenants = await self.registry.list()
-        for tenant in tenants:
-            slot = self._remember(tenant)
+        for slot in list(self._slots.values()):
+            tenant = slot.tenant
+            if tenant.enabled and slot.may_poll:
+                await self._refresh_polling(slot)
             if tenant.enabled and (tenant.active_since is not None or slot.pinned):
                 self._activation(slot)
         self.registry.hub.on_unattached = self._notified
@@ -449,12 +681,25 @@ class TenantHost:
             if slot.runtime is not None or not slot.tenant.enabled:
                 continue
             try:
-                if await self.registry.sweep_tenant(slot.tenant.name, slot.tenant.schema_name):
+                if await self.registry.sweep_tenant(slot.tenant.name, slot.tenant.schema_name,
+                                                    schedules=self._schedules_count(slot)):
                     self._activation(slot)
             except UndefinedTable:
                 pass  # created but never started: nothing in it yet
             except Exception:
                 logger.exception("tenant sweep failed", extra={"tenant": slot.tenant.name})
+
+    async def _refresh_polling(self, slot: _Slot) -> None:
+        """Whether this tenant now has a mailbox to poll (one query, its own schema)."""
+        if not slot.may_poll:
+            slot.polls = False
+            return
+        try:
+            slot.polls = await self.registry.has_polling_mailbox(slot.tenant.schema_name)
+        except UndefinedTable:
+            slot.polls = False  # the mailbox tables appear with the first mailbox
+        except Exception:
+            logger.exception("could not check mailboxes", extra={"tenant": slot.tenant.name})
 
     def _notified(self, schema: str) -> None:
         slot = self._by_schema.get(schema)
@@ -462,8 +707,10 @@ class TenantHost:
             self._activation(slot)
 
     async def tick(self) -> None:
+        if monotonic() - self._names_read_at >= NAME_REFRESH_SECONDS:
+            await self.load()  # the one way a tenant made elsewhere becomes known
         for name, seen in await self.registry.due():
-            slot = await self._slot(name)
+            slot = self._slot(name)
             if slot is None:
                 continue
             if slot.runtime is not None and not slot.lock.locked():
@@ -472,9 +719,13 @@ class TenantHost:
             else:
                 self._activation(slot)
         for name in await self.registry.tenants_with_spooled_email():
-            slot = await self._slot(name)
-            if slot is not None:
+            slot = self._slot(name)
+            limits = self._plan(slot) if slot is not None else None
+            if slot is not None and (limits is None or limits.email):  # kept until email returns
                 self._start_replay(slot)  # activates the tenant first if it is asleep
+        for slot in list(self._slots.values()):
+            if slot.runtime is not None and slot.may_poll and not slot.lock.locked():
+                await self._refresh_polling(slot)  # pin on a new mailbox, unpin on the last
         for slot in self._slots.values():
             if not slot.tenant.enabled:
                 continue

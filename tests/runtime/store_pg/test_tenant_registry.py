@@ -241,7 +241,7 @@ async def test_idle_tenant_is_deactivated_after_the_idle_period(base_env, pg_dsn
         await activate(client)
         await until(lambda: slot(app).runtime is None)
         assert spy.live["m42"] == 0
-        assert state(pg_dsn)[0] is None
+        await until(lambda: state(pg_dsn)[0] is None)  # cleared last, after next_wake_at
         await activate(client)  # and comes back on the next request
         assert spy.starts["m42"] == 2
 
@@ -618,7 +618,7 @@ async def test_failed_activation_is_retried_durably(base_env, pg_dsn, spy, monke
         await activate(client)
         await asleep(app)
         spy.fail_next.add("m42")
-        response = await client.post("/i/m42/ingest/crontal", content=b"{}")
+        response = await client.get("/i/m42/api/me", headers=admin("admin-42"))
         assert response.status_code == 503  # the sender retries; nothing was accepted and lost
         assert response.headers["retry-after"] == "5"
         active_since, wake = state(pg_dsn)
@@ -689,14 +689,64 @@ async def test_inbound_email_during_deactivation_is_stored(base_env, pg_dsn, spy
 # --- pinned tenants --------------------------------------------------------
 
 
-async def test_a_polling_tenant_is_activated_at_boot_and_never_idles(base_env, spy):
-    base_env["HANDLER_TENANT_IDLE_SECONDS"] = "0.1"
+async def add_mailbox(app, name="m42", *, enabled=True):
+    from handler.runtime.integrations.mailbox.config import Mailbox
+    from handler.runtime.integrations.mailbox.store import MailStore
+
+    # Loopback port 1: the poller's connection is refused at once, with no network.
+    mailbox = Mailbox(email="sales@example.com", username="sales@example.com", label="Sales",
+                      imap_host="127.0.0.1", imap_port=1, imap_security="tls",
+                      smtp_host="127.0.0.1", smtp_port=1, smtp_security="tls", enabled=enabled)
+    await MailStore(live_store(app, name)).put_mailbox(mailbox)
+    return mailbox
+
+
+async def test_a_mailbox_integration_alone_does_not_pin_a_tenant(base_env, spy):
+    base_env["HANDLER_TENANT_IDLE_SECONDS"] = "0.2"
+    async with serve(base_env) as (app, client):
+        await create(client, integrations=["mailbox"])  # what Crontal pushes to every paid tenant
+        await asyncio.sleep(0.3)
+        assert spy.starts.get("m42") is None  # asleep at boot: nothing to poll
+        await activate(client)
+        await until(lambda: slot(app).runtime is None)  # and it sleeps again when idle
+
+
+async def test_a_connected_mailbox_pins_and_removing_it_unpins(base_env, spy):
+    from handler.runtime.integrations.mailbox.store import MailStore
+
+    base_env["HANDLER_TENANT_IDLE_SECONDS"] = "0.2"
     async with serve(base_env) as (app, client):
         await create(client, integrations=["mailbox"])
-        await create(client, 2)
-        await until(lambda: slot(app).runtime is not None)  # the scan pins it, unprompted
+        await activate(client)
+        mailbox = await add_mailbox(app)
+        await until(lambda: slot(app).pinned)
         await asyncio.sleep(0.5)
-        assert slot(app).runtime is not None and spy.starts["m42"] == 1
+        assert slot(app).runtime is not None  # past the idle period, still awake
+        await MailStore(live_store(app)).delete_mailbox(mailbox.id)
+        await until(lambda: slot(app).runtime is None)
+        assert not slot(app).pinned
+
+
+async def test_a_disabled_mailbox_does_not_pin(base_env, spy):
+    base_env["HANDLER_TENANT_IDLE_SECONDS"] = "0.2"
+    async with serve(base_env) as (app, client):
+        await create(client, integrations=["mailbox"])
+        await activate(client)
+        await add_mailbox(app, enabled=False)
+        await until(lambda: slot(app).runtime is None)
+
+
+async def test_a_tenant_with_a_mailbox_is_woken_at_boot_and_kept_awake(base_env, spy):
+    base_env["HANDLER_TENANT_IDLE_SECONDS"] = "0.2"
+    async with serve(base_env) as (app, client):
+        await create(client, integrations=["mailbox"])
+        await activate(client)
+        await add_mailbox(app)
+        await until(lambda: slot(app).pinned)
+    async with serve(base_env) as (app, client):
+        await until(lambda: "m42" in app.state.tenants._slots and slot(app).runtime is not None)
+        await asyncio.sleep(0.5)
+        assert slot(app).runtime is not None and slot(app).pinned
 
 
 async def test_an_ordinary_tenant_is_not_pinned(base_env, spy):
@@ -881,6 +931,7 @@ async def test_env_instances_are_imported_once_and_keep_everything(base_env, pg_
         assert listed["bss"]["merchant_id"] == 1 and listed["bss"]["config"]["HANDLER_RT_MODEL"] == "bss-model"
         assert listed["yeup"]["integrations"] == ["crontal"]
         assert (await client.get("/healthz")).status_code == 200  # main keeps its root alias
+        assert (await client.get("/api/me", headers=admin("main-admin"))).status_code == 200
         assert (await client.get("/i/main/healthz")).status_code == 200
         assert (await client.get("/i/bss/api/me", headers=admin("main-admin"))).status_code == 401
         threads = await client.get("/i/bss/api/threads", headers=admin("bss-admin"))

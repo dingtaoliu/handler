@@ -9,6 +9,7 @@ import pytest
 
 from handler.runtime import server
 from handler.runtime.scheduler import Scheduler
+from handler.runtime.settings import ModelName
 from handler.runtime.store.postgres import PostgresStore
 from handler.runtime.store.postgres_hub import PostgresHub
 from handler.runtime.tenancy.limits import (
@@ -42,7 +43,8 @@ from .test_tenant_registry import (  # noqa: F401  (fixtures)
     until,
 )
 
-FREE = {"plan": "free", "limits": {"monthly_inputs": 2}}
+# The free plan's input limit, on a plan that also has the channels being tested.
+FREE = {"plan": "free", "limits": {"monthly_inputs": 2, "email": True, "automations": True}}
 MAIL_SECRETS = {"HANDLER_ADMIN_KEY": "admin-42", "HANDLER_EMAIL_SECRET": "mail-42",
                 "HANDLER_WEBHOOK_SECRET": "hook-42"}
 
@@ -386,7 +388,8 @@ async def test_host_sends_the_skip_notice_to_the_automation_owner(base_env, pg_d
 
 async def test_manual_automation_over_limit_gets_a_429(base_env):
     async with serve(base_env) as (app, client):
-        await create(client, **FREE)
+        # A limited plan that has both automations and their API (free has neither).
+        await create(client, plan="free", limits={**FREE["limits"], "console": True})
         await activate(client)
         store = live_store(app)
         await exhaust(store)
@@ -532,7 +535,7 @@ async def test_upgrade_wakes_a_sleeping_tenant_and_releases_its_work(base_env, p
 
 
 async def test_free_runs_use_the_fixed_model_and_limits(base_env, monkeypatch):
-    base_env["HANDLER_RT_MODEL"] = "the-default-model"
+    base_env["HANDLER_RT_MODEL"] = "an-expensive-default"
     seen = []
 
     class Recording(FakeHarness):
@@ -552,7 +555,7 @@ async def test_free_runs_use_the_fixed_model_and_limits(base_env, monkeypatch):
         await store.put(chosen, ThreadSpec("chat:u:1", ThreadType.CHAT, Lane.INTERACTIVE, owner_user_id="u",
                                            harness="openai_agents", model="another-expensive-model"))
         await until(lambda: seen)
-    assert seen[0].model == "the-default-model"
+    assert seen[0].model == ModelName.GPT_6_1_TERRA.value
     assert seen[0].limits.max_tokens == 1234 and seen[0].limits.max_turns == 5
     assert seen[0].bounded_task_models == {}
 
@@ -602,7 +605,7 @@ async def test_a_token_limit_stops_a_non_native_harness(base_env, monkeypatch):
     monkeypatch.setattr(server, "CodexHarness", make)
     monkeypatch.setattr(server, "codex_binary", lambda: "codex")
     async with serve(base_env) as (app, client):
-        await create(client, plan="free", limits={"max_run_tokens": 1000})
+        await create(client, limits={"max_run_tokens": 1000})  # paid: free has no Codex
         await activate(client)
         store = live_store(app)
         await store.put(Event(type="chat.message", source="t", payload={"text": "hi"},

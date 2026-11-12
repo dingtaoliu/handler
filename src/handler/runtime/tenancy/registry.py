@@ -201,6 +201,24 @@ class TenantRegistry:
                 tenant, generated = updated, None
         return await self.get(tenant.name) or tenant, existing is None, generated
 
+    async def credential_exists(self, schema: str, table: str, column: str, value: str) -> bool:
+        """Whether a hashed credential is on file in this tenant's own table."""
+        async with self.hub.pool.connection() as conn:
+            await self._tenant_transaction(conn, schema)
+            cursor = await conn.execute(
+                sql.SQL("SELECT 1 FROM {} WHERE {} = %s LIMIT 1").format(
+                    sql.Identifier(table), sql.Identifier(column)), (value,))
+            return await cursor.fetchone() is not None
+
+    async def has_polling_mailbox(self, schema: str) -> bool:
+        """Whether the tenant has an enabled connected mailbox, which its poller polls."""
+        async with self.hub.pool.connection() as conn:
+            await self._tenant_transaction(conn, schema)
+            cursor = await conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM mail_accounts WHERE "
+                "COALESCE((config::jsonb ->> 'enabled')::boolean, TRUE)) AS polls")
+            return (await cursor.fetchone())["polls"]
+
     async def set_enabled(self, name: str, enabled: bool) -> None:
         async with self.hub.pool.connection() as conn:
             await conn.execute(f"UPDATE {_C}.tenants SET enabled=%s, updated_at=now() WHERE name=%s",
@@ -255,13 +273,18 @@ class TenantRegistry:
             await conn.execute(f"DELETE FROM {_C}.spooled_email WHERE tenant=%s AND digest=%s",
                                (name, digest))
 
-    async def spool_failed(self, name: str, digest: str, error: str, retry_seconds: float) -> None:
-        """Never deleted: it stays until a replay succeeds."""
+    async def spool_failed(self, name: str, digest: str, error: str,
+                           base_seconds: float, cap_seconds: float, max_attempts: int) -> int:
+        """Back off, then stop retrying. Never deleted; returns the attempts so far."""
         async with self.hub.pool.connection() as conn:
-            await conn.execute(
+            cursor = await conn.execute(
                 f"UPDATE {_C}.spooled_email SET attempts = attempts + 1, last_error = %s, "
-                "next_attempt_at = now() + make_interval(secs => %s) WHERE tenant=%s AND digest=%s",
-                (error[:500], retry_seconds, name, digest))
+                "next_attempt_at = CASE WHEN attempts + 1 >= %s THEN 'infinity'::timestamptz "
+                "ELSE now() + make_interval(secs => LEAST(%s * power(2, attempts), %s)) END "
+                "WHERE tenant=%s AND digest=%s RETURNING attempts",
+                (error[:500], max_attempts, base_seconds, cap_seconds, name, digest))
+            row = await cursor.fetchone()
+        return row["attempts"] if row else 0
 
     # --- lifecycle ----------------------------------------------------------
     async def due(self) -> list[tuple[str, datetime]]:
@@ -297,8 +320,8 @@ class TenantRegistry:
     async def _tenant_transaction(self, conn: AsyncConnection, schema: str) -> None:
         await conn.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(schema)))
 
-    async def write_next_wake(self, name: str, schema: str,
-                              sinks: Sequence[str] | None = None) -> datetime | None:
+    async def write_next_wake(self, name: str, schema: str, sinks: Sequence[str] | None = None,
+                              *, schedules: bool = True) -> datetime | None:
         """Record when this stopped tenant must run again.
 
         The row lock waits for any writer's open transaction (a CLI store marks this
@@ -308,7 +331,7 @@ class TenantRegistry:
         async with self.hub.pool.connection() as conn:
             await self._tenant_transaction(conn, schema)
             await conn.execute(f"SELECT 1 FROM {_C}.tenant_state WHERE name=%s FOR UPDATE", (name,))
-            due = await earliest_work_at(conn, sinks)
+            due = await earliest_work_at(conn, sinks, schedules=schedules)
             cursor = await conn.execute(
                 f"UPDATE {_C}.tenant_state SET next_wake_at=LEAST(next_wake_at, %s) "
                 "WHERE name=%s RETURNING next_wake_at", (due, name))
@@ -318,11 +341,11 @@ class TenantRegistry:
         async with self.hub.pool.connection() as conn:
             await conn.execute(f"UPDATE {_C}.tenant_state SET active_since=NULL WHERE name=%s", (name,))
 
-    async def sweep_tenant(self, name: str, schema: str) -> bool:
+    async def sweep_tenant(self, name: str, schema: str, *, schedules: bool = True) -> bool:
         """Boot-time check of one tenant's own tables; True if it has work due now."""
         async with self.hub.pool.connection() as conn:
             await self._tenant_transaction(conn, schema)
-            due = await earliest_work_at(conn, None)
+            due = await earliest_work_at(conn, None, schedules=schedules)
             cursor = await conn.execute(
                 f"UPDATE {_C}.tenant_state SET next_wake_at=LEAST(next_wake_at, %s) "
                 "WHERE name=%s RETURNING next_wake_at <= now() AS now_due", (due, name))

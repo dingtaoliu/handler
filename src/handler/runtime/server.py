@@ -66,7 +66,8 @@ from .store.postgres import PostgresStore
 from .store.postgres_hub import DEFAULT_POOL_MAX, PostgresHub
 from .store.sqlite import SQLiteStore
 from .tasks import publish_queued
-from .tenancy.host import PINNED_INTEGRATIONS, TenantHost
+from .storage import register_workspace_limit, unregister_workspace_limit
+from .tenancy.host import DEFAULT_MAX_ACTIVE, PINNED_INTEGRATIONS, TenantHost
 from .tenancy.limits import (
     PLAN_LIMITS_ENV,
     LiveLimits,
@@ -77,6 +78,7 @@ from .tenancy.limits import (
     upgrade_required,
 )
 from .tenancy.platform_api import platform_router
+from .tenancy.plan_guard import ConsoleGuard
 from .tenancy.registry import Tenant, TenantRegistry
 from .tenancy.run_gate import DEFAULT_MAX_RUNS, DEFAULT_PLAN_CAPS, RunGate, parse_plan_caps
 from .tools.automation import AutomationTools
@@ -532,10 +534,12 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
     def validate(tenants: list[Tenant]) -> None:
         for tenant in tenants:
             check_limit_keys(tenant.limits, f"{tenant.name}: limits")
-            if (not resolve_limits(tenant.plan, tenant.limits, plan_table).connected_mail
-                    and PINNED_INTEGRATIONS.intersection(tenant.integrations or ())):
-                raise ValueError(f"{tenant.name}: connected mailboxes and Gmail are not "
-                                 f"included in the {tenant.plan} plan")
+            limits = resolve_limits(tenant.plan, tenant.limits, plan_table)
+            enabled = set(tenant.integrations or ())
+            if ((not limits.connected_mail and PINNED_INTEGRATIONS & enabled)
+                    or (not limits.email and "email_intake" in enabled)):
+                raise ValueError(f"{tenant.name}: email channels are not included in the "
+                                 f"{tenant.plan} plan")
         names = [tenant.name for tenant in tenants]
         if len(names) != len(set(names)):
             raise ValueError("tenant names must be unique")
@@ -563,6 +567,7 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
 
     tenants = TenantHost(
         registry, runtime_for, limits_for=limits_for,
+        max_active=int(env.get("HANDLER_MAX_ACTIVE_TENANTS", str(DEFAULT_MAX_ACTIVE))),
         idle_seconds=float(env.get("HANDLER_TENANT_IDLE_SECONDS", "600")),
         scan_seconds=float(env.get("HANDLER_TENANT_SCAN_SECONDS", "15")),
         boot_grace_seconds=float(env.get("HANDLER_TENANT_BOOT_GRACE_SECONDS", "120")))
@@ -573,6 +578,7 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
             await registry.setup()
             await registry.import_once(_imported_tenants(args, env, configs, registry))
             validate(await registry.list())
+            await tenants.load()
             tenants.start()  # in the background: the port must bind within Heroku's limit
             yield
         finally:
@@ -736,6 +742,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         memory_tools = MemoryTools(store, settings)
         scheduler = Scheduler(store, default_harness=settings.harness_source("automation"))
         if plan_limits is not None:
+            scheduler.paused = lambda: not plan_limits.current.automations
             async def tell_skipped(schedule, over) -> None:
                 recipients = schedule.notify or ([schedule.created_by] if schedule.created_by else [])
                 await notifier.send(
@@ -744,14 +751,17 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                     f"{over.limit} inputs in its plan this month. It runs again after "
                     f"{over.resets_at.date().isoformat()}.", recipients)
             scheduler.on_skipped = tell_skipped
-        gateway = Gateway(store, GrantPolicy(grants_cfg), emit_event=emit_event)
+        gateway = Gateway(store, GrantPolicy(grants_cfg, plan_limits=plan_limits),
+                          emit_event=emit_event)
         questions = QuestionService(store, emit_event=emit_event, notifier=notifier)
         from .tools.approvals import ApprovalContinuationTools
         from .tools.task_outcomes import TaskOutcomeTools
-        for provider in (memory_tools, AutomationTools(store, scheduler), ThreadTools(store, bus),
-                         ApprovalContinuationTools(store), TaskOutcomeTools(store),
-                         NotifyTools(store, bus, notifier=notifier), QuestionTools(questions)):
+        for provider in (memory_tools, ThreadTools(store, bus), ApprovalContinuationTools(store),
+                         TaskOutcomeTools(store), NotifyTools(store, bus, notifier=notifier),
+                         QuestionTools(questions)):
             gateway.register(provider)
+        if plan_limits is None or plan_limits.current.automations:
+            gateway.register(AutomationTools(store, scheduler))  # not offered on plans without
         tokens = RunTokens()
         mcp_app = create_mcp_app(gateway, tokens)
 
@@ -769,18 +779,21 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         gateway.register(SpreadsheetTools(
             lambda key: config.workspaces_dir / thread_slug(key), artifact_store))
         harnesses: dict = {}
-        try:
-            harnesses["codex"] = CodexHarness(
-                env.get("HANDLER_CODEX_BIN") or codex_binary(),
-                default_model=args.model,
-                default_reasoning_effort=args.reasoning_effort,
-                auth_json=Path(args.codex_auth_json).expanduser() if args.codex_auth_json else None,
-                sandbox=args.codex_sandbox,
-                auth_json_link=args.codex_auth_link,
-                environment=env,
-            )
-        except FileNotFoundError as exc:
-            logger.warning("codex harness off: %s", exc)
+        if plan_limits is not None and not plan_limits.current.allow_codex:
+            settings.only_harness = HarnessName.OPENAI_AGENTS.value
+        else:
+            try:
+                harnesses["codex"] = CodexHarness(
+                    env.get("HANDLER_CODEX_BIN") or codex_binary(),
+                    default_model=args.model,
+                    default_reasoning_effort=args.reasoning_effort,
+                    auth_json=Path(args.codex_auth_json).expanduser() if args.codex_auth_json else None,
+                    sandbox=args.codex_sandbox,
+                    auth_json_link=args.codex_auth_link,
+                    environment=env,
+                )
+            except FileNotFoundError as exc:
+                logger.warning("codex harness off: %s", exc)
         api_key = env.get("OPENAI_API_KEY") or env.get("CODEX_API_KEY")
         if api_key:
             harnesses["openai_agents"] = OpenAIAgentsHarness(
@@ -819,7 +832,11 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                 "user": trusted_user, "device_count": len(trusted_devices)})
         if not args.admin_key:
             logger.warning("no admin key set; only user tokens can authenticate")
-        uploads = UploadStore(data_dir / "uploads")
+        uploads = UploadStore(data_dir / "uploads", limit=(
+            (lambda: plan_limits.current.max_upload_bytes) if plan_limits is not None else None))
+        if plan_limits is not None:
+            register_workspace_limit(config.workspaces_dir,
+                                     lambda: plan_limits.current.max_workspace_bytes)
         app = create_app(store, bus, auth, default_harness=settings.harness_source("chat"),
                          uploads=uploads, instance_name=instance_name)
         app.mount("/mcp", mcp_app)
@@ -863,6 +880,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             app.include_router(crontal_ingest_router(store, webhook_secret,
                                                      harness=settings.harness_source("crontal")))
         app.include_router(ui_manifest_router(integrations, auth))
+        if plan_limits is not None:
+            app.add_middleware(ConsoleGuard, limits=plan_limits)
         if plan_limits is not None and not plan_limits.current.connected_mail:
             @app.post("/api/mailboxes")
             async def mailboxes_not_in_plan(_principal: Principal = Depends(auth.require_admin)):
@@ -882,7 +901,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                     await questions.expire_stale()
                     grants, latest = await settings.get("grants")
                     if latest != version:
-                        gateway.set_policy(GrantPolicy(grants))
+                        gateway.set_policy(GrantPolicy(grants, plan_limits=plan_limits))
                         version = latest
                         logger.info("grants reloaded", extra={"version": latest})
                 except Exception:
@@ -924,7 +943,10 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         app.state.integrations = integrations
         app.state.gateway, app.state.outbox = gateway, outbox
         app.state.lifecycle = SimpleNamespace(dispatcher=dispatcher, store=store, outbox=outbox,
-                                              workspace_sync=workspace_sync, limits=plan_limits)
+                                              workspace_sync=workspace_sync, limits=plan_limits,
+                                              tokens=tokens, bus=bus, uploads=uploads,
+                                              workspaces_dir=config.workspaces_dir,
+                                              scheduler=scheduler)
         app.state.identity_provider = (contributions.identity_provider[1]
                                        if contributions.identity_provider else None)
 
@@ -961,6 +983,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                     await _flush_until(workspace_sync, deadline - loop.time())
 
     finally:
+        unregister_workspace_limit(data_dir / "workspaces")
         await store.close()
 
 
