@@ -58,3 +58,32 @@ enabled `admin` users, for example:
 `Automation run failed and will not retry: Daily digest (automation:daily). HarnessError: …`.
 Retries that are still scheduled notify nobody, and each thread notifies at
 most once per hour (in memory; a restart resets the window).
+
+## Crontal events coming in (`/ingest/crontal`)
+
+Crontal signs each webhook with `X-Crontal-Signature`. There are two body shapes:
+
+| | Per-user note (no `scope`) | Merchant-wide event (`"scope": "merchant"`) |
+|---|---|---|
+| Body | `id`, `recipient_user_id`, `type`, `entity_type`, `entity_id`, `data`, `created_at` | The same, with `"recipient_user_id": null` and `id` the merchant event id |
+| Idempotency key | `crontal:<id>` | `crontal:merchant:<id>`, never colliding with a note id |
+| Thread | `crontal:<entity_type>:<entity_id>`, else `crontal:notification:<id>` | The same entity thread, else `crontal:notification:merchant-<id>` |
+| Owner and acting user | The recipient | None: a shared merchant thread |
+| Metered inputs | One per recipient | **One** for the whole merchant |
+
+Use the merchant-wide shape for anything Crontal sends to all of a merchant's users
+(RFQ and bid events), so five users mean one input, not five. Any other `scope`
+value is refused with a 422. Bodies without `scope` behave exactly as before, so old
+and new Crontal both work.
+
+A thread with no owner behaves like any shared thread:
+
+- Every merchant user sees it, and its tasks, approvals and questions, through the
+  proxy (`can_see_thread` restricts only `chat:` threads).
+- Its runs act as the instance's AI identity alone. No `X-Crontal-On-Behalf-Of` is
+  sent, as for all background threads.
+- Failure notices go to the instance admins only.
+
+A thread created by a per-user note keeps that first owner; later merchant-wide events
+join it unchanged. Over a plan's limit, either shape is held with a 2xx
+(`plan-limits.md`).

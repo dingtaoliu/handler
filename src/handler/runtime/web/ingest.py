@@ -17,6 +17,7 @@ from ..tenancy.limits import OverLimit
 from ..types import Event, Lane, ThreadSpec, ThreadType
 
 logger = logging.getLogger("handler.runtime.ingest")
+MERCHANT_SCOPE = "merchant"  # one event for all of a merchant's users
 
 MAX_SKEW_SECONDS = 300
 
@@ -60,23 +61,34 @@ def crontal_ingest_router(
         try:
             note = json.loads(body)
             note_id = str(note["id"])
-            recipient = str(note["recipient_user_id"])
-        except (ValueError, KeyError, TypeError):
+            merchant_wide = note.get("scope") == MERCHANT_SCOPE
+            if note.get("scope") is not None and not merchant_wide:
+                raise ValueError(f"unknown scope {note['scope']!r}")
+            # A merchant-wide event is one input for the whole merchant, owned by no one
+            # (shared threads are visible to every user); a note is one per recipient.
+            recipient = None if merchant_wide else str(note["recipient_user_id"])
+        except (ValueError, KeyError, TypeError, AttributeError):
             raise HTTPException(status_code=422, detail="invalid notification body")
         entity_type, entity_id = note.get("entity_type"), note.get("entity_id")
-        key = (f"crontal:{entity_type}:{entity_id}" if entity_type and entity_id is not None
-               else f"crontal:notification:{note_id}")
+        if entity_type and entity_id is not None:
+            key = f"crontal:{entity_type}:{entity_id}"
+        else:  # merchant event ids and note ids are separate sequences: keep them apart
+            key = f"crontal:notification:{'merchant-' if merchant_wide else ''}{note_id}"
         harness_name = harness if isinstance(harness, str) else await harness()
+        payload = {k: note.get(k) for k in ("id", "type", "entity_type", "entity_id",
+                                             "data", "created_at")}
+        if merchant_wide:
+            payload["scope"] = MERCHANT_SCOPE
         event = Event(
-            type="crontal.notification", source="crontal",
-            payload={k: note.get(k) for k in ("id", "type", "entity_type", "entity_id",
-                                               "data", "created_at")},
-            idempotency_key=f"crontal:{note_id}", thread_key=key, user_id=recipient,
+            type="crontal.notification", source="crontal", payload=payload,
+            idempotency_key=f"crontal:merchant:{note_id}" if merchant_wide else f"crontal:{note_id}",
+            thread_key=key, user_id=recipient,
         )
         spec = ThreadSpec(key=key, type=ThreadType.CRONTAL, lane=Lane.BACKGROUND,
                           owner_user_id=recipient, harness=harness_name)
         new = await queue.put(event, spec)
         logger.info("crontal notification", extra={"notification_id": note_id,
+                                                   "scope": MERCHANT_SCOPE if merchant_wide else "user",
                                                    "thread_key": key, "duplicate": not new})
         held = {"held": True} if isinstance(new, OverLimit) else {}
         return JSONResponse({"thread_key": key, "duplicate": not new, **held},
