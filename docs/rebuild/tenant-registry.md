@@ -71,8 +71,7 @@ which happens as soon as it is quiescent.
 
 A tenant runs only while it has a reason to. It **activates** on an HTTP request,
 a notification for its schema, `next_wake_at` being reached, or at boot if
-`active_since` is set. A tenant with `mailbox`, `gmail` or `google` in
-`integrations` is pinned active.
+`active_since` is set. A tenant with an enabled connected mailbox is pinned active (see above).
 
 It **deactivates** after the idle period when it has no in-flight run, open request
 or SSE stream, due event or due outbox row, and its workspaces flushed cleanly.
@@ -85,6 +84,37 @@ have two runtimes. A request or notification arriving during a stop waits, then
 starts a fresh runtime. Locks are per tenant, so a slow stop delays no one else.
 Activations run at most four at a time. A clean shutdown leaves `active_since` set,
 so a restart resumes those tenants.
+
+## What may wake a sleeping tenant
+
+Tenant names like `m123` are guessable, so a request alone does not start a tenant:
+
+- `/i/<name>/healthz` (and `/healthz` for `main`) is answered by the host without
+  waking it.
+- The sign-in page and app shell (`/`, `/app`, `/app/static/*`, `/login`) are served by
+  the host from the package; their data calls carry credentials. On a plan without
+  the console they are refused (`plan-limits.md`).
+- Anything else wakes the tenant only with a credential that checks out:
+  - the instance admin key;
+  - a user token (`Authorization` or SSE `?access_token=`) or a sign-in ticket, found
+    by hash in the tenant's own table;
+  - a valid email or Crontal webhook signature, or a valid OAuth `state`.
+
+  Otherwise it gets a 401 and nothing starts. Failed credential lookups are remembered
+  for a minute and run at most four at a time.
+- Requests without a credential do not count as activity, so a probe can't keep a
+  tenant awake.
+- Tenant names are held in memory: an unknown name costs no query. The list is
+  reloaded once a minute, so a tenant created by another process is known within a
+  minute.
+- `HANDLER_MAX_ACTIVE_TENANTS` (default 40) caps running tenants. A start beyond it
+  first stops the quiescent, least recently used, unpinned tenant. If none can stop,
+  requests get 503, signed email is spooled, and a durable retry is recorded.
+- A tenant is pinned awake only while it has an enabled connected mailbox, which its
+  poller polls. Having the `mailbox` integration alone does not pin it. Gmail has no
+  poller and never pins. The host checks this at boot, and once per scan for running
+  tenants, so a tenant pins when its first mailbox is added and unpins when the last
+  is removed or disabled.
 
 ## How queued work on a sleeping tenant is always found
 
