@@ -271,5 +271,7 @@ Settled by the owner on November 8, 2026.
 | # | Decision | Outcome | Needed by |
 | --- | --- | --- | --- |
 | 1 | Free limit amount, period and scope | 50 inputs per month "for now", so it must be configurable. Per merchant and per calendar month is this document's proposed scope; the owner specified only the amount and period | Phase 3 |
-| 2 | Channels on the free plan | Chat, Crontal notifications and the forwarding intake address. Connected mailboxes and Gmail stay paid | Phase 3 |
+| 2 | Channels on the free plan | Revised November 9: chat and Crontal threads only. No email of any kind (forwarding address, connected mailboxes, Gmail) and no automations; both start when a merchant moves to a paid tier | Phase 3 |
+| 2a | Email on free | Not backlogged: mail to a free tenant is refused and not stored, and an upgrade processes only mail arriving after it. The never-lose-mail rule applies wherever email is a channel | Phase 3 |
+| 2b | Free model | `gpt-6.1-terra`, fixed | Phase 3 |
 | 3 | Tenant target for the next year | Under about 100: schema per tenant, as designed here | Phase 2 |
