@@ -2,6 +2,20 @@
 
 ## Active: BSS sequential improvements
 
+**Latest November 12:** Crontal **v124** (`dab8c97`, image `4bc02f43ac46`,
+741,381,019 bytes), backup **b039**, migration **z1coverage20261112**, rollback
+Crontal **v123**. Handler remains **v58**. Spreadsheet row-coverage enforcement,
+partial confirmation/quote gates and confirmation attribution are live; historical
+RFQ562/quote232 are unchanged. **684 backend tests / 22 subtests**, frontend/i18n,
+PostgreSQL migration and live health/ownership/isolation/proxy checks passed.
+The tubular catalogue/preflight follow-up shipped in Crontal v123. Two real
+Dovecot tests passed (default Handler suite now 1,261 passed / 4 skipped).
+The refreshed cost audit has a real cohort and does not demonstrate overall
+savings; a new hourly inquiry-filing automation is the next measured target.
+See the current [BSS takeover notes](bss-improvement-handoff.md) and
+[updated cost audit](../audits/bss-cost-followup-2026-11-09.md). Release history below
+is retained as historical evidence.
+
 The owner authorized sequential work on the seven recent-chat findings, with
 durable takeover notes. Start with [bss-improvement-handoff.md](bss-improvement-handoff.md)
 for current progress and [the design](bss-improvement-design-2026-11-08.md) for
