@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..observability.ledger import RunAttribution, ToolCallUsage, UsageRecord
 
@@ -167,6 +167,8 @@ class Store(EventQueue, Protocol):
     async def add_usage_record(self, record: UsageRecord) -> bool: ...
     async def upsert_tool_call_usage(self, call: ToolCallUsage) -> None: ...
     async def get_tool_call_usage(self, run_id: str, tool_call_id: str) -> ToolCallUsage | None: ...
+    async def automation_metrics(self, since: datetime | None = None) -> list[dict[str, Any]]: ...
+
     async def list_usage_records(
         self, since: datetime, until: datetime | None = None, *,
         thread_key: str | None = None, attributed_user_id: str | None = None,

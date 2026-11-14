@@ -67,6 +67,7 @@ from .types import Event, Lane, ThreadSpec
 from .uploads import UploadStore
 from .web.admin_api import admin_router
 from .web.usage_api import usage_router
+from .web.automation_dashboard import automation_dashboard_router
 from .web.app import create_app
 from .web.email_ingest import email_ingest_router
 from .web.google_api import google_router
@@ -628,6 +629,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         app.include_router(questions_router(questions, store, auth))
         app.include_router(tasks_router(store, bus, auth))
         app.include_router(usage_router(store, auth))
+        app.include_router(automation_dashboard_router(store, auth, settings))
         store.on_routed = lambda event, spec: publish_queued(bus, event, spec)
         async def effective_tool_names(ctx):
             return {spec.name for spec in await gateway.specs_for(ctx)}
