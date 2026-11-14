@@ -11,10 +11,10 @@ remaining quota. Do not create background jobs merely to keep this work running.
 - The authorized initial sequence and the tubular/coverage follow-ups are
   delivered. Historical repair, page-batched document continuation and further
   measured cost optimization remain follow-ups; see the current notes below.
-- Handler **v58**, code `b0a7971`, image `c72d79a1a0fa` (2,151,469,157 bytes).
-- Crontal **v124**, runtime `dab8c97`, image `4bc02f43ac46` (741,381,019 bytes).
-- Latest backup **b039**; current Crontal rollback **v123**, Handler stays **v58**. Protected config
-  snapshots and read-only verification scripts are in `/tmp/bss-coverage-release/`
+- Handler **v59**, runtime `8ca3d29`, image `ef3e1ff02d4e` (2,151,476,534 bytes).
+- Crontal **v125**, runtime `63a3fa9`, image `9423d0c63689` (741,395,931 bytes).
+- Latest backup **b040**; rollback Crontal **v124** / Handler **v58**. Protected config
+  snapshots and read-only verification scripts are in `/tmp/automation-dashboard-release/`
   (directory mode 0700, configs 0600). Never commit/print those configs.
 - Handler repo `/Users/dannyliu/dev/repos/handler`, branch `main`; Crontal repo
   `/Users/dannyliu/dev/repos/hephaestus`, branch `main`. Runtime/frontend commits
@@ -37,7 +37,7 @@ remaining quota. Do not create background jobs merely to keep this work running.
 ## Verification/deployment
 
 Handler tests: `PYTHONPATH=src .venv/bin/python -m pytest tests/runtime -q -p no:cacheprovider`.
-Current default **1,261 passed, 4 skipped**; two new opt-in real Dovecot tests passed separately. Run focused tests as changes are made and
+Current default **1,267 passed, 4 skipped**; two new opt-in real Dovecot tests passed separately. Run focused tests as changes are made and
 the complete suite before a release. New modules should pass Pyright using
 `--pythonpath .venv/bin/python`; the native harness already has unrelated errors.
 Commit/push finished work and follow `HANDOFF.md` deployment instructions.
@@ -54,7 +54,7 @@ dependencies: record findings and reproduce read-only queries as needed.
 Latest release health checks use `/i/{main,bss,yeup}/healthz` and authenticated
 `/api/settings/threads`; unauthenticated settings must return 401. Use
 `heroku releases` to inspect version; avoid `releases:info`, which can expose
-configuration secrets. Backup before deployment. Latest backup **b039**; current Crontal rollback **v123**, Handler unchanged **v58**. Excel/Sheets interactive imports and browser-click testing have
+configuration secrets. Backup before deployment. Latest backup **b040**; rollback Crontal **v124** / Handler **v58**. Excel/Sheets interactive imports and browser-click testing have
 not been run; API isolation and compatibility serialization were tested.
 
 ## Final rollout evidence (November 9)
@@ -118,6 +118,24 @@ not been run; API isolation and compatibility serialization were tested.
 - HTTP202 audit found only existing received-RFQ create/retry business jobs; their
   resource IDs already have a task-outcome adapter. Legacy MCP 202 is transport
   acknowledgement. No extra poller or job adapter was added.
+
+## November 13 automation dashboard
+
+The owner requested a dashboard listing every automation and runtime counts/cost.
+Delivered as Handler **v59** + Crontal **v125**, backup **b040**, no migration or
+configuration change. The signed-in company's `/app/automations` lists active,
+paused, finished and deleted schedules, effective model, all recorded run counts,
+failures, last/next run, tokens and cumulative estimated model cost. Default is
+all recorded time; date/status/search filters and mobile cards are available.
+Missing prices are explicit; legacy run totals and request-ledger fallback are
+not added together. It is read-only and never starts an agent run.
+
+Live totals reconcile against independent SQL on all three instances; user 1/2
+proxy checks and auth/isolation passed. Schedule definitions are unchanged.
+**1,267 Handler tests / 4 skipped**, **685 backend tests / 22 subtests**, 34 frontend
+tests, build/i18n and synthetic Chromium desktop/mobile checks passed. New router
+Pyright clean; the usage mixin's three existing errors match the baseline. Full
+notes: sibling Crontal `docs/automation-dashboard-2026-11-13.md`.
 
 ## Follow-up work for a future agent
 

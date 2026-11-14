@@ -455,6 +455,18 @@ def _compaction_rejected(exc: BaseException) -> bool:
             and ("context_management" in message or "compaction" in message))
 
 
+def _cache_setting_rejected(exc: BaseException) -> str | None:
+    """Which prompt-cache parameter a 400 refuses, if any (e.g. retention on a model
+    without extended caching). Caching knobs must never fail a run."""
+    if not isinstance(exc, openai.BadRequestError):
+        return None
+    message = str(exc).lower()
+    for param in ("prompt_cache_retention", "prompt_cache_key"):
+        if param in message:
+            return param
+    return None
+
+
 async def repair_conversation(client: Any, conversation_id: str) -> int:
     """Answer every tool call in the Conversation that has no output.
 
@@ -511,6 +523,9 @@ class OpenAIAgentsHarness:
         threshold = DEFAULT_COMPACT_THRESHOLD if compact_threshold is None else compact_threshold
         # None when off; a model that refuses compaction turns it off for the process.
         self.compact_threshold: int | None = threshold if threshold > 0 else None
+        # Prompt-cache parameters a model refused (model -> params); the
+        # process stops sending them for that model.
+        self._refused_cache_params: dict[str, set[str]] = {}
         self._runs: dict[str, Any] = {}
 
     async def defaults(self) -> dict[str, str | None]:
@@ -531,6 +546,10 @@ class OpenAIAgentsHarness:
                bounded_tool: Any = None) -> Agent:
         model = req.model or self.default_model
         effort = req.reasoning_effort or self.default_reasoning_effort
+        refused = self._refused_cache_params.get(str(model), set())
+        cache_key = req.prompt_cache_key if "prompt_cache_key" not in refused else None
+        retention = (req.prompt_cache_retention
+                     if "prompt_cache_retention" not in refused else None)
         return Agent(
             name="handler",
             instructions=req.instructions or None,
@@ -543,6 +562,12 @@ class OpenAIAgentsHarness:
                 context_management=([{"type": "compaction",
                                       "compact_threshold": self.compact_threshold}]
                                     if self.compact_threshold else None),
+                # ModelSettings has no native prompt_cache_key field. A key in
+                # extra_args is forwarded to responses.create(), and its presence
+                # makes the SDK's PromptCacheKeyResolver skip generating its own
+                # per-conversation key (which no other thread would ever share).
+                extra_args={"prompt_cache_key": cache_key} if cache_key else None,
+                prompt_cache_retention=retention,  # type: ignore[arg-type]
             ),
             tools=[WebSearchTool(), *workspace_tools(req.workspace, client=self.client, home=req.home),
                    *([bounded_tool] if bounded_tool else [])],
@@ -623,7 +648,7 @@ class OpenAIAgentsHarness:
                         # anything happened (so the input was not stored either).
                         if attempt == 2 or progressed or not self._recover(exc, created):
                             raise
-                        if not await self._recover_conversation(exc, session_id):
+                        if not await self._recover_conversation(exc, session_id, model):
                             raise
                         reported = True
                         for usage_event in meter.fallback(result):
@@ -696,12 +721,24 @@ class OpenAIAgentsHarness:
         """Whether a refused request can be fixed and sent again."""
         if self.compact_threshold and _compaction_rejected(exc):
             return True
+        if _cache_setting_rejected(exc):
+            return True
         return missing_tool_output(exc) and not created
 
-    async def _recover_conversation(self, exc: BaseException, session_id: str) -> bool:
+    async def _recover_conversation(self, exc: BaseException, session_id: str,
+                                    model: str | None = None) -> bool:
         if self.compact_threshold and _compaction_rejected(exc):
             logger.warning("compaction refused; turning it off", extra={"error": str(exc)[:300]})
             self.compact_threshold = None
+            return True
+        if param := _cache_setting_rejected(exc):
+            refused = self._refused_cache_params.setdefault(str(model), set())
+            if param in refused:
+                return False  # already omitted, so something else is wrong
+            logger.warning("prompt cache setting refused; retrying without it",
+                           extra={"param": param, "model": str(model),
+                                  "error": str(exc)[:300]})
+            refused.add(param)
             return True
         return await repair_conversation(self.client, session_id) > 0
 

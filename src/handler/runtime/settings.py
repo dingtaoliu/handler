@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -217,6 +217,15 @@ class EfficiencySettings(Section):
     bounded_model_tasks: bool = Field(
         True, description="Let the main agent use a small, tool-free model for bounded "
         "classification, extraction and drafting; it remains responsible for verification.")
+    stable_prompt_cache_key: bool = Field(
+        True, description="Send an OpenAI prompt cache key derived from the stable part of "
+        "the request (tool names, stable instructions, model), so new threads, chats and "
+        "scheduled firings with the same prefix reuse its cache. Off: the SDK derives a "
+        "key per conversation, so a new conversation never reuses another's cache.")
+    prompt_cache_retention: Literal["24h", "in_memory"] = Field(
+        "24h", description="How long OpenAI keeps cached prefixes. 24h requests extended "
+        "retention; in_memory omits the parameter, leaving the API's default. A model "
+        "that refuses it is retried without it.")
     classification_model: ModelName = ModelName.GPT_6_LUNA
     drafting_model: ModelName = ModelName.GPT_6_1_TERRA
     route_catalog: bool = Field(

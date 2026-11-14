@@ -17,7 +17,7 @@ import re
 import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import AbstractSet, Any, Awaitable, Callable
 
 from .bus import BusMessage, RunEventBus
 from .context import RunContext, current_run, reset_current_run, set_current_run
@@ -34,14 +34,17 @@ from .harness.base import (
 )
 from .harness.codex import tool_input as codex_tool_input
 from .images import MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, downscale, sniff_file
-from .instructions import build_instructions
+from .instructions import build_instruction_components
 from .mail.intake import render_email_event, resolve_act_as
 from .memory import MemoryTools
 from .observability.memory import process_memory
 from .observability.pricing import PriceTable
+from .observability.prompt_tokens import (
+    prompt_cache_key, render_components, stable_prefix_text,
+)
 from .observability.attribution import capture_attribution
 from .observability.recorder import RawSink, StepRecorder
-from .settings import SettingsService
+from .settings import EfficiencySettings, SettingsService
 from .tasks import publish_task
 from .task_outcomes import bind_run_task, finish_task_run
 from .store.base import Store
@@ -360,6 +363,8 @@ class RunPlan:
     bounded_task_models: dict[str, str] = field(default_factory=dict)
     max_turns: int | None = None
     max_tokens: int | None = None
+    prompt_cache_key: str | None = None
+    prompt_cache_retention: str | None = None
 
 
 class _RunRecorder(StepRecorder):
@@ -655,6 +660,8 @@ class RunExecutor:
                 repair_session=repair and not plan.fresh_session,
                 fresh_session=plan.fresh_session,
                 bounded_task_models=plan.bounded_task_models,
+                prompt_cache_key=plan.prompt_cache_key,
+                prompt_cache_retention=plan.prompt_cache_retention,
             )
             try:
                 final_text = await self._stream(
@@ -933,6 +940,8 @@ class RunExecutor:
         if self.settings is None:
             plan.model = override_model or plan.model
             plan.reasoning_effort = override_effort or plan.reasoning_effort
+            _plan_prompt_cache(plan, EfficiencySettings().model_dump(), plan.instructions,
+                               tools=self.config.available_tools, harness=thread.harness)
             return plan
         threads, _ = await self.settings.get("threads")
         per_type = threads.get(str(thread.type), {}) or {}
@@ -959,21 +968,25 @@ class RunExecutor:
                 "extract": efficiency["drafting_model"],
                 "draft": efficiency["drafting_model"],
             }
+        available_tools = self.config.available_tools
+        stable_text = plan.instructions
         if self.memory_tools is not None:
-            available_tools = self.config.available_tools
             if self.config.available_tools_for is not None:
                 ctx = current_run() or RunContext(
                     run_id="", thread_key=thread.key, user_id=thread.owner_user_id,
                     acting_as=await self._acting_as(thread))
                 available_tools = await self.config.available_tools_for(ctx)
             speaker = thread.owner_user_id if str(thread.type) == "chat" else None
-            built = await build_instructions(self.settings, self.memory_tools,
-                                             speaker=speaker, thread_type=thread.type,
-                                             crontal_identity=self.crontal_identity,
-                                             crontal_catalog=self.crontal_catalog,
-                                             thread_key=thread.key, events=events,
-                                             available_tools=available_tools, harness=thread.harness)
+            components = await build_instruction_components(
+                self.settings, self.memory_tools, speaker=speaker, thread_type=thread.type,
+                crontal_identity=self.crontal_identity, crontal_catalog=self.crontal_catalog,
+                thread_key=thread.key, events=events,
+                available_tools=available_tools, harness=thread.harness)
+            built = render_components(components)
+            stable_text = stable_prefix_text(components)
             plan.instructions = "\n\n".join(p for p in (built, self.config.instructions) if p)
+        _plan_prompt_cache(plan, efficiency, stable_text, tools=available_tools,
+                           harness=thread.harness)
         return plan
 
     async def _fail(self, lease: Lease, thread: Thread, run: Run, recorder: StepRecorder,
@@ -1020,6 +1033,19 @@ class RunExecutor:
 
     def _publish(self, thread_key: str, run_id: str | None, type_: str, data: dict) -> None:
         self.bus.publish(BusMessage(thread_key=thread_key, run_id=run_id, type=type_, data=data))
+
+
+def _plan_prompt_cache(plan: RunPlan, efficiency: dict, stable_text: str, *,
+                       tools: AbstractSet[str] | None, harness: str | None) -> None:
+    """Set the plan's prompt cache key (from the stable prefix only) and retention."""
+    if efficiency.get("stable_prompt_cache_key", True):
+        if tools is not None and plan.bounded_task_models:
+            # The harness adds this function tool; its schema is part of the prefix.
+            tools = {*tools, "bounded_model_task"}
+        plan.prompt_cache_key = prompt_cache_key(stable_text, tools=tools,
+                                                 model=plan.model, harness=harness)
+    retention = efficiency.get("prompt_cache_retention", "24h")
+    plan.prompt_cache_retention = retention if retention != "in_memory" else None
 
 
 def _preview(data: dict, limit: int = 2000) -> dict:

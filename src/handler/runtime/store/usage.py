@@ -111,6 +111,58 @@ class UsageMixin:
         rows = await self._usage_query("SELECT * FROM tool_call_usage WHERE run_id=:run_id AND tool_call_id=:tool_call_id", {"run_id": run_id, "tool_call_id": tool_call_id}, fetch=True)
         return _decode(ToolCallUsage, rows[0]) if rows else None
 
+    async def automation_metrics(self, since: datetime | None = None) -> list[dict[str, Any]]:
+        """Aggregate every recorded run in SQL; never cap/scan a thread history.
+
+        Finished run totals include legacy usage. Only fall back to request-ledger
+        costs when a run has no total; adding both would double count spending.
+        """
+        params = {}
+        where = "t.type='automation'"
+        if since is not None:
+            where += " AND r.started_at>=:since"
+            params["since"] = since if self._usage_pg else since.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+        def tokens(alias, key):
+            value = f"{alias}.usage->>'{key}'" if self._usage_pg else f"json_extract({alias}.usage, '$.{key}')"
+            return f"CAST(COALESCE({value}, '0') AS BIGINT)"
+
+        query = f"""
+        WITH selected_runs AS (
+            SELECT r.*, t.harness AS thread_harness, t.model AS thread_model
+            FROM runs r JOIN threads t ON t.key=r.thread_key WHERE {where}
+        ), requests AS (
+            SELECT u.run_id, COUNT(*) AS requests, SUM(u.cost_usd) AS cost,
+                   SUM(CASE WHEN u.cost_usd IS NULL THEN 1 ELSE 0 END) AS unpriced,
+                   SUM({tokens('u', 'input_tokens')}) AS input_tokens,
+                   SUM({tokens('u', 'output_tokens')}) AS output_tokens
+            FROM usage_records u JOIN selected_runs r ON r.id=u.run_id
+            WHERE u.record_kind='model_request' GROUP BY u.run_id
+        ), ranked AS (
+            SELECT r.*, ROW_NUMBER() OVER (PARTITION BY thread_key ORDER BY started_at DESC, id DESC) AS position
+            FROM selected_runs r
+        ), totals AS (
+            SELECT r.thread_key, COUNT(*) AS runs,
+                SUM(CASE WHEN r.status='completed' THEN 1 ELSE 0 END) AS completed,
+                SUM(CASE WHEN r.status IN ('failed','abandoned') THEN 1 ELSE 0 END) AS failed,
+                SUM(CASE WHEN r.status='running' THEN 1 ELSE 0 END) AS running,
+                SUM(CASE WHEN r.status='cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                SUM(COALESCE(r.cost_usd, q.cost, 0)) AS known_cost_usd,
+                SUM(CASE WHEN r.cost_usd IS NULL AND (COALESCE(q.requests,0)=0 OR q.unpriced>0) THEN 1 ELSE 0 END) AS unpriced_runs,
+                SUM(COALESCE(q.requests,0)) AS recorded_model_requests,
+                SUM(CASE WHEN r.status='running' THEN COALESCE(q.input_tokens,0) ELSE {tokens('r', 'input_tokens')} END) AS input_tokens,
+                SUM(CASE WHEN r.status='running' THEN COALESCE(q.output_tokens,0) ELSE {tokens('r', 'output_tokens')} END) AS output_tokens,
+                MIN(r.started_at) AS first_run_at, MAX(r.started_at) AS last_run_at
+            FROM selected_runs r LEFT JOIN requests q ON q.run_id=r.id GROUP BY r.thread_key
+        )
+        SELECT a.*, r.status AS last_run_status, r.model AS last_run_model,
+               r.finished_at AS last_finished_at, r.thread_harness, r.thread_model
+        FROM totals a JOIN ranked r ON a.thread_key=r.thread_key AND r.position=1
+        ORDER BY a.known_cost_usd DESC, a.thread_key
+        """
+        rows = await self._usage_query(query, params, fetch=True)
+        return [dict(row) for row in rows]
+
     async def _usage_list(self, table, cls, since, until, thread_key, attributed_user_id, model, tool_name, run_id, limit, offset):
         date = "started_at" if cls is ToolCallUsage else "occurred_at"
         def time_value(value):

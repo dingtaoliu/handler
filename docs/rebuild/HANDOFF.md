@@ -2,6 +2,23 @@
 
 ## Active: BSS sequential improvements
 
+**Latest November 13: automation dashboard shipped.** Handler **v59**
+(`8ca3d29`, image `ef3e1ff02d4e`, 2,151,476,534 bytes), Crontal **v125**
+(`63a3fa9`, image `9423d0c63689`, 741,395,931 bytes), backup **b040**.
+No schema/config changes; Alembic remains **z1coverage20261112**. Rollbacks are
+Handler **v58** / Crontal **v124**. `/app/automations` appears in Crontal's sidebar
+for Handler users: all schedules plus retained deleted history, current model,
+run/failure counts, last/next run, tokens and cumulative estimated cost. SQL
+aggregation avoids history caps and run/request double counting; unknown prices
+stay marked. Read-only queries refresh every 30 seconds while visible.
+**1,267 Handler tests / 4 skipped**, **685 Crontal tests / 22 subtests**, 34
+frontend tests, build/i18n and synthetic desktop/mobile browser checks passed.
+Live instance health/auth, both user proxies, schedule isolation and independent
+SQL totals reconciled; schedule definitions remain unchanged. Full contract and
+release evidence: sibling Crontal `docs/automation-dashboard-2026-11-13.md`.
+Current read-only verification scripts/config snapshots are protected under
+`/tmp/automation-dashboard-release/`. Older release notes below are historical.
+
 **Latest November 12:** Crontal **v124** (`dab8c97`, image `4bc02f43ac46`,
 741,381,019 bytes), backup **b039**, migration **z1coverage20261112**, rollback
 Crontal **v123**. Handler remains **v58**. Spreadsheet row-coverage enforcement,

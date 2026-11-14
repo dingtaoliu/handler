@@ -525,3 +525,83 @@ async def test_turn_limit_error_without_a_plan_limit_is_still_a_failure(tmp_path
     harness = oa.OpenAIAgentsHarness("key", client=FakeClient())
     with pytest.raises(HarnessError):
         [e async for e in harness.run(_req(tmp_path))]
+
+
+async def test_stable_prompt_cache_key_and_retention_reach_the_request(tmp_path, runner):
+    from agents.run_internal.prompt_cache_key import (
+        PromptCacheKeyResolver, model_settings_with_prompt_cache_key,
+    )
+
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
+    await _collect(harness, _req(tmp_path, prompt_cache_key="handler:abc",
+                                 prompt_cache_retention="24h"))
+    settings = runner.calls[0]["agent"].model_settings
+    assert settings.extra_args == {"prompt_cache_key": "handler:abc"}
+    assert settings.prompt_cache_retention == "24h"
+    # Against the official endpoint (where the SDK would otherwise generate a
+    # per-conversation key), a caller-supplied key makes the resolver opt out.
+    agent = oa.OpenAIAgentsHarness("k")._agent(
+        _req(tmp_path, prompt_cache_key="handler:abc", prompt_cache_retention="24h"), [])
+    assert agent.model._supports_default_prompt_cache_key()
+    assert PromptCacheKeyResolver().resolve(
+        agent.model_settings, model=agent.model, conversation_id="conv_1",
+        session=None, group_id=None) is None
+    assert model_settings_with_prompt_cache_key(agent.model_settings, "x") is agent.model_settings
+    kwargs = agent.model._build_response_create_kwargs(
+        system_instructions=None, input="hi", model_settings=agent.model_settings, tools=[],
+        output_schema=None, handoffs=[], conversation_id="conv_1", stream=True)
+    assert kwargs["prompt_cache_key"] == "handler:abc"
+    assert kwargs["prompt_cache_retention"] == "24h"
+
+
+async def test_without_a_key_the_sdk_default_applies(tmp_path):
+    from agents.run_internal.prompt_cache_key import PromptCacheKeyResolver
+
+    agent = oa.OpenAIAgentsHarness("k")._agent(_req(tmp_path), [])
+    assert agent.model_settings.extra_args is None
+    assert agent.model_settings.prompt_cache_retention is None
+    generated = PromptCacheKeyResolver().resolve(
+        agent.model_settings, model=agent.model, conversation_id="conv_1",
+        session=None, group_id=None)
+    assert generated and generated.startswith("agents-sdk:")
+    kwargs = agent.model._build_response_create_kwargs(
+        system_instructions=None, input="hi", model_settings=agent.model_settings, tools=[],
+        output_schema=None, handoffs=[], conversation_id="conv_1", stream=True)
+    assert "prompt_cache_key" not in kwargs
+    assert kwargs["prompt_cache_retention"] is openai.omit
+
+
+async def test_refused_cache_retention_is_dropped_and_retried(tmp_path, runner, monkeypatch):
+    _sequence(runner, monkeypatch, [
+        FakeStream([], error=_api_error(
+            openai.BadRequestError,
+            "Unsupported parameter: 'prompt_cache_retention' is not supported with this model.",
+            400)),
+        FakeStream(_events())])
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient(), compact_threshold=150_000)
+    req = _req(tmp_path, session_id="conv_9", prompt_cache_key="handler:abc",
+               prompt_cache_retention="24h")
+    events = await _collect(harness, req)
+    assert events[-1].kind is RunEventKind.FINAL
+    first, second = (c["agent"].model_settings for c in runner.calls)
+    assert first.prompt_cache_retention == "24h"
+    assert second.prompt_cache_retention is None
+    assert second.extra_args == {"prompt_cache_key": "handler:abc"}
+    assert second.context_management  # other settings are untouched
+    # Remembered for that model only: later runs of it omit retention.
+    assert harness._agent(req, []).model_settings.prompt_cache_retention is None
+    assert harness._agent(_req(tmp_path, model="other", prompt_cache_retention="24h"),
+                          []).model_settings.prompt_cache_retention == "24h"
+
+
+async def test_cache_retention_refused_twice_fails_without_looping(tmp_path, runner, monkeypatch):
+    refused = "Unsupported parameter: 'prompt_cache_retention'."
+    _sequence(runner, monkeypatch, [
+        FakeStream([], error=_api_error(openai.BadRequestError, refused, 400)),
+        FakeStream([], error=_api_error(openai.BadRequestError, refused, 400)),
+        FakeStream(_events())])
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
+    with pytest.raises(HarnessError):
+        await _collect(harness, _req(tmp_path, session_id="conv_9",
+                                     prompt_cache_retention="24h"))
+    assert len(runner.calls) == 2
