@@ -511,6 +511,10 @@ def _error(exc: BaseException, session_id: str | None) -> HarnessError:
 
 
 class OpenAIAgentsHarness:
+    # Reports usage per model call and stops at a turn boundary when a plan's token
+    # limit is reached (see run()); other harnesses report usage only at the end.
+    enforces_token_limit = True
+
     name = "openai_agents"
 
     def __init__(self, api_key: str, *, default_model: str | None = None,

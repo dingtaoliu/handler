@@ -28,7 +28,6 @@ from .harness.base import (
     McpServerSpec,
     RunEvent,
     RunEventKind,
-    RUN_LIMIT_NOTICE,
     RunLimits,
     RunRequest,
 )
@@ -798,13 +797,6 @@ class RunExecutor:
                     await recorder.on_event(ev)
                     self._publish(thread.key, run.id, "run_event",
                                   {"kind": str(ev.kind), "data": _preview(ev.data)})
-                    if self._over_token_limit(harness, req, recorder):
-                        # The native harness stops itself at a turn boundary.
-                        await harness.interrupt(run.id)
-                        transcript.append(Message(thread.key, Role.ASSISTANT,
-                                                  [{"type": "text", "text": RUN_LIMIT_NOTICE}],
-                                                  run_id=run.id))
-                        return RUN_LIMIT_NOTICE
                     if ev.kind is RunEventKind.SESSION:
                         sid = ev.data.get("session_id")
                         if sid and sid != thread.session_id:
@@ -813,6 +805,7 @@ class RunExecutor:
                             thread.session_id = sid
                     elif ev.kind is RunEventKind.FINAL:
                         final_text = ev.data.get("text", "")
+                        self._note_overspend(harness, req, recorder)
                     msg = transcript_message(thread.key, run.id, ev, tool_inputs)
                     if msg is not None:
                         transcript.append(msg)
@@ -909,12 +902,20 @@ class RunExecutor:
         thread.harness, thread.session_id = NATIVE_HARNESS, None  # its session was Codex's
 
     @staticmethod
-    def _over_token_limit(harness: Harness, req: RunRequest, recorder: _RunRecorder) -> bool:
+    def _note_overspend(harness: Harness, req: RunRequest, recorder: _RunRecorder) -> None:
+        """Log a run that went past its plan's token limit on a harness that can't stop.
+
+        Such a harness (Codex) reports usage only once the turn is over, so the answer
+        is complete: it is kept as it is, and the overspend is on record for tuning.
+        """
         limit = req.limits.max_tokens
-        if limit is None or harness.name == "openai_agents":
-            return False
+        if limit is None or getattr(harness, "enforces_token_limit", False):
+            return
         usage = recorder.totals()[0]
-        return usage.input_tokens + usage.output_tokens >= limit
+        spent = usage.input_tokens + usage.output_tokens
+        if spent > limit:
+            logger.warning("run went past its plan's token limit", extra={
+                "harness": harness.name, "tokens": spent, "limit": limit})
 
     def _apply_plan_limits(self, plan: "RunPlan") -> None:
         """A plan's cost limits, after every setting and per-message choice."""
@@ -962,7 +963,7 @@ class RunExecutor:
         if plan.fresh_session and await self.store.list_approvals(
                 ApprovalStatus.PENDING, limit=1, thread_key=thread.key):
             plan.fresh_session = False  # pending work still owns the current session
-        if efficiency["bounded_model_tasks"] and thread.harness == "openai_agents":
+        if efficiency["bounded_model_tasks"] and thread.harness == NATIVE_HARNESS:
             plan.bounded_task_models = {
                 "classify": efficiency["classification_model"],
                 "extract": efficiency["drafting_model"],
