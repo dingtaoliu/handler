@@ -14,6 +14,7 @@ never unlimited.
 | Key | `free` | `paid` | Meaning |
 |---|---|---|---|
 | `monthly_inputs` | 50 | none | Metered inputs per UTC calendar month. `null` is unlimited |
+| `at_limit` | `drop` | `hold` | What happens to inputs that would be held over the limit (below) |
 | `fix_model` | true | false | Ignore thread, chat and settings model choices |
 | `model` | `gpt-6.1-terra` | none | The fixed model; none means the deployment's default |
 | `max_run_tokens` | 200,000 | none | Input + output tokens in one run |
@@ -46,7 +47,7 @@ idempotency check, so duplicates and retries never count.
 | Event | Over the limit |
 |---|---|
 | `chat.message` | Refused, not stored: **429** with `{"error": "input_limit_reached", "message", "plan", "usage": {"used", "limit"}, "resets_at"}` |
-| `email.received`, `mail.received`, `crontal.notification` | **Stored and held, 2xx**: no run. Email reports `"status": "held"`, Crontal webhooks `"held": true`. Email only on a plan with `email` |
+| `email.received`, `mail.received`, `crontal.notification` | `at_limit: "hold"`: **stored and held, 2xx**, no run until released. Email reports `"status": "held"`, Crontal webhooks `"held": true`. `at_limit: "drop"` (free): **kept as a record, 2xx, never run**, not at the reset and not after an upgrade. Email reports `"status": "over_limit"`, Crontal webhooks `"over_limit": true`. Email only on a plan with `email` |
 | `automation.fired` | Skipped, one notice per schedule per month. A manual run gets the 429 |
 
 Everything else (`approval.resolved` and other internal events) is never counted, nor
@@ -57,9 +58,15 @@ the composer `{"limited": false}` or `{"limited": true, "plan", "used", "limit",
 A held input is an event with status `held`, plus a row in the tenant's `held_inputs`
 holding the thread it will join. It does not stop the tenant sleeping.
 
+A dropped input is only an event with status `over_limit`. It has no `held_inputs` row
+and creates no thread, and no release path reads it. It stays so that a retry is still
+a duplicate, and as a record. Dropped inputs don't count, so the month's count never
+passes the limit. The free plan drops, whatever its other settings: with `email`
+turned on, over-limit mail is dropped too.
+
 ## Release
 
-Held inputs are released oldest first, each counting against the current month, for
+Only plans set to `hold` hold anything. Held inputs are released oldest first, each counting against the current month, for
 as long as the allowance lasts. **The rest stay held for the next month; nothing is
 discarded.** Release happens at the start of each month (a sleeping tenant's
 `next_wake_at` includes the reset), and on a plan change.

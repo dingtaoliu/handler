@@ -66,6 +66,7 @@ class EventStatus(StrEnum):
     ROUTED = "routed"
     IGNORED = "ignored"
     HELD = "held"  # stored over a plan's limit; routed when the allowance returns
+    OVER_LIMIT = "over_limit"  # stored over a plan's limit as a record only; never routed
 
 
 class RunStatus(StrEnum):

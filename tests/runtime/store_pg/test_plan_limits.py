@@ -44,7 +44,8 @@ from .test_tenant_registry import (  # noqa: F401  (fixtures)
 )
 
 # The free plan's input limit, on a plan that also has the channels being tested.
-FREE = {"plan": "free", "limits": {"monthly_inputs": 2, "email": True, "automations": True}}
+FREE = {"plan": "free", "limits": {"monthly_inputs": 2, "at_limit": "hold", "email": True,
+                                   "automations": True}}
 MAIL_SECRETS = {"HANDLER_ADMIN_KEY": "admin-42", "HANDLER_EMAIL_SECRET": "mail-42",
                 "HANDLER_WEBHOOK_SECRET": "hook-42"}
 

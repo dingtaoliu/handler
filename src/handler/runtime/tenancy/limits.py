@@ -14,13 +14,13 @@ from typing import Any
 
 PLAN_LIMITS_ENV = "HANDLER_PLAN_LIMITS"
 LIMIT_KEYS = frozenset({"monthly_inputs", "fix_model", "model", "max_run_tokens",
-                        "max_run_turns", "connected_mail", "email", "automations", "allow_codex", "strict_grants",
+                        "max_run_turns", "connected_mail", "email", "automations", "at_limit", "allow_codex", "strict_grants",
                         "console", "max_upload_bytes", "max_workspace_bytes"})
 _INT_KEYS = ("monthly_inputs", "max_run_tokens", "max_run_turns", "max_upload_bytes",
              "max_workspace_bytes")
 DEFAULT_PLAN_TABLE: dict[str, dict[str, Any]] = {
     "paid": {},
-    "free": {"monthly_inputs": 50, "fix_model": True, "model": "gpt-6.1-terra",
+    "free": {"monthly_inputs": 50, "at_limit": "drop", "fix_model": True, "model": "gpt-6.1-terra",
              "max_run_tokens": 200_000, "max_run_turns": 15, "connected_mail": False,
              "email": False, "automations": False, "allow_codex": False,
              "strict_grants": True, "console": False, "max_upload_bytes": 100 * 1024 * 1024,
@@ -29,6 +29,8 @@ DEFAULT_PLAN_TABLE: dict[str, dict[str, Any]] = {
 # What happens to an event type at the limit. Anything not listed is internal
 # (approval.resolved and the like) and is never counted.
 HOLD, REFUSE, SKIP = "held", "refused", "skipped"
+DROP = "over_limit"  # stored as a record only: never routed, at reset or after an upgrade
+AT_LIMIT = ("hold", "drop")  # what a plan does with inputs that would be held
 METERED = {"chat.message": REFUSE, "email.received": HOLD, "mail.received": HOLD,
            "crontal.notification": HOLD, "automation.fired": SKIP}
 
@@ -37,6 +39,7 @@ METERED = {"chat.message": REFUSE, "email.received": HOLD, "mail.received": HOLD
 class PlanLimits:
     plan: str
     monthly_inputs: int | None = None  # None: unlimited
+    at_limit: str = "hold"  # "hold": release later; "drop": keep a record, never run
     fix_model: bool = False  # ignore thread, chat and settings model choices
     model: str | None = None  # the fixed model; None means the deployment's default
     max_run_tokens: int | None = None
@@ -60,7 +63,8 @@ class LiveLimits:
 
 @dataclass(frozen=True)
 class OverLimit:
-    """`put`'s third outcome. Truthy only when the input was stored (held)."""
+    """`put`'s third outcome. Truthy when the input was stored (held, or kept as a
+    record over the limit), so callers can still tell a new input from a duplicate."""
 
     action: str
     plan: str
@@ -70,7 +74,7 @@ class OverLimit:
     notify: bool = False  # a skipped automation whose notice is due this period
 
     def __bool__(self) -> bool:
-        return self.action == HOLD
+        return self.action in (HOLD, DROP)
 
     def payload(self) -> dict[str, Any]:
         """The stable body of a 429; Crontal's composer renders this."""
@@ -105,6 +109,8 @@ def check_limit_keys(values: Any, where: str, *, tenant: bool = True) -> None:
             continue
         if key not in LIMIT_KEYS:
             raise ValueError(f"{where}: unknown limit {key!r}")
+        if key == "at_limit" and value not in AT_LIMIT:
+            raise ValueError(f"{where}: at_limit must be one of {', '.join(AT_LIMIT)}")
         if key in _INT_KEYS and value is not None and (
                 isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise ValueError(f"{where}: {key} must be a non-negative integer or null")

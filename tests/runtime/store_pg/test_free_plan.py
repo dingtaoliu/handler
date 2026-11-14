@@ -89,7 +89,7 @@ def test_free_defaults_match_the_owners_decision():
     assert (free.model, free.fix_model) == ("gpt-6.1-terra", True)
     assert not (free.email or free.automations or free.connected_mail or free.allow_codex
                 or free.console)
-    assert free.strict_grants and free.monthly_inputs == 50
+    assert free.strict_grants and free.monthly_inputs == 50 and free.at_limit == "drop"
     assert DEFAULT_PLAN_TABLE["paid"] == {}
 
 
@@ -644,13 +644,85 @@ async def test_an_upgrade_processes_only_mail_arriving_after_it(base_env, pg_dsn
         assert subjects == ["After"]
 
 
-async def test_free_crontal_notifications_are_still_held_at_the_limit(base_env, pg_dsn):
+async def over_limit_free(client, limit=1):
+    await create(client, plan="free", limits={"monthly_inputs": limit}, secrets=MAIL_SECRETS)
+
+
+async def crontal(client, body):
+    raw = json.dumps(body).encode()
+    return await client.post("/i/m42/ingest/crontal", content=raw,
+                             headers={"X-Crontal-Signature": sign("hook-42", raw)})
+
+
+NOTE = {"id": 4, "recipient_user_id": 1, "entity_type": "rfq", "entity_id": 3}
+MERCHANT = {"id": 9, "scope": "merchant", "recipient_user_id": None, "entity_type": "rfq",
+            "entity_id": 5}
+
+
+@pytest.mark.parametrize("body", [NOTE, MERCHANT], ids=["per-user", "merchant"])
+async def test_free_crontal_events_over_the_limit_are_recorded_never_run(base_env, pg_dsn, body):
     async with serve(base_env) as (app, client):
-        await create(client, plan="free", limits={"monthly_inputs": 0}, secrets=MAIL_SECRETS)
-        note = b'{"id": 4, "recipient_user_id": 1, "entity_type": "rfq", "entity_id": 3}'
-        response = await client.post("/i/m42/ingest/crontal", content=note,
-                                     headers={"X-Crontal-Signature": sign("hook-42", note)})
-        assert response.status_code == 202 and response.json()["held"] is True
+        await over_limit_free(client, limit=0)
+        response = await crontal(client, body)
+        assert response.status_code == 202
+        assert response.json()["over_limit"] is True and "held" not in response.json()
+        assert (await crontal(client, body)).json()["duplicate"] is True
+        assert rows(pg_dsn, "SELECT status FROM handler_m42.events") == [("over_limit",)]
+        assert rows(pg_dsn, "SELECT count(*) FROM handler_m42.held_inputs")[0][0] == 0
+        assert rows(pg_dsn, "SELECT count(*) FROM handler_m42.threads")[0][0] == 0
+        store = live_store(app)
+        # Not at the next month's reset...
+        store._clock = lambda: datetime.now(timezone.utc).replace(day=1) + timedelta(days=40)
+        assert await store.release_held_inputs() == 0
+        # ...nor after an upgrade.
+        await client.put("/platform/tenants/42", headers=PLATFORM, json={"plan": "paid", "limits": {}})
+        await asyncio.sleep(0.3)
+        assert rows(pg_dsn, "SELECT status FROM handler_m42.events") == [("over_limit",)]
+        assert FakeHarness.runs == []
+
+
+async def test_free_count_never_passes_the_limit(base_env, pg_dsn):
+    async with serve(base_env) as (app, client):
+        await over_limit_free(client, limit=2)
+        for n in range(6):
+            assert (await crontal(client, {**NOTE, "id": 100 + n})).status_code == 202
+        assert rows(pg_dsn, "SELECT sum(used) FROM handler_m42.input_usage")[0][0] == 2
+        statuses = sorted(r[0] for r in rows(pg_dsn, "SELECT status FROM handler_m42.events"))
+        assert statuses == ["over_limit"] * 4 + ["routed"] * 2
+
+
+async def test_free_with_email_turned_on_still_holds_nothing(base_env, pg_dsn, monkeypatch):
+    from handler.runtime.mail.intake import GateResult
+    from handler.runtime.web import email_ingest
+
+    async def accept(*args, **kwargs):
+        return GateResult(accepted=True, reason=None, sender="b@example.com", auth=None,
+                          trusted=False, scope="b@example.com")
+
+    async def available(*args):
+        return True
+
+    monkeypatch.setattr(email_ingest, "check_sender", accept)
+    monkeypatch.setattr(email_ingest, "ai_identity_available", available)
+    async with serve(base_env) as (app, client):
+        await create(client, plan="free", limits={"monthly_inputs": 0, "email": True},
+                     secrets=MAIL_SECRETS)
+        response = await post_mail(client, "/i/m42/ingest/email")
+        assert response.status_code == 202 and response.json()["status"] == "over_limit"
+        assert rows(pg_dsn, "SELECT count(*) FROM handler_m42.held_inputs")[0][0] == 0
+
+
+async def test_a_plan_set_to_hold_still_holds(base_env, pg_dsn):
+    async with serve(base_env) as (app, client):
+        await create(client, plan="free", limits={"monthly_inputs": 0, "at_limit": "hold"},
+                     secrets=MAIL_SECRETS)
+        assert (await crontal(client, NOTE)).json()["held"] is True
+        assert rows(pg_dsn, "SELECT count(*) FROM handler_m42.held_inputs")[0][0] == 1
+
+
+def test_at_limit_takes_only_hold_or_drop():
+    with pytest.raises(ValueError, match="at_limit"):
+        parse_plan_table('{"free": {"at_limit": "later"}}')
 
 
 async def test_platform_refuses_email_intake_on_free(base_env):

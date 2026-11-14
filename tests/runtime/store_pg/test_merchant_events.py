@@ -103,9 +103,10 @@ async def test_a_merchant_thread_is_visible_to_every_user_through_the_proxy(base
             assert [t["thread_key"] for t in tasks["items"]] == ["crontal:rfq:3"]
 
 
-async def test_a_merchant_event_over_the_limit_is_held_once(base_env, pg_dsn):
+async def test_a_merchant_event_over_the_limit_is_held_once_on_a_hold_plan(base_env, pg_dsn):
     async with serve(base_env) as (app, client):
-        await create(client, plan="free", limits={"monthly_inputs": 0}, secrets=MAIL_SECRETS)
+        await create(client, plan="free", limits={"monthly_inputs": 0, "at_limit": "hold"},
+                     secrets=MAIL_SECRETS)
         response = await post(client, merchant_event())
         assert response.status_code == 202 and response.json()["held"] is True
         assert (await post(client, merchant_event())).json()["duplicate"] is True

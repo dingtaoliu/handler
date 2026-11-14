@@ -207,7 +207,7 @@ def email_ingest_router(
                 await observer(body, envelope_to=envelope_to, thread_key=key)
             except Exception:  # noqa: BLE001 - the email is already queued
                 logger.exception("email intake observer failed", extra={"thread_key": key})
-        status = "held" if isinstance(new, OverLimit) else "accepted"
+        status = new.action if isinstance(new, OverLimit) else "accepted"  # held or over_limit
         return JSONResponse({"status": status, "thread_key": key, "duplicate": not new,
                              "workspace": workspace["dir"]},
                             status_code=202 if new else 200)

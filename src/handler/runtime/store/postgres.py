@@ -19,6 +19,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from ..tenancy.limits import (
+    DROP,
     HOLD,
     METERED,
     SKIP,
@@ -172,7 +173,13 @@ async def _charge_input(conn: AsyncConnection, event: Event, thread: ThreadSpec,
         if await cursor.fetchone() is not None:
             return None
     notify = False
-    if action == HOLD:
+    if action == HOLD and limits.at_limit == "drop":
+        # Kept so a retry stays a duplicate and the input is on record; nothing
+        # routes it later, and it never counts.
+        await conn.execute("UPDATE events SET status = %s WHERE id = %s",
+                           (EventStatus.OVER_LIMIT.value, event.id))
+        action = DROP
+    elif action == HOLD:
         await conn.execute("UPDATE events SET status = %s WHERE id = %s",
                            (EventStatus.HELD.value, event.id))
         await conn.execute(

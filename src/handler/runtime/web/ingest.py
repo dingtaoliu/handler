@@ -90,7 +90,8 @@ def crontal_ingest_router(
         logger.info("crontal notification", extra={"notification_id": note_id,
                                                    "scope": MERCHANT_SCOPE if merchant_wide else "user",
                                                    "thread_key": key, "duplicate": not new})
-        held = {"held": True} if isinstance(new, OverLimit) else {}
+        held = ({"held": True} if new.action == "held" else {"over_limit": True}) \
+            if isinstance(new, OverLimit) else {}
         return JSONResponse({"thread_key": key, "duplicate": not new, **held},
                             status_code=202 if new else 200)
 
