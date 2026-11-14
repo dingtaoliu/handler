@@ -56,3 +56,40 @@ tokens with a common 3,764-token prefix (75.9%). See the current
 [token/% component breakdown](../audits/bss-prompt-components-2026-11-09.md).
 The task-outcome component itself is 92 tokens. Snapshot differences are not
 attributed entirely to that component; current catalog/memory also affect totals.
+
+## Stable prompt cache key (openai_agents)
+
+openai-agents 0.24 generates a `prompt_cache_key` from each `conversation_id` when
+ModelSettings supplies none, so every new mail thread, scheduled firing (fresh
+session) and new chat got its own key and never reused the shared ~17-18k-token
+prefix (tool schemas + stable instructions): 0 cached tokens on all 134 new-thread
+first requests in the BSS ledger.
+
+`_plan()` now derives the key from the request's stable context only:
+`"handler:" + sha256(json{model, harness, sorted effective tool names (plus
+bounded_model_task when the harness adds it), stable instruction prefix})[:32]`.
+The stable prefix is `stable_prefix_text()` in `observability/prompt_tokens.py`,
+the same text the settings preview fingerprints (`stable_prefix.sha256`), so the
+two cannot drift. Dynamic components (thread guidance, scheduled checkpoint
+guidance, memory index, linked memory, speaker) and the trailing configured
+instructions are excluded. Thread types with the same prefix therefore share a key;
+a different tool inventory, stable text or model gets another. Without memory
+tools the configured instructions are hashed instead. No user text is in the key.
+
+The harness sends it as `ModelSettings(extra_args={"prompt_cache_key": key})`
+(ModelSettings has no native field). The SDK's `PromptCacheKeyResolver` returns
+None when `extra_args`/`extra_body` already contain `prompt_cache_key`, so it adds
+no per-conversation key; the Responses model forwards `extra_args` into
+`responses.create()`. It also sends `ModelSettings.prompt_cache_retention="24h"`.
+
+Settings (`efficiency`, live, no deploy): `stable_prompt_cache_key` (default true;
+false restores the SDK's per-conversation key) and `prompt_cache_retention`
+(`"24h"` default, or `"in_memory"`, which omits the parameter so the request is
+exactly as before and the API default applies). A 400 naming
+`prompt_cache_retention` (or `prompt_cache_key`) is retried once without that
+parameter and remembered per model for the process, with a warning, like refused
+compaction. Codex and `bounded_model_task` helper requests are unchanged.
+
+Unverified: whether 24h retention is priced differently from in-memory caching,
+and which models accept it. Check the provider's current pricing/caching docs and
+measure cached-token share on new-thread first requests after release.

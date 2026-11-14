@@ -76,6 +76,10 @@ class RunRequest:
     repair_session: bool = False
     fresh_session: bool = False  # deliberate rotation; never replay old raw transcript
     bounded_task_models: dict[str, str] = field(default_factory=dict)
+    # OpenAI prompt caching (openai_agents only; other harnesses ignore these).
+    # None key: the SDK derives its own per conversation. None retention: omitted.
+    prompt_cache_key: str | None = None
+    prompt_cache_retention: str | None = None
 
 
 class HarnessError(Exception):

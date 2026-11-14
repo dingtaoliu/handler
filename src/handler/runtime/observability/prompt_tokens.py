@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
-from typing import Iterable
+import json
+from typing import AbstractSet, Iterable
 
 import tiktoken
 
@@ -15,12 +16,49 @@ class PromptComponent:
     dynamic: bool = False
 
 
-def render_components(components: Iterable[PromptComponent]) -> str:
+def _split(components: Iterable[PromptComponent]) -> tuple[list[PromptComponent], int]:
+    """Non-empty components and the index of the first dynamic one."""
     components = [c for c in components if c.text]
     boundary = next((i for i, c in enumerate(components) if c.dynamic), len(components))
-    stable = _render_stable(tuple(c.text for c in components[:boundary]))
+    return components, boundary
+
+
+def stable_prefix_text(components: Iterable[PromptComponent]) -> str:
+    """The rendered instructions up to the first dynamic component.
+
+    The single source of the stable prefix: the preview's fingerprint and the
+    prompt cache key both hash this text, so they cannot drift apart.
+    """
+    components, boundary = _split(components)
+    return _render_stable(tuple(c.text for c in components[:boundary]))
+
+
+def render_components(components: Iterable[PromptComponent]) -> str:
+    components, boundary = _split(components)
+    stable = stable_prefix_text(components)
     return "\n\n".join(p for p in (stable, "\n\n".join(
         c.text for c in components[boundary:])) if p)
+
+
+PROMPT_CACHE_KEY_PREFIX = "handler:"
+
+
+def prompt_cache_key(stable_text: str, *, tools: AbstractSet[str] | None,
+                     model: str | None, harness: str | None = None) -> str:
+    """An OpenAI prompt_cache_key derived only from a request's stable context.
+
+    Runs sharing the same tool inventory (rendered before instructions), stable
+    instruction prefix and model share a key, so their common prefix is routed
+    to the same cache across new conversations; a different prefix gets its own
+    key. Dynamic instructions (thread guidance, memory, speaker) are excluded,
+    otherwise every run would get a unique key again. The key is a digest:
+    no instruction or user text appears in it.
+    """
+    payload = json.dumps({
+        "v": 1, "model": str(model or ""), "harness": harness or "",
+        "tools": None if tools is None else sorted(tools), "stable": stable_text,
+    }, sort_keys=True, ensure_ascii=False)
+    return PROMPT_CACHE_KEY_PREFIX + hashlib.sha256(payload.encode()).hexdigest()[:32]
 
 
 @lru_cache(maxsize=32)
@@ -44,13 +82,7 @@ def prompt_token_breakdown(components: Iterable[PromptComponent], *,
         encoding = tiktoken.get_encoding("o200k_base")
         encoding_source = "fallback"
     components = list(components)
-    stable = []
-    for component in components:
-        if component.dynamic:
-            break
-        if component.text:
-            stable.append(component.text)
-    stable_text = "\n\n".join(stable)
+    stable_text = stable_prefix_text(components)
     prefix = ""
     previous = 0
     rows = []
