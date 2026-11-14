@@ -106,6 +106,9 @@ def check_limit_keys(values: Any, where: str, *, tenant: bool = True) -> None:
         if key == "max_runs":  # the run gate's per-tenant override; plans use HANDLER_PLAN_RUN_CAPS
             if not tenant:
                 raise ValueError(f"{where}: set run caps per plan in HANDLER_PLAN_RUN_CAPS")
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                      or value < 1):
+                raise ValueError(f"{where}: max_runs must be a positive integer or null")
             continue
         if key not in LIMIT_KEYS:
             raise ValueError(f"{where}: unknown limit {key!r}")

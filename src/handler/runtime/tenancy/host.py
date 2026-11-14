@@ -66,6 +66,10 @@ REPLAYED_HEADERS = ("content-type", "x-handler-envelope-from", "x-handler-envelo
                     "x-handler-auth-results", "x-handler-forwarded")
 
 
+def _limits_key(tenant: Tenant) -> tuple:
+    return tenant.plan, json.dumps(tenant.limits, sort_keys=True)
+
+
 class AtCapacity(Exception):
     """Every active-tenant place is held by a tenant that can't be stopped now."""
 
@@ -130,6 +134,11 @@ class _Slot:
     stale: bool = False  # its config changed; restart once quiescent
     recover: bool = False  # a stop could not record its state
     shell: Any = None  # the public pages, built when first asked for
+    limits: Any = None  # PlanLimits for the tenant as last read, resolved on change only
+    limits_key: tuple | None = None
+    # What the running runtime was started with or last updated to.
+    applied_key: tuple | None = None
+    applied_at: Any = None
 
     polls: bool = False  # last seen with an enabled connected mailbox
 
@@ -231,7 +240,9 @@ class TenantHost:
                 slot.touch()
 
     def _plan(self, slot: _Slot) -> PlanLimits | None:
-        return self._limits_for(slot.tenant) if self._limits_for is not None else None
+        if self._limits_for is not None and slot.limits is None:
+            slot.limits = self._limits_for(slot.tenant)
+        return slot.limits
 
     def _schedules_count(self, slot: _Slot) -> bool:
         limits = self._plan(slot)
@@ -459,21 +470,38 @@ class TenantHost:
             logger.warning("spooled email replay failed", extra=extra)
 
     async def load(self) -> None:
-        """Know every tenant before serving, so a lookup never needs the database."""
+        """Know every tenant before serving, so a lookup never needs the database.
+
+        A change made elsewhere (another process, or one this read races) is acted on
+        here just as if the platform API had reported it.
+        """
         for tenant in await self.registry.list():
-            self._remember(tenant)
+            slot, limits_changed, config_changed = self._remember(tenant)
+            if limits_changed or config_changed or (slot.runtime and not tenant.enabled):
+                task = asyncio.create_task(self._react(slot, limits_changed, config_changed),
+                                           name=f"changed-{tenant.name}")
+                task.add_done_callback(self._log_failure)
         self._names_read_at = monotonic()
 
     def _slot(self, name: str) -> _Slot | None:
         return self._slots.get(name)
 
-    def _remember(self, tenant: Tenant) -> _Slot:
+    def _remember(self, tenant: Tenant) -> tuple[_Slot, bool, bool]:
+        """Record the tenant as read. Returns its slot, and whether its plan limits and
+        its config changed from what its runtime runs with (or, asleep, from the last read)."""
         slot = self._slots.get(tenant.name)
         if slot is None:
             slot = self._slots[tenant.name] = _Slot(tenant)
+        key = _limits_key(tenant)
+        before = slot.applied_key if slot.runtime is not None else slot.limits_key
+        limits_changed = before is not None and before != key
+        config_changed = slot.runtime is not None and tenant.updated_at != slot.applied_at
         slot.tenant = tenant
+        if key != slot.limits_key:
+            slot.limits_key = key
+            slot.limits = self._limits_for(tenant) if self._limits_for is not None else None
         self._by_schema[tenant.schema_name] = slot
-        return slot
+        return slot, limits_changed, config_changed
 
     # --- lifecycle: every transition holds the tenant's lock ----------------
     async def _runtime(self, slot: _Slot) -> _Runtime | None:
@@ -540,7 +568,8 @@ class TenantHost:
 
     async def _start(self, slot: _Slot) -> _Runtime:
         tenant = await self.registry.get(slot.tenant.name) or slot.tenant
-        slot.tenant = tenant
+        self._remember(tenant)
+        slot.applied_key, slot.applied_at = _limits_key(tenant), tenant.updated_at
         ready = asyncio.get_running_loop().create_future()
         stop = asyncio.Event()
 
@@ -618,15 +647,14 @@ class TenantHost:
         tenant = await self.registry.get(name)
         if tenant is None:
             return
-        known = self._slots.get(name)
-        was_running = known is not None and known.runtime is not None
-        limits_changed = known is not None and (known.tenant.plan, known.tenant.limits) != (
-            tenant.plan, tenant.limits)
-        slot = self._remember(tenant)
-        if not tenant.enabled:
+        slot, limits_changed, config_changed = self._remember(tenant)
+        await self._react(slot, limits_changed, config_changed)
+
+    async def _react(self, slot: _Slot, limits_changed: bool, config_changed: bool) -> None:
+        if not slot.tenant.enabled:
             await self._deactivate(slot, force=True)
             return
-        if was_running:
+        if config_changed:
             slot.stale = True  # new config and secrets take effect on the next start
         if limits_changed:
             await self._apply_limits(slot)
@@ -642,7 +670,8 @@ class TenantHost:
             self._activation(slot)
             return
         parts = runtime.app.state.lifecycle
-        parts.limits.current = self._limits_for(slot.tenant)
+        parts.limits.current = self._plan(slot)
+        slot.applied_key = slot.limits_key
         await parts.store.release_held_inputs()
         parts.scheduler.wake()  # schedules kept on a plan without them resume now
 
