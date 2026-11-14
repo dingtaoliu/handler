@@ -274,4 +274,6 @@ Settled by the owner on November 8, 2026.
 | 2 | Channels on the free plan | Revised November 9: chat and Crontal threads only. No email of any kind (forwarding address, connected mailboxes, Gmail) and no automations; both start when a merchant moves to a paid tier | Phase 3 |
 | 2a | Email on free | Not backlogged: mail to a free tenant is refused and not stored, and an upgrade processes only mail arriving after it. The never-lose-mail rule applies wherever email is a channel | Phase 3 |
 | 2b | Free model | `gpt-6.1-terra`, fixed | Phase 3 |
+| 2c | Free over the limit | Revised November 12: nothing is held or processed later, for any input type. Chat is refused; other inputs are accepted, recorded and never run, at the reset or after an upgrade. Supersedes the hold behaviour in Section 5 for free tenants | Phase 3 |
+| 2d | Merchant-wide Crontal events | One webhook and one input per merchant event (RFQ, bids), not one per user. Per-user notifications are unchanged | Phase 4 |
 | 3 | Tenant target for the next year | Under about 100: schema per tenant, as designed here | Phase 2 |
