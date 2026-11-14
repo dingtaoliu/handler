@@ -70,7 +70,12 @@ class Dispatcher:
                 free = await self._reserve(lane, free)
                 if free <= 0:
                     continue
-            leases = await self.store.claim(self.owner, lane, free, self.lease_seconds)
+            try:
+                leases = await self.store.claim(self.owner, lane, free, self.lease_seconds)
+            except BaseException:
+                if self.gate is not None:  # nothing was claimed: give every slot back
+                    self.gate.release(self.gate_tenant, free)
+                raise
             if self.gate is not None:
                 self.gate.release(self.gate_tenant, free - len(leases))
             for lease in leases:
