@@ -140,11 +140,14 @@ class ScheduleMixin(_Rows):
             )
             if not cursor.rowcount:
                 return False
-            routed = await _put_event(conn, event, thread, self._clock(), self._plan_limits())
-            if isinstance(routed, OverLimit):
-                return routed
-            if routed:
+            released: list = []
+            routed = await _put_event(conn, event, thread, self._clock(), self._plan_limits(),
+                                      released)
+            if released or (routed and not isinstance(routed, OverLimit)):
                 await self._notify(conn)
+        self._announce_released(released)
+        if isinstance(routed, OverLimit):
+            return routed
         self._wake.set()
         if routed:
             announce_routed(self, event, thread)

@@ -198,9 +198,47 @@ async def _charge_input(conn: AsyncConnection, event: Event, thread: ThreadSpec,
     return OverLimit(action, limits.plan, limit, limit, next_reset(now), notify)
 
 
+async def _release_held(conn: AsyncConnection, limits: PlanLimits,
+                        now: datetime) -> list[tuple[Event, ThreadSpec]]:
+    """Route held inputs, oldest first, while this month's allowance lasts.
+
+    Takes the month's usage row lock first, so a new input charged in the same
+    transaction comes after every held input that fits.
+    """
+    cursor = await conn.execute("SELECT EXISTS (SELECT 1 FROM held_inputs) AS any")
+    if not (await cursor.fetchone())["any"]:
+        return []
+    period, room = period_of(now), None
+    if limits.monthly_inputs is not None:
+        await conn.execute("INSERT INTO input_usage (period, used) VALUES (%s, 0) "
+                           "ON CONFLICT (period) DO NOTHING", (period,))
+        cursor = await conn.execute(
+            "SELECT used FROM input_usage WHERE period = %s FOR UPDATE", (period,))
+        room = limits.monthly_inputs - (await cursor.fetchone())["used"]
+        if room <= 0:
+            return []
+    cursor = await conn.execute(
+        f"SELECT h.thread_spec, {', '.join('e.' + f.name for f in fields(Event))} "
+        "FROM held_inputs h JOIN events e ON e.id = h.event_id ORDER BY h.seq LIMIT %s "
+        "FOR UPDATE OF h SKIP LOCKED", (room,))
+    released = []
+    for row in await cursor.fetchall():
+        raw = row["thread_spec"]
+        spec = ThreadSpec(**{**raw, "type": ThreadType(raw["type"]), "lane": Lane(raw["lane"])})
+        await _route(conn, spec, row["type"], now)
+        await conn.execute("UPDATE events SET status = %s WHERE id = %s",
+                           (EventStatus.ROUTED.value, row["id"]))
+        await conn.execute("DELETE FROM held_inputs WHERE event_id = %s", (row["id"],))
+        released.append((_record(Event, row), spec))
+    if released and limits.monthly_inputs is not None:
+        await conn.execute("UPDATE input_usage SET used = used + %s WHERE period = %s",
+                           (len(released), period))
+    return released
+
+
 async def _put_event(
     conn: AsyncConnection, event: Event, thread: ThreadSpec | None, now: datetime,
-    limits: PlanLimits | None = None,
+    limits: PlanLimits | None = None, released: list | None = None,
 ) -> bool | OverLimit:
     """Insert an event idempotently and route its thread; False if a duplicate."""
     values = _values(event)
@@ -217,6 +255,9 @@ async def _put_event(
     if thread is not None:
         action = METERED.get(event.type)
         if action and limits is not None and limits.monthly_inputs is not None:
+            if limits.at_limit == "hold" and released is not None:
+                # A new month's allowance goes to held inputs first, oldest first.
+                released.extend(await _release_held(conn, limits, now))
             over = await _charge_input(conn, event, thread, limits, action, now)
             if over is not None:
                 return over
@@ -417,14 +458,26 @@ class PostgresCore(PostgresUsage):
         return self.limits.current if self.limits is not None else None
 
     async def put(self, event: Event, thread: ThreadSpec | None) -> bool | OverLimit:
+        released: list[tuple[Event, ThreadSpec]] = []
         async with self._conn() as conn:
-            stored = await _put_event(conn, event, thread, self._clock(), self._plan_limits())
-            if not stored or isinstance(stored, OverLimit):
-                return stored
-            await self._notify(conn)
+            stored = await _put_event(conn, event, thread, self._clock(), self._plan_limits(),
+                                      released)
+            routed = bool(stored) and not isinstance(stored, OverLimit)
+            if routed or released:
+                await self._notify(conn)
+        self._announce_released(released)
+        if not routed:
+            return stored
         self._wake.set()
         announce_routed(self, event, thread)
         return True
+
+    def _announce_released(self, released: list[tuple[Event, ThreadSpec]]) -> None:
+        """Show inputs released from hold as queued, now that they are committed."""
+        if released:
+            self._wake.set()
+        for event, spec in released:
+            announce_routed(self, event, spec)
 
     async def input_usage(self) -> dict[str, Any] | None:
         """This month's metered inputs, or None for a tenant with no limit."""
@@ -451,40 +504,11 @@ class PostgresCore(PostgresUsage):
         limits = self._plan_limits()
         if limits is None:
             return 0
-        released: list[tuple[str, ThreadSpec]] = []
         async with self._conn() as conn:
-            cursor = await conn.execute("SELECT EXISTS (SELECT 1 FROM held_inputs) AS any")
-            if not (await cursor.fetchone())["any"]:
-                return 0
-            now = self._clock()
-            period, room = period_of(now), None
-            if limits.monthly_inputs is not None:
-                await conn.execute("INSERT INTO input_usage (period, used) VALUES (%s, 0) "
-                                   "ON CONFLICT (period) DO NOTHING", (period,))
-                cursor = await conn.execute(
-                    "SELECT used FROM input_usage WHERE period = %s FOR UPDATE", (period,))
-                room = limits.monthly_inputs - (await cursor.fetchone())["used"]
-                if room <= 0:
-                    return 0
-            cursor = await conn.execute(
-                "SELECT h.event_id, h.thread_spec, e.type FROM held_inputs h "
-                "JOIN events e ON e.id = h.event_id ORDER BY h.seq LIMIT %s "
-                "FOR UPDATE OF h SKIP LOCKED", (room,))
-            for row in await cursor.fetchall():
-                raw = row["thread_spec"]
-                spec = ThreadSpec(**{**raw, "type": ThreadType(raw["type"]), "lane": Lane(raw["lane"])})
-                await _route(conn, spec, row["type"], now)
-                await conn.execute("UPDATE events SET status = %s WHERE id = %s",
-                                   (EventStatus.ROUTED.value, row["event_id"]))
-                await conn.execute("DELETE FROM held_inputs WHERE event_id = %s", (row["event_id"],))
-                released.append((row["event_id"], spec))
-            if released and limits.monthly_inputs is not None:
-                await conn.execute("UPDATE input_usage SET used = used + %s WHERE period = %s",
-                                   (len(released), period))
+            released = await _release_held(conn, limits, self._clock())
             if released:
                 await self._notify(conn)
-        if released:
-            self._wake.set()
+        self._announce_released(released)
         return len(released)
 
     async def claim(
