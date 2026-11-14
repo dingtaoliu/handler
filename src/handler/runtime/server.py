@@ -836,8 +836,10 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         uploads = UploadStore(data_dir / "uploads", limit=(
             (lambda: plan_limits.current.max_upload_bytes) if plan_limits is not None else None))
         if plan_limits is not None:
-            register_workspace_limit(config.workspaces_dir,
-                                     lambda: plan_limits.current.max_workspace_bytes)
+            # Counted once here, off the event loop; writes then keep the totals current.
+            await register_workspace_limit(
+                config.workspaces_dir, lambda: plan_limits.current.max_workspace_bytes).prime()
+            await uploads.used.prime()
         app = create_app(store, bus, auth, default_harness=settings.harness_source("chat"),
                          uploads=uploads, instance_name=instance_name)
         app.mount("/mcp", mcp_app)

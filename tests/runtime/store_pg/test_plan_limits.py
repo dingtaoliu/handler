@@ -583,40 +583,45 @@ async def test_a_paid_run_keeps_its_model_and_has_no_cost_limits(base_env, monke
     assert seen[0].model == "chosen"
 
 
-async def test_a_token_limit_stops_a_non_native_harness(base_env, monkeypatch):
+async def test_a_harness_reporting_usage_at_the_end_keeps_its_answer(base_env, monkeypatch, caplog):
+    """Codex reports usage only when the turn is over: nothing can be stopped by then,
+    so the real answer is kept and the overspend is logged, not claimed as a stop."""
     from handler.runtime.harness.base import RUN_LIMIT_NOTICE, RunEvent, RunEventKind
     from handler.runtime.types import TokenUsage
 
     interrupted = []
 
-    class Other(FakeHarness):
+    class EndOfTurnUsage(FakeHarness):
         name = "codex"
 
         async def run(self, req):
             yield RunEvent(RunEventKind.SESSION, {"session_id": "s"})
-            yield RunEvent(RunEventKind.USAGE, {"model": "m"}, usage=TokenUsage(input_tokens=900, output_tokens=200))
-            await asyncio.sleep(30)
+            yield RunEvent(RunEventKind.USAGE, {"model": "m"},
+                           usage=TokenUsage(input_tokens=900, output_tokens=200))
+            yield RunEvent(RunEventKind.ASSISTANT_TEXT, {"text": "The full answer."})
+            yield RunEvent(RunEventKind.FINAL, {"text": "The full answer.", "session_id": "s"})
 
         async def interrupt(self, run_id):
             interrupted.append(run_id)
 
-    def make(*args, **kwargs):
-        return Other()
-
-    monkeypatch.setattr(server, "CodexHarness", make)
+    monkeypatch.setattr(server, "CodexHarness", lambda *args, **kwargs: EndOfTurnUsage())
     monkeypatch.setattr(server, "codex_binary", lambda: "codex")
     async with serve(base_env) as (app, client):
         await create(client, limits={"max_run_tokens": 1000})  # paid: free has no Codex
         await activate(client)
         store = live_store(app)
-        await store.put(Event(type="chat.message", source="t", payload={"text": "hi"},
-                              idempotency_key="k", thread_key="chat:u:2", user_id="u"),
-                        ThreadSpec("chat:u:2", ThreadType.CHAT, Lane.INTERACTIVE, owner_user_id="u", harness="codex"))
-        await until(lambda: interrupted)
-        await until(lambda: rows(base_env["DATABASE_URL"],
-                                 "SELECT count(*) FROM handler_m42.runs WHERE status = 'completed'")[0][0] == 1)
+        with caplog.at_level("WARNING", logger="handler.runtime.run"):
+            await store.put(Event(type="chat.message", source="t", payload={"text": "hi"},
+                                  idempotency_key="k", thread_key="chat:u:2", user_id="u"),
+                            ThreadSpec("chat:u:2", ThreadType.CHAT, Lane.INTERACTIVE,
+                                       owner_user_id="u", harness="codex"))
+            await until(lambda: rows(base_env["DATABASE_URL"], "SELECT count(*) FROM handler_m42.runs "
+                                                               "WHERE status = 'completed'")[0][0] == 1)
         texts = [b.get("text") for m in await store.list_messages("chat:u:2") for b in m.blocks]
-        assert RUN_LIMIT_NOTICE in texts
+    assert "The full answer." in texts and RUN_LIMIT_NOTICE not in texts
+    assert interrupted == []
+    overspent = [r for r in caplog.records if r.getMessage() == "run went past its plan's token limit"]
+    assert len(overspent) == 1 and overspent[0].tokens == 1100 and overspent[0].limit == 1000
 
 
 async def test_connecting_a_mailbox_on_a_free_tenant_is_refused(base_env):

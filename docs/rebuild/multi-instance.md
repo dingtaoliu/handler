@@ -96,7 +96,9 @@ shares. `HANDLER_DOC_READ_MAX_CONCURRENT` (default 2) caps simultaneous reads
 across the **whole process**, not per instance; it cannot be scoped to an instance.
 A read waits for a slot, and a read whose caller timed out keeps its slot until
 the decoding actually finishes. Codex's `handler-read` runs in its own process and
-is not counted.
+is not counted. A read still waiting for a slot, or still running, after 5 seconds is
+logged every 5 seconds (`document read waiting for a slot` or `document read still
+running`), so a stuck read is visible.
 
 Each read logs `document read` (source, file type and size, wait, duration, memory
 before and after) and each run logs `run memory` at its start and end. Fields:

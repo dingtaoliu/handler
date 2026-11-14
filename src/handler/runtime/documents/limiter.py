@@ -27,6 +27,7 @@ logger = logging.getLogger("handler.runtime.documents")
 T = TypeVar("T")
 READ_LIMIT_ENV = "HANDLER_DOC_READ_MAX_CONCURRENT"
 DEFAULT_READ_LIMIT = 2
+SLOW_READ_SECONDS = 5.0  # log a read still waiting for a slot, or still running, after this
 
 _lock = threading.Lock()
 _limit = DEFAULT_READ_LIMIT
@@ -57,8 +58,9 @@ def _pool() -> ThreadPoolExecutor:
 
 
 def _measured(source: str, queued_at: float, function: Callable[..., T],
-              args: tuple, kwargs: Mapping[str, Any]) -> T:
+              args: tuple, kwargs: Mapping[str, Any], started: threading.Event) -> T:
     global _active
+    started.set()
     with _lock:
         _active += 1
         active = _active
@@ -95,5 +97,24 @@ def _size(path: Path) -> int | None:
 async def capped_read(source: str, function: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
     """Run `function(path, ...)` on the read pool; `source` names the caller in logs."""
     context = contextvars.copy_context()  # the log line carries the run's ids
-    return await asyncio.get_running_loop().run_in_executor(
-        _pool(), context.run, _measured, source, time.monotonic(), function, args, kwargs)
+    started = threading.Event()
+    future = asyncio.get_running_loop().run_in_executor(
+        _pool(), context.run, _measured, source, time.monotonic(), function, args, kwargs,
+        started)
+    waited = 0.0
+    while True:
+        try:
+            # shield: the timeout must not cancel the read; a caller's cancel still does
+            return await asyncio.wait_for(asyncio.shield(future), SLOW_READ_SECONDS)
+        except TimeoutError:
+            waited += SLOW_READ_SECONDS
+            with _lock:
+                active = _active
+            logger.warning(
+                "document read still running" if started.is_set()
+                else "document read waiting for a slot",
+                extra={"source": source, "waited_s": waited, "active_reads": active,
+                       "limit": _limit})
+        except asyncio.CancelledError:
+            future.cancel()  # a read still queued never starts; a running one finishes
+            raise

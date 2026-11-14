@@ -35,9 +35,11 @@ never unlimited.
 **Free tenants get chat and Crontal threads only:** no email of any kind and no
 automations, until they move to a paid plan.
 
-A run that reaches a token or iteration limit stops at a turn boundary and finishes
-normally, with a notice in its reply. It isn't a failure and isn't retried. Codex
-has no iteration control, so only tokens apply to it.
+On the native harness, a run that reaches a token or iteration limit stops at a turn
+boundary and finishes normally, with a notice in its reply. It isn't a failure and
+isn't retried. Codex reports usage only when its turn is over, so it can't be
+stopped early: its answer is kept, and a run that went past the limit is logged as
+`run went past its plan's token limit`. Free plans can't use Codex.
 
 ## What counts
 
@@ -66,7 +68,9 @@ turned on, over-limit mail is dropped too.
 
 ## Release
 
-Only plans set to `hold` hold anything. Held inputs are released oldest first, each counting against the current month, for
+Only plans set to `hold` hold anything. In a new month, a new metered input first
+releases what fits of the held backlog, in the same transaction, so it never takes
+the allowance ahead of older held inputs. Held inputs are released oldest first, each counting against the current month, for
 as long as the allowance lasts. **The rest stay held for the next month; nothing is
 discarded.** Release happens at the start of each month (a sleeping tenant's
 `next_wake_at` includes the reset), and on a plan change.
@@ -162,7 +166,8 @@ Everything else, including `/app`, `/login`, `/login/ticket`, sign-in tickets,
 | Anything that runs code (`exec`) | **Denied** | **Denied** |
 | `automation.*` | **Denied** | **Denied** |
 
-**Storage.** Checked at write time; over the limit the write fails with a **413**
+**Storage.** Checked at write time against a total counted once at start and kept
+current on each write (recounted in a worker thread once a minute old); over the limit the write fails with a **413**
 `{"error": "storage_limit_reached", "scope": "upload" | "workspace", "limit_bytes",
 "message"}`. The agent's tools return the same message as a tool error. Inbound
 attachments and Crontal notifications are always stored, and then count against the

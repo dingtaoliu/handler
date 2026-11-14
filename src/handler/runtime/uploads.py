@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .images import sniff
-from .storage import StorageLimitReached, directory_size
+from .storage import StorageLimitReached, UsedBytes
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_FILES_PER_REQUEST = 10
@@ -64,6 +64,7 @@ class UploadStore:
     def __init__(self, root: Path, *, limit: Callable[[], int | None] | None = None) -> None:
         self.root = Path(root)
         self._limit = limit  # total bytes this tenant may keep, if limited
+        self.used = UsedBytes(self.root)
 
     def _dir(self, user_id: str, file_id: str) -> Path:
         return self.root / _safe_part(user_id) / file_id
@@ -82,7 +83,7 @@ class UploadStore:
         size = 0
         head = b""
         allowed = self._limit() if self._limit is not None else None
-        kept = directory_size(self.root) if allowed is not None else 0
+        kept = self.used.used() if allowed is not None else 0
         try:
             with path.open("wb") as out:
                 for chunk in chunks:
@@ -101,6 +102,7 @@ class UploadStore:
         except BaseException:
             self._remove(directory)
             raise
+        self.used.add(size)
         return meta
 
     def get(self, file_id: str) -> UploadedFile | None:
@@ -137,6 +139,7 @@ class UploadStore:
 
     def delete(self, meta: UploadedFile) -> None:
         self._remove(self._dir(meta.user_id, meta.id))
+        self.used.add(-meta.size)
 
     @staticmethod
     def _remove(directory: Path) -> None:
