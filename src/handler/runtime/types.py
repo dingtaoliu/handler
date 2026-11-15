@@ -138,6 +138,10 @@ class Thread:
     # Records a chat was opened from (e.g. crontal:rfq:123), newest last; the
     # chat link source feeds them to run-start memory. None until any arrive.
     context_links: list[str] | None = None
+    # The Handler context block last injected into the harness session, as
+    # "<session_id>:<sha256 of the block>" (openai_agents). A new session or a
+    # changed block no longer matches, so the next turn injects the block again.
+    context_hash: str | None = None
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -485,6 +486,23 @@ async def test_refused_compaction_is_turned_off_and_retried(tmp_path, runner, mo
     assert runner.calls[1]["agent"].model_settings.context_management is None
 
 
+async def test_final_reports_a_compacted_turn(tmp_path, runner):
+    usage = SimpleNamespace(input_tokens=900, output_tokens=200,
+                            input_tokens_details=SimpleNamespace(cached_tokens=0),
+                            output_tokens_details=SimpleNamespace(reasoning_tokens=0))
+    response = SimpleNamespace(id="resp_1", usage=usage, output=[
+        SimpleNamespace(type="compaction", id="cmp_1")])
+    raw = SimpleNamespace(type="raw_response_event",
+                          data=SimpleNamespace(type="response.completed", response=response))
+    runner.state["next"] = FakeStream([raw, *_events()])
+    harness = oa.OpenAIAgentsHarness("key", client=FakeClient())
+    events = await _collect(harness, _req(tmp_path))
+    assert events[-1].kind is RunEventKind.FINAL and events[-1].data["compacted"] is True
+    runner.state["next"] = None
+    events = await _collect(harness, _req(tmp_path))
+    assert "compacted" not in events[-1].data
+
+
 async def test_token_limit_stops_the_run_after_the_turn(tmp_path, runner):
     class Limited(FakeStream):
         modes: list[str] = []
@@ -527,21 +545,21 @@ async def test_turn_limit_error_without_a_plan_limit_is_still_a_failure(tmp_path
         [e async for e in harness.run(_req(tmp_path))]
 
 
-async def test_stable_prompt_cache_key_and_retention_reach_the_request(tmp_path, runner):
+async def test_stable_prompt_cache_key_reaches_the_request(tmp_path, runner):
     from agents.run_internal.prompt_cache_key import (
         PromptCacheKeyResolver, model_settings_with_prompt_cache_key,
     )
 
     harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
-    await _collect(harness, _req(tmp_path, prompt_cache_key="handler:abc",
-                                 prompt_cache_retention="24h"))
+    await _collect(harness, _req(tmp_path, prompt_cache_key="handler:abc"))
     settings = runner.calls[0]["agent"].model_settings
     assert settings.extra_args == {"prompt_cache_key": "handler:abc"}
-    assert settings.prompt_cache_retention == "24h"
+    # Retention is deprecated (24h is the default and the only value on newer
+    # models): it is never sent.
+    assert settings.prompt_cache_retention is None
     # Against the official endpoint (where the SDK would otherwise generate a
     # per-conversation key), a caller-supplied key makes the resolver opt out.
-    agent = oa.OpenAIAgentsHarness("k")._agent(
-        _req(tmp_path, prompt_cache_key="handler:abc", prompt_cache_retention="24h"), [])
+    agent = oa.OpenAIAgentsHarness("k")._agent(_req(tmp_path, prompt_cache_key="handler:abc"), [])
     assert agent.model._supports_default_prompt_cache_key()
     assert PromptCacheKeyResolver().resolve(
         agent.model_settings, model=agent.model, conversation_id="conv_1",
@@ -551,7 +569,11 @@ async def test_stable_prompt_cache_key_and_retention_reach_the_request(tmp_path,
         system_instructions=None, input="hi", model_settings=agent.model_settings, tools=[],
         output_schema=None, handoffs=[], conversation_id="conv_1", stream=True)
     assert kwargs["prompt_cache_key"] == "handler:abc"
-    assert kwargs["prompt_cache_retention"] == "24h"
+    assert kwargs["prompt_cache_retention"] is openai.omit
+
+
+def test_retention_is_gone_from_the_request():
+    assert "prompt_cache_retention" not in {f.name for f in fields(RunRequest)}
 
 
 async def test_without_a_key_the_sdk_default_applies(tmp_path):
@@ -571,31 +593,29 @@ async def test_without_a_key_the_sdk_default_applies(tmp_path):
     assert kwargs["prompt_cache_retention"] is openai.omit
 
 
-async def test_refused_cache_retention_is_dropped_and_retried(tmp_path, runner, monkeypatch):
+async def test_refused_cache_key_is_dropped_and_retried(tmp_path, runner, monkeypatch):
     _sequence(runner, monkeypatch, [
         FakeStream([], error=_api_error(
             openai.BadRequestError,
-            "Unsupported parameter: 'prompt_cache_retention' is not supported with this model.",
+            "Unsupported parameter: 'prompt_cache_key' is not supported with this model.",
             400)),
         FakeStream(_events())])
     harness = oa.OpenAIAgentsHarness("k", client=FakeClient(), compact_threshold=150_000)
-    req = _req(tmp_path, session_id="conv_9", prompt_cache_key="handler:abc",
-               prompt_cache_retention="24h")
+    req = _req(tmp_path, session_id="conv_9", prompt_cache_key="handler:abc")
     events = await _collect(harness, req)
     assert events[-1].kind is RunEventKind.FINAL
     first, second = (c["agent"].model_settings for c in runner.calls)
-    assert first.prompt_cache_retention == "24h"
-    assert second.prompt_cache_retention is None
-    assert second.extra_args == {"prompt_cache_key": "handler:abc"}
+    assert first.extra_args == {"prompt_cache_key": "handler:abc"}
+    assert second.extra_args is None
     assert second.context_management  # other settings are untouched
-    # Remembered for that model only: later runs of it omit retention.
-    assert harness._agent(req, []).model_settings.prompt_cache_retention is None
-    assert harness._agent(_req(tmp_path, model="other", prompt_cache_retention="24h"),
-                          []).model_settings.prompt_cache_retention == "24h"
+    # Remembered for that model only: later runs of it omit the key.
+    assert harness._agent(req, []).model_settings.extra_args is None
+    assert harness._agent(_req(tmp_path, model="other", prompt_cache_key="handler:abc"),
+                          []).model_settings.extra_args == {"prompt_cache_key": "handler:abc"}
 
 
-async def test_cache_retention_refused_twice_fails_without_looping(tmp_path, runner, monkeypatch):
-    refused = "Unsupported parameter: 'prompt_cache_retention'."
+async def test_cache_key_refused_twice_fails_without_looping(tmp_path, runner, monkeypatch):
+    refused = "Unsupported parameter: 'prompt_cache_key'."
     _sequence(runner, monkeypatch, [
         FakeStream([], error=_api_error(openai.BadRequestError, refused, 400)),
         FakeStream([], error=_api_error(openai.BadRequestError, refused, 400)),
@@ -603,5 +623,31 @@ async def test_cache_retention_refused_twice_fails_without_looping(tmp_path, run
     harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
     with pytest.raises(HarnessError):
         await _collect(harness, _req(tmp_path, session_id="conv_9",
-                                     prompt_cache_retention="24h"))
+                                     prompt_cache_key="handler:abc"))
     assert len(runner.calls) == 2
+
+
+async def test_context_block_is_a_user_item_before_the_turn(tmp_path, runner):
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
+    context = "<handler_context>\n\n## Index\npeople/a: A\n\n</handler_context>"
+    await _collect(harness, _req(tmp_path, context=context))
+    first, turn = runner.calls[0]["input"]
+    assert first == {"role": "user", "content": [{"type": "input_text", "text": context}]}
+    assert turn == {"role": "user",
+                    "content": [{"type": "input_text", "text": "how many RFQs?"}]}
+    # The instructions carry no per-run content.
+    assert runner.calls[0]["agent"].instructions == "Be brief."
+
+
+async def test_context_block_keeps_images_with_the_turn(tmp_path, runner):
+    image = tmp_path / "shot.png"
+    image.write_bytes(PNG_BYTES)
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
+    await _collect(harness, _req(tmp_path, images=[image], context="<handler_context>x"
+                                 "</handler_context>"))
+    first, turn = runner.calls[0]["input"]
+    assert first["role"] == "user" and first["content"][0]["text"].startswith("<handler_context>")
+    assert turn["role"] == "user"
+    text, img = turn["content"]
+    assert text == {"type": "input_text", "text": "how many RFQs?"}
+    assert img["image_url"].startswith("data:image/png;base64,")

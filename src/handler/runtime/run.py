@@ -33,13 +33,13 @@ from .harness.base import (
 )
 from .harness.codex import tool_input as codex_tool_input
 from .images import MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, downscale, sniff_file
-from .instructions import build_instruction_components
+from .instructions import build_instruction_components, context_as_message
 from .mail.intake import render_email_event, resolve_act_as
 from .memory import MemoryTools
 from .observability.memory import process_memory
 from .observability.pricing import PriceTable
 from .observability.prompt_tokens import (
-    prompt_cache_key, render_components, stable_prefix_text,
+    context_digest, prompt_cache_key, render_components, render_context, render_instructions,
 )
 from .observability.attribution import capture_attribution
 from .observability.recorder import RawSink, StepRecorder
@@ -363,7 +363,9 @@ class RunPlan:
     max_turns: int | None = None
     max_tokens: int | None = None
     prompt_cache_key: str | None = None
-    prompt_cache_retention: str | None = None
+    # The per-run <handler_context> block for a harness that takes it as an
+    # input item ("" when the harness gets it inside `instructions`, or none).
+    context: str = ""
 
 
 class _RunRecorder(StepRecorder):
@@ -641,6 +643,7 @@ class RunExecutor:
             prompt = render_turn(events)
             if attached:
                 prompt += "\n\nAttached files: " + ", ".join(attached)
+            session_id = None if plan.fresh_session else thread.session_id or None
             req = RunRequest(
                 run_id=run.id,
                 thread_key=thread.key,
@@ -649,7 +652,7 @@ class RunExecutor:
                 prompt=prompt,
                 images=images,
                 instructions=plan.instructions,
-                session_id=None if plan.fresh_session else thread.session_id or None,
+                session_id=session_id,
                 model=plan.model,
                 reasoning_effort=plan.reasoning_effort,
                 mcp_servers=mcp_servers,
@@ -660,11 +663,12 @@ class RunExecutor:
                 fresh_session=plan.fresh_session,
                 bounded_task_models=plan.bounded_task_models,
                 prompt_cache_key=plan.prompt_cache_key,
-                prompt_cache_retention=plan.prompt_cache_retention,
+                context=_context_to_send(thread, plan.context, session_id),
             )
             try:
-                final_text = await self._stream(
+                final_text, compacted = await self._stream(
                     lease, thread, run, harness, req, recorder, transcript,
+                    context=plan.context,
                 )
             except (asyncio.CancelledError, LeaseLost):
                 # A stale owner must not overwrite the next owner's durable files.
@@ -677,6 +681,7 @@ class RunExecutor:
                 # reply path: a per-run sync added minutes to every message.
                 self.workspace_sync.mark_dirty(slug)
 
+            await self._record_context(lease, thread, "" if compacted else plan.context)
             usage, cost = recorder.totals()
             run.status, run.usage, run.cost_usd, run.finished_at = (
                 RunStatus.COMPLETED, usage, cost, utcnow())
@@ -751,10 +756,28 @@ class RunExecutor:
                 attached.append(f"{rel} (image, shown to you with this message)")
         return images, attached
 
+    async def _record_context(self, lease: Lease, thread: Thread, context: str) -> None:
+        """Remember the context block the session now holds (sent now or before).
+
+        Only after a completed run: a failed one may not have stored its input,
+        and sending the same block again is harmless (the newest supersedes).
+        An empty context (none, or the turn compacted the session's history so
+        the block survives only in a summary) clears it: the next turn sends it.
+        """
+        if not thread.session_id:
+            return
+        marker = f"{thread.session_id}:{context_digest(context)}" if context else None
+        if marker != thread.context_hash:
+            if not await self.store.set_context_hash(lease, marker):
+                raise LeaseLost(thread.key)
+            thread.context_hash = marker
+
     async def _stream(
         self, lease: Lease, thread: Thread, run: Run, harness: Harness,
         req: RunRequest, recorder: _RunRecorder, transcript: list[Message],
-    ) -> str:
+        *, context: str = "",
+    ) -> tuple[str, bool]:
+        """The final text, and whether the harness compacted the session's history."""
         input_count = len(transcript)
         if req.session_id:
             # Receipts bypassed the model; carry them into its next real turn.
@@ -784,6 +807,7 @@ class RunExecutor:
                 req = replace(req, prompt=recap + "\n\nCurrent turn:\n" + req.prompt)
         for attempt in range(2):
             final_text = ""
+            compacted = False
             progressed = False
             tool_inputs: dict[str, Any] = {}
             try:
@@ -802,26 +826,29 @@ class RunExecutor:
                         if sid and sid != thread.session_id:
                             if not await self.store.set_session(lease, sid):
                                 raise LeaseLost(thread.key)
-                            thread.session_id = sid
+                            thread.session_id, thread.context_hash = sid, None
                     elif ev.kind is RunEventKind.FINAL:
                         final_text = ev.data.get("text", "")
+                        compacted = bool(ev.data.get("compacted"))
                         self._note_overspend(harness, req, recorder)
                     msg = transcript_message(thread.key, run.id, ev, tool_inputs)
                     if msg is not None:
                         transcript.append(msg)
                         transcript.extend(await self._approval_requests(msg))
                         transcript.extend(await self._question_requests(msg))
-                return final_text
+                return final_text, compacted
             except HarnessError as exc:
                 if (attempt or progressed or not req.session_id
                         or not _missing_session(exc, req.session_id)):
                     raise
                 if not await self.store.set_session(lease, ""):
                     raise LeaseLost(thread.key)
-                thread.session_id = None
+                thread.session_id, thread.context_hash = None, None
                 await recorder.session_retry(str(exc))
                 recap = await self._recap(thread.key, exclude_events=current)
+                # The new session starts without the context block: send it in full.
                 req = replace(req, session_id=None, repair_session=False,
+                              context=context or None,
                               prompt=(recap + "\n\nCurrent turn:\n" if recap else "") + req.prompt)
                 del transcript[input_count:]
         raise AssertionError("unreachable")
@@ -970,7 +997,6 @@ class RunExecutor:
                 "draft": efficiency["drafting_model"],
             }
         available_tools = self.config.available_tools
-        stable_text = plan.instructions
         if self.memory_tools is not None:
             if self.config.available_tools_for is not None:
                 ctx = current_run() or RunContext(
@@ -983,10 +1009,15 @@ class RunExecutor:
                 crontal_identity=self.crontal_identity, crontal_catalog=self.crontal_catalog,
                 thread_key=thread.key, events=events,
                 available_tools=available_tools, harness=thread.harness)
-            built = render_components(components)
-            stable_text = stable_prefix_text(components)
+            if context_as_message(thread.harness):
+                # Instructions identical for every thread of the type; per-run
+                # sections go in the context message (_context_to_send).
+                built = render_instructions(components)
+                plan.context = render_context(components)
+            else:
+                built = render_components(components)  # Codex: one combined text
             plan.instructions = "\n\n".join(p for p in (built, self.config.instructions) if p)
-        _plan_prompt_cache(plan, efficiency, stable_text, tools=available_tools,
+        _plan_prompt_cache(plan, efficiency, plan.instructions, tools=available_tools,
                            harness=thread.harness)
         return plan
 
@@ -1036,17 +1067,29 @@ class RunExecutor:
         self.bus.publish(BusMessage(thread_key=thread_key, run_id=run_id, type=type_, data=data))
 
 
-def _plan_prompt_cache(plan: RunPlan, efficiency: dict, stable_text: str, *,
+def _plan_prompt_cache(plan: RunPlan, efficiency: dict, instructions: str, *,
                        tools: AbstractSet[str] | None, harness: str | None) -> None:
-    """Set the plan's prompt cache key (from the stable prefix only) and retention."""
+    """Set the plan's prompt cache key: a hash of instructions, tools, model, harness."""
     if efficiency.get("stable_prompt_cache_key", True):
         if tools is not None and plan.bounded_task_models:
             # The harness adds this function tool; its schema is part of the prefix.
             tools = {*tools, "bounded_model_task"}
-        plan.prompt_cache_key = prompt_cache_key(stable_text, tools=tools,
+        plan.prompt_cache_key = prompt_cache_key(instructions, tools=tools,
                                                  model=plan.model, harness=harness)
-    retention = efficiency.get("prompt_cache_retention", "24h")
-    plan.prompt_cache_retention = retention if retention != "in_memory" else None
+
+
+def _context_to_send(thread: Thread, context: str, session_id: str | None) -> str | None:
+    """The context block to send this turn, or None when the session holds it.
+
+    Sent in full on a session's first turn (new thread, fresh automation
+    session, rotation) and whenever it differs from the last one sent; the
+    Conversation is append-only, so an unchanged block is never repeated.
+    """
+    if not context:
+        return None
+    if session_id and thread.context_hash == f"{session_id}:{context_digest(context)}":
+        return None
+    return context
 
 
 def _preview(data: dict, limit: int = 2000) -> dict:

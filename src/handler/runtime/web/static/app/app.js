@@ -1317,6 +1317,21 @@ function renderPromptPreview(section) {
     pre.className = "prompt-preview"; pre.textContent = "Loading...";
     const accounting = document.createElement("div");
     let request = 0;
+    const breakdownTable = (b, label) => {
+        const table = document.createElement("table");
+        const head = table.createTHead().insertRow();
+        for (const h of ["Component", "Tokens", `% of ${label}`]) {
+            const th = document.createElement("th"); th.textContent = h; head.appendChild(th);
+        }
+        const body = table.createTBody();
+        for (const c of b.components) {
+            const row = body.insertRow();
+            for (const value of [c.name + (c.dynamic ? " (changes per run)" : ""), c.tokens.toLocaleString(), c.percent.toFixed(2) + "%"]) {
+                row.insertCell().textContent = value;
+            }
+        }
+        return table;
+    };
     const load = async () => {
         promptType = sel.value;
         const current = ++request;
@@ -1325,24 +1340,24 @@ function renderPromptPreview(section) {
         try {
             const r = await api(API.prompt(sel.value));
             if (current !== request) return;
-            pre.textContent = r.prompt;
-            const b = r.token_breakdown;
-            if (b) {
+            const parts = r.parts_token_breakdown;
+            if (r.context_delivery === "user_message" && parts) {
+                // Instructions are cached (identical for every thread of the type);
+                // the context message changes per run and is sent only when it changes.
+                pre.textContent = r.instructions + (r.context ? "\n\n--- context message (user role, per run) ---\n\n" + r.context : "");
+                const i = parts.instructions, c = parts.context;
                 const summary = document.createElement("p");
-                summary.textContent = `${b.total_tokens.toLocaleString()} instruction tokens (${b.encoding}${b.encoding_source === "fallback" ? ", fallback encoding" : ""}). Percentages are of instructions only; tools, conversation history, current input and provider overhead are excluded. These are local counts, not billed usage.`;
-                const table = document.createElement("table");
-                const head = table.createTHead().insertRow();
-                for (const label of ["Component", "Tokens", "% of instructions"]) {
-                    const th = document.createElement("th"); th.textContent = label; head.appendChild(th);
+                summary.textContent = `${i.total_tokens.toLocaleString()} instruction tokens, cached with the tools and identical for every ${r.thread_type} thread; ${c.total_tokens.toLocaleString()} context-message tokens, sent as a user message on a session's first turn and whenever it changes (${i.encoding}${i.encoding_source === "fallback" ? ", fallback encoding" : ""}). Tools, conversation history, current input and provider overhead are excluded. These are local counts, not billed usage.`;
+                accounting.append(summary, breakdownTable(i, "instructions"));
+                if (c.total_tokens) accounting.append(breakdownTable(c, "context message"));
+            } else {
+                pre.textContent = r.prompt;
+                const b = r.token_breakdown;
+                if (b) {
+                    const summary = document.createElement("p");
+                    summary.textContent = `${b.total_tokens.toLocaleString()} instruction tokens (${b.encoding}${b.encoding_source === "fallback" ? ", fallback encoding" : ""}). Percentages are of instructions only; tools, conversation history, current input and provider overhead are excluded. These are local counts, not billed usage.`;
+                    accounting.append(summary, breakdownTable(b, "instructions"));
                 }
-                const body = table.createTBody();
-                for (const c of b.components) {
-                    const row = body.insertRow();
-                    for (const value of [c.name + (c.dynamic ? " (changes per run)" : ""), c.tokens.toLocaleString(), c.percent.toFixed(2) + "%"]) {
-                        row.insertCell().textContent = value;
-                    }
-                }
-                accounting.append(summary, table);
             }
         } catch (e) { if (current === request) pre.textContent = "Could not load prompt: " + e.message; }
     };

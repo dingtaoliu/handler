@@ -48,3 +48,20 @@ async def test_thread_context_links_merge_dedupe_and_cap(domain_store, spec, eve
     assert (await store.get_thread(spec.key)).context_links == [
         "crontal:rfq:11", "crontal:rfq:12", "crontal:rfq:13"]
     assert await store.add_thread_context_links("missing", ["crontal:rfq:1"]) == []
+
+
+async def test_context_hash_is_fenced_and_cleared_by_a_new_session(domain_store, spec, event):
+    store = domain_store
+    await store.put(event("first"), spec)
+    assert (await store.get_thread(spec.key)).context_hash is None
+    lease, = await store.claim("worker", spec.lane, 1, 60)
+    assert await store.set_session(lease, "conv_1")
+    assert await store.set_context_hash(lease, "conv_1:abc")
+    thread = await store.get_thread(spec.key)
+    assert thread.session_id == "conv_1" and thread.context_hash == "conv_1:abc"
+    assert await store.set_session(lease, "conv_2")
+    assert (await store.get_thread(spec.key)).context_hash is None
+    from dataclasses import replace
+    stale = replace(lease, version=lease.version + 99)
+    assert not await store.set_context_hash(stale, "conv_2:zzz")
+    assert (await store.get_thread(spec.key)).context_hash is None
