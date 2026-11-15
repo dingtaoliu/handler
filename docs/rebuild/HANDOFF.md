@@ -1,5 +1,44 @@
 # Handoff: handler rebuild
 
+## 2026-11-14 prompt-cache release (Handler v62)
+
+- **Handler v62** (`7c7fde2`, image `2d47da22e2c1`, 2,151,625,279 bytes), on top of the
+  multi-tenant v61. Backup **b042**. **Rollback: v61** (`8e201677a077`). The schema change
+  is additive (`threads.context_hash`), so v61 runs on the migrated schema unchanged.
+- **Why:** the OpenAI Agents SDK derives a `prompt_cache_key` from each conversation, so
+  nothing was ever cached across runs: 0 cached tokens on all 134 BSS first requests of
+  new threads. Synthetic tests on gpt-6.1 show the cache matches at block boundaries,
+  not at the first differing token:
+  - any change inside `instructions` gives 0 cached (tools and instructions form one block);
+  - a `developer`-role input merges into that block;
+  - a `user`-role first input keeps the tools and instructions cached;
+  - a change mid-history falls back to the instructions boundary.
+
+  Memory index, linked memory and speaker lived in the instructions, so any memory change
+  anywhere in an instance made every open chat fully cold.
+- **Change (`c3bc3de` + `c19d68e`):**
+  - Instructions are byte-identical for each thread type.
+  - Memory index, linked memory and speaker go in an append-only user-role
+    `<handler_context>` item. It is sent on a session's first turn and again only when it
+    changes, tracked by `threads.context_hash`, which is reset by a new session or a
+    compaction.
+  - `prompt_cache_key` = hash(instructions + tools + model + harness).
+  - The deprecated `prompt_cache_retention` setting is removed (gpt-5.5+ are 24h only).
+  - Codex is unchanged.
+- **Verified:**
+  - `/healthz`, `/i/{main,bss,yeup}/healthz` return 200; an unknown instance returns 404.
+  - Cross-instance admin keys and requests with no key return 401.
+  - The column exists in all three schemas, and startup is clean.
+  - Crontal proxy calls return 200.
+  - The BSS preview shows instructions without the memory index or speaker; tokens per
+    type: chat 3,840, email 4,988, automation 3,871; context about 1.25k.
+  - Suite: 1,550 passed / 4 skipped.
+- **Measure next:** cached tokens on first requests of new threads (baseline 0/134), and
+  cold chat turns within 30 minutes (baseline 27). Watch for memory text at user-role
+  authority being treated as a request.
+- Analysis: hephaestus `docs/handler-chat-cost-audit-2026-11-14.md`; unmerged branches
+  `audit/chat-context-2026-11-14` and `docs/trigger-action-design`.
+
 ## 2026-11-14 multi-tenant release (stage 1: everything switched off)
 
 **Picking this up? Start with [multi-tenant-handoff.md](multi-tenant-handoff.md)**: state,
