@@ -491,6 +491,10 @@ class RunExecutor:
             self._log_run_memory("end")
             RunExecutor._active_runs -= 1
             reset_current_run(token)
+        # Completed or failed: upload what the run changed now, in the background,
+        # so a restart loses no finished run's files. A no-op when nothing is
+        # dirty (e.g. the lease was lost: a stale owner must not upload).
+        self.workspace_sync.flush_soon(thread_slug(thread.key))
 
     def _log_run_memory(self, phase: str) -> None:
         logger.info("run memory", extra={
@@ -551,7 +555,9 @@ class RunExecutor:
             await work
         except asyncio.CancelledError:
             if not lost.is_set():
-                # Shutdown or user cancellation: the run cannot finish.
+                # Shutdown or user cancellation: the run cannot finish. The lease is
+                # still ours, so the shutdown flush may upload what it wrote.
+                self.workspace_sync.mark_dirty(thread_slug(thread.key))
                 await self._abandon(thread, run, "abandoned: the runtime stopped mid-run")
                 raise
             logger.warning("lease lost mid-run, abandoning: %s", thread.key)
@@ -677,8 +683,8 @@ class RunExecutor:
                 self.workspace_sync.mark_dirty(slug)
                 raise
             else:
-                # Uploaded later (periodically and at shutdown), not on the
-                # reply path: a per-run sync added minutes to every message.
+                # Uploaded in the background once the run ends (execute), not on
+                # the reply path: a per-run sync added minutes to every message.
                 self.workspace_sync.mark_dirty(slug)
 
             await self._record_context(lease, thread, "" if compacted else plan.context)
