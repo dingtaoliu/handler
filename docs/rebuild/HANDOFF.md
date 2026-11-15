@@ -2,6 +2,9 @@
 
 ## 2026-11-14 multi-tenant release (stage 1: everything switched off)
 
+**Picking this up? Start with [multi-tenant-handoff.md](multi-tenant-handoff.md)**: state,
+owner decisions, next steps, rollback and working notes.
+
 Design: [multi-tenant-design.md](multi-tenant-design.md) (owner decisions in its
 Decisions table); next architecture step: [role-split-design.md](role-split-design.md)
 (proposed, not approved). Branch `feat/multi-tenant` merged to `main` at `25a3284`.
