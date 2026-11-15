@@ -24,7 +24,7 @@ is at the top of [HANDOFF.md](HANDOFF.md).
 4. **Email on free:** refused and not stored. An upgrade processes only mail that arrives after it. The never-lose-mail rule applies wherever email is a channel, and paid tenants keep the email spool.
 5. **Merchant-wide Crontal events** (bids today) go to Handler as one webhook and one input per merchant. Per-user notifications are unchanged.
 6. **Production follows `main`** in both repos. `rebuild` was merged and deleted.
-7. The owner wants the role split (separate inbox, worker and outbox roles, able to run on one dyno) designed next, after this release.
+7. The owner wants the role split (separate inbox, worker and outbox roles, able to run on one dyno) designed next, after this release. **Revised November 15:** the goal is one host whose processes, memory and connections are shared across tenants. The stages may share one process. See the rewritten role-split-design.md.
 
 ## What to do next, in order
 
@@ -34,14 +34,14 @@ is at the top of [HANDOFF.md](HANDOFF.md).
    - **The first bid event:** check it arrives at Handler once per merchant (Crontal `handler_outbox` row with `recipient_user_id` NULL, sent with `"scope": "merchant"`).
    - **`document read waiting for a slot` logs:** if these appear, raise `HANDLER_DOC_READ_MAX_CONCURRENT`.
 2. **`HANDLER_MAX_CONCURRENT` is still 20.** The review suggested 3, but lowering it only helps if each instance's lane limits are at their defaults (2 interactive, 1 background). Check before changing it.
-3. **Get the owner's decision on registry timing** (role-split-design.md, open decision 1). The recommendation is to build the role split first, so production never runs the tenant start/stop lifecycle that the split removes. The alternative is a free pilot now.
-4. **If the owner chooses a free pilot now:**
+3. **Registry timing is decided (November 15):** build role-split-design.md through step 3, then switch on the registry and import `main`, `bss` and `yeup`. No free pilot before that.
+4. **Switching on the registry, at the end of role-split step 3:**
    1. Set `HANDLER_TENANT_REGISTRY=1`, `HANDLER_PLATFORM_KEY` and `HANDLER_TENANT_SECRET_KEY` on `crontal-agent`. Verify the three env tenants import into the registry unchanged.
    2. Set `HANDLER_PLATFORM_URL` and `HANDLER_PLATFORM_KEY` on Crontal.
    3. Switch a few merchants on with `flask handler-instance cutover --on --merchant-id <id>`.
 
-   See [tenant-registry.md](tenant-registry.md), [plan-limits.md](plan-limits.md) and Crontal's `docs/handler-instances.md`. Remove the old agent (`AIAgentPanel`, the agent loop) only after a week-long pilot with all merchants moved.
-5. **If the owner approves the role split:** follow its build order. Step 1 moves run events, approvals, questions, cancellation and cache invalidation onto Postgres. Before starting, verify how the tool gateway waits for an approval today, since an in-memory wait would not survive the split.
+   See [tenant-registry.md](tenant-registry.md), [plan-limits.md](plan-limits.md) and Crontal's `docs/handler-instances.md`. Remove Crontal's old agent (`AIAgentPanel`, the agent loop) only after a week with all merchants moved.
+5. **The role split is approved (November 15):** follow its build order. Steps 0 and 1 add the native-only guard and parked threads; step 2 replaces the per-tenant scheduler, housekeeping and poller tasks with one timer for the host. Approvals were checked on November 15: they park and resume as new events, with no in-memory wait.
 
 ## Known gaps and accepted risks
 
