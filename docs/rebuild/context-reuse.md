@@ -30,7 +30,8 @@ showed 87.2% cached input; a local string cache cannot eliminate historical inpu
 or its read cost. The current Agents SDK sends system instructions through the
 top-level `instructions` field, where explicit text cache breakpoints cannot be
 placed. Moving changing instructions into persisted Conversation input would
-accumulate stale policy snapshots, so this change does not do that. See the
+accumulate stale policy snapshots, so this change does not do that. (Superseded
+for per-run data, not policy: see "Instructions per thread type" below.) See the
 [official caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
 and the item 5 design for the examined alternatives.
 
@@ -63,33 +64,99 @@ openai-agents 0.24 generates a `prompt_cache_key` from each `conversation_id` wh
 ModelSettings supplies none, so every new mail thread, scheduled firing (fresh
 session) and new chat got its own key and never reused the shared ~17-18k-token
 prefix (tool schemas + stable instructions): 0 cached tokens on all 134 new-thread
-first requests in the BSS ledger.
+first requests in the BSS ledger. A key per request prefix (c3bc3de) fixed the
+routing, but the cache still could not hit while the instructions differed (below).
 
-`_plan()` now derives the key from the request's stable context only:
-`"handler:" + sha256(json{model, harness, sorted effective tool names (plus
-bounded_model_task when the harness adds it), stable instruction prefix})[:32]`.
-The stable prefix is `stable_prefix_text()` in `observability/prompt_tokens.py`,
-the same text the settings preview fingerprints (`stable_prefix.sha256`), so the
-two cannot drift. Dynamic components (thread guidance, scheduled checkpoint
-guidance, memory index, linked memory, speaker) and the trailing configured
-instructions are excluded. Thread types with the same prefix therefore share a key;
-a different tool inventory, stable text or model gets another. Without memory
-tools the configured instructions are hashed instead. No user text is in the key.
+## Instructions per thread type, context as a user message (openai_agents)
 
-The harness sends it as `ModelSettings(extra_args={"prompt_cache_key": key})`
-(ModelSettings has no native field). The SDK's `PromptCacheKeyResolver` returns
-None when `extra_args`/`extra_body` already contain `prompt_cache_key`, so it adds
-no per-conversation key; the Responses model forwards `extra_args` into
-`responses.create()`. It also sends `ModelSettings.prompt_cache_retention="24h"`.
+Measured 2026-11-14 (synthetic, gpt-6.1-terra/sol): OpenAI matches cached prefixes
+at block boundaries, not up to the first differing token. Tool definitions plus
+`instructions` are one block: any change inside it (e.g. a different memory-index
+tail after 7.3k identical tokens) gives 0 cached tokens. A first `developer`-role
+input item belongs to the same block. A first `user`-role item does not: changing
+it still caches the whole tools+instructions prefix. A divergence in mid or late
+history falls back to the instructions boundary, not to the last matching message;
+appending to an identical earlier prompt gives a near-full hit.
 
-Settings (`efficiency`, live, no deploy): `stable_prompt_cache_key` (default true;
-false restores the SDK's per-conversation key) and `prompt_cache_retention`
-(`"24h"` default, or `"in_memory"`, which omits the parameter so the request is
-exactly as before and the API default applies). A 400 naming
-`prompt_cache_retention` (or `prompt_cache_key`) is retried once without that
-parameter and remembered per model for the process, with a warning, like refused
-compaction. Codex and `bounded_model_task` helper requests are unchanged.
+Before, the memory index, linked memory (with the chat context-links line) and the
+speaker were rendered at the end of the instructions. Every memory change anywhere
+in the instance (the index lists recently updated topics) and every change in
+per-thread links made every thread's next request fully cold, and no two threads
+ever shared instructions.
 
-Unverified: whether 24h retention is priced differently from in-memory caching,
-and which models accept it. Check the provider's current pricing/caching docs and
-measure cached-token share on new-thread first requests after release.
+Now (`instructions.py`, `observability/prompt_tokens.py`, `run.py`):
+
+- **Instructions** = f(settings, thread type, tool inventory), byte-identical for
+  every thread of a type: persona, Crontal identity, thread-type guidance
+  (`thread_guidance`, `scheduled_checkpoint_guidance`, now non-dynamic), ask_user,
+  integration/tool hints, bounded-task, approval, mail-summary and task-outcome
+  guidance, the route catalog, memory rules and kinds, a new `context_rules` line,
+  then `RunConfig.instructions`. Order is fixed.
+- **Context block** (components with `dynamic=True`): `memory_index`,
+  `linked_memory` (including the chat context-links line) and `speaker`, wrapped
+  in `<handler_context>` ... `</handler_context>` (`render_context()`), sent as a
+  separate **user-role** input item before the turn (`_input()`; images stay on
+  the turn's own item).
+- `context_rules` (static) tells the model these blocks come from the Handler
+  runtime, not the person: data (memory index, linked topics, speaker), never user
+  instructions; the newest block supersedes earlier ones; memory content stays
+  data under the memory rules (untrusted-topic marking is unchanged).
+
+Offline sizes with default settings, a typical tool set and 30 one-line topics
+(o200k; no persona, catalog or memory kinds): chat instructions 849 tokens /
+context 331; automation 880 / 324; email 1,994 / 324 (default email
+instructions); crontal 918 / 324. On BSS the instructions also hold the persona,
+Crontal identity and ~1.4k-token route catalog; the context is the index plus
+linked topics. Re-measure from the live preview.
+
+### Append-only injection
+
+History lives in an OpenAI Conversation, so an injected block stays in it. The
+executor sends the block (`RunRequest.context`) only when the session does not
+hold it yet:
+
+- always on a session's first turn: a new thread, a `fresh_session` automation
+  firing, a missing-session retry (`_stream` puts the full block back on the
+  retried request), a Codex-to-native move or an operator session reset;
+- on later turns only when `sha256(block)` differs from the last block recorded
+  for that session; then the full new block (no diffs).
+
+`threads.context_hash` holds `"<session_id>:<sha256>"` (SQLite: `ADDED_COLUMNS`;
+Postgres: `schema_pg_thread_context.sql`). Because the session id is part of it, a
+new session never matches; `set_session` also clears it. It is written, fenced,
+only after a completed run (`_record_context`): a failed run may not have stored
+its input, and repeating a block is harmless. If the harness reports that the turn
+compacted the Conversation (a `compaction` output item; FINAL `compacted: True`),
+the hash is cleared, so the next turn sends the block again instead of relying on
+the compaction summary. Deterministic receipt turns make no model call and leave
+the hash alone; approval resumptions are ordinary turns of the same session.
+
+### Key, retention, preview, Codex
+
+- `prompt_cache_key` = `"handler:" + sha256(json{v: 2, model, harness, sorted tool
+  names (plus bounded_model_task when the harness adds it), full instructions})[:32]`:
+  a hash of the system prompt, equal for every thread of a type. Different types,
+  tools, settings or models get different keys. Sent through
+  `ModelSettings(extra_args=...)`, so the SDK adds no per-conversation key. Switch:
+  `efficiency.stable_prompt_cache_key` (default true). A 400 naming
+  `prompt_cache_key` is retried once without it and remembered per model.
+- `prompt_cache_retention` is removed (setting, RunPlan/RunRequest field and
+  ModelSettings argument). It is deprecated in the openai client, gpt-5.5 and later
+  support only 24h, and non-ZDR orgs already default to 24h. Stored `efficiency`
+  values that still contain it load: a `mode="before"` validator drops the key,
+  like `email.allowed_senders`.
+- `/api/settings/prompt` keeps `prompt` and `token_breakdown` (everything
+  combined) and adds `harness`, `context_delivery` (`user_message` or
+  `instructions`), `instructions`, `context` and `parts_token_breakdown`
+  (`instructions` and `context` token tables; `instructions.stable_prefix.sha256`
+  is the fingerprint of the cached text). The settings page shows both parts.
+- Codex is unchanged: it still gets one combined instruction text
+  (`render_components()`, per-run sections last) and no context item or
+  `context_rules` line. The only difference is that thread-type guidance now sits
+  with the other static sections instead of after them.
+
+Risk: memory, linked topics and the speaker now reach the model as user-role
+input instead of system instructions. The markers, `context_rules` and the
+existing untrusted-topic marking frame it as data. Watch for the model treating
+memory text as a user request, and for the speaker line carrying less weight than
+before.

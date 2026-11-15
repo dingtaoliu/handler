@@ -480,14 +480,23 @@ async def test_chat_context_links_load_linked_memory(tmp_path):
         await db.close()
 
 
-async def test_chat_and_automation_share_prefix_without_losing_guidance(store, crontal_settings):
+async def test_thread_type_guidance_is_instruction_text_without_losing_it(store, crontal_settings):
     from handler.runtime.instructions import build_instruction_components
-    from handler.runtime.observability.prompt_tokens import prompt_token_breakdown, render_components
+    from handler.runtime.observability.prompt_tokens import (
+        prompt_token_breakdown, render_context, render_instructions,
+    )
     memory = MemoryTools(store, crontal_settings)
     kwargs = dict(speaker=None, available_tools={"memory_read"}, harness="openai_agents")
     chat = await build_instruction_components(crontal_settings, memory, thread_type=ThreadType.CHAT, **kwargs)
     automation = await build_instruction_components(crontal_settings, memory, thread_type=ThreadType.AUTOMATION, **kwargs)
-    assert prompt_token_breakdown(chat)["stable_prefix"] == prompt_token_breakdown(automation)["stable_prefix"]
-    assert "Reply to the user" in render_components(chat)
-    assert "Scheduled firings start fresh" in render_components(automation)
+    # Per-type guidance is fixed for the type: it stays in the (cached) instructions.
+    assert "Reply to the user" in render_instructions(chat)
+    assert "Scheduled firings start fresh" in render_instructions(automation)
+    assert "Reply to the user" not in render_context(chat)
+    assert prompt_token_breakdown(chat)["stable_prefix"] != prompt_token_breakdown(automation)["stable_prefix"]
     assert all(c.dynamic for c in automation[next(i for i,c in enumerate(automation) if c.dynamic):])
+    # A memory change leaves every type's instructions byte-identical.
+    await store.put_topic(MemoryTopic("policies", "New preference", "Use metric."), None)
+    again = await build_instruction_components(crontal_settings, memory, thread_type=ThreadType.AUTOMATION, **kwargs)
+    assert render_instructions(again) == render_instructions(automation)
+    assert "New preference" in render_context(again) and "New preference" not in render_context(automation)

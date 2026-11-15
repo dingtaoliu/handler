@@ -690,8 +690,18 @@ class PostgresCore(PostgresUsage):
 
     async def set_session(self, lease: Lease, session_id: str) -> bool:
         async def write(conn: AsyncConnection) -> bool:
-            await conn.execute("UPDATE threads SET session_id = %s WHERE key = %s",
-                               (session_id, lease.thread_key))
+            # A new session holds no Handler context block yet.
+            await conn.execute(
+                "UPDATE threads SET session_id = %s, context_hash = NULL WHERE key = %s",
+                (session_id, lease.thread_key))
+            return True
+
+        return await self._fenced(lease, write)
+
+    async def set_context_hash(self, lease: Lease, context_hash: str | None) -> bool:
+        async def write(conn: AsyncConnection) -> bool:
+            await conn.execute("UPDATE threads SET context_hash = %s WHERE key = %s",
+                               (context_hash, lease.thread_key))
             return True
 
         return await self._fenced(lease, write)

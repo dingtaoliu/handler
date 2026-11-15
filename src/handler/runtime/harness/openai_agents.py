@@ -163,15 +163,26 @@ def workspace_tools(workspace: Path, *, client: openai.AsyncOpenAI | None = None
 
 
 def _input(req: RunRequest) -> str | list[dict[str, Any]]:
-    if not req.images:
+    """The turn's input items: the Handler context block (when sent), then the turn.
+
+    The context is its own user-role item, so the instructions stay identical
+    across runs (they and the tools form the cached block); it is appended to
+    the Conversation like any input, which keeps the history append-only.
+    """
+    if not req.images and not req.context:
         return req.prompt
+    items: list[dict[str, Any]] = []
+    if req.context:
+        items.append({"role": "user",
+                      "content": [{"type": "input_text", "text": req.context}]})
     content: list[dict[str, Any]] = [{"type": "input_text", "text": req.prompt}]
     for path in req.images:
         # From the bytes: a name like "image.png" may hold a JPEG or WebP.
         mime = sniff_file(path) or mimetypes.guess_type(path.name)[0] or "image/png"
         data = base64.b64encode(path.read_bytes()).decode()
         content.append({"type": "input_image", "image_url": f"data:{mime};base64,{data}"})
-    return [{"role": "user", "content": content}]
+    items.append({"role": "user", "content": content})
+    return items
 
 
 def _raw(item: Any) -> dict[str, Any]:
@@ -253,6 +264,9 @@ class _RequestMeter:
         self.call_requests = call_requests
         self.starts: dict[str, datetime] = {}
         self.captured: dict[str, TokenUsage] = {}
+        # A response carried a compaction item: older Conversation items (such
+        # as an earlier Handler context block) now survive only in its summary.
+        self.compacted = False
 
     def response(self, data: Any) -> RunEvent | None:
         response = getattr(data, "response", None)
@@ -267,6 +281,8 @@ class _RequestMeter:
         if kind not in {"response.completed", "response.incomplete", "response.failed"}:
             return None
         for item in getattr(response, "output", None) or []:
+            if getattr(item, "type", None) == "compaction":
+                self.compacted = True
             call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
             if call_id and request_id:
                 self.call_requests[call_id] = request_id
@@ -456,12 +472,12 @@ def _compaction_rejected(exc: BaseException) -> bool:
 
 
 def _cache_setting_rejected(exc: BaseException) -> str | None:
-    """Which prompt-cache parameter a 400 refuses, if any (e.g. retention on a model
-    without extended caching). Caching knobs must never fail a run."""
+    """Which prompt-cache parameter a 400 refuses, if any. Caching knobs must
+    never fail a run."""
     if not isinstance(exc, openai.BadRequestError):
         return None
     message = str(exc).lower()
-    for param in ("prompt_cache_retention", "prompt_cache_key"):
+    for param in ("prompt_cache_key",):
         if param in message:
             return param
     return None
@@ -552,8 +568,6 @@ class OpenAIAgentsHarness:
         effort = req.reasoning_effort or self.default_reasoning_effort
         refused = self._refused_cache_params.get(str(model), set())
         cache_key = req.prompt_cache_key if "prompt_cache_key" not in refused else None
-        retention = (req.prompt_cache_retention
-                     if "prompt_cache_retention" not in refused else None)
         return Agent(
             name="handler",
             instructions=req.instructions or None,
@@ -571,7 +585,6 @@ class OpenAIAgentsHarness:
                 # makes the SDK's PromptCacheKeyResolver skip generating its own
                 # per-conversation key (which no other thread would ever share).
                 extra_args={"prompt_cache_key": cache_key} if cache_key else None,
-                prompt_cache_retention=retention,  # type: ignore[arg-type]
             ),
             tools=[WebSearchTool(), *workspace_tools(req.workspace, client=self.client, home=req.home),
                    *([bounded_tool] if bounded_tool else [])],
@@ -601,6 +614,7 @@ class OpenAIAgentsHarness:
         meter: _RequestMeter | None = None
         spent = 0
         limited = False  # stopped at a plan's token or iteration limit
+        compacted = False
         helper = (bounded_task_tool(self.client, req.bounded_task_models, auxiliary_usage, req.workspace, call_requests, seen_requests)
                   if req.bounded_task_models else None)
         try:
@@ -659,6 +673,7 @@ class OpenAIAgentsHarness:
                             yield usage_event
                         continue
                     break
+                compacted = bool(meter and meter.compacted)
                 reported = True
                 while auxiliary_usage:
                     yield auxiliary_usage.pop(0)
@@ -719,7 +734,8 @@ class OpenAIAgentsHarness:
                     await server.cleanup()
                 except Exception:  # noqa: BLE001
                     logger.debug("MCP cleanup failed", exc_info=True)
-        yield RunEvent(RunEventKind.FINAL, {"text": text, "session_id": session_id})
+        yield RunEvent(RunEventKind.FINAL, {"text": text, "session_id": session_id,
+                                            **({"compacted": True} if compacted else {})})
 
     def _recover(self, exc: BaseException, created: bool) -> bool:
         """Whether a refused request can be fixed and sent again."""

@@ -27,7 +27,9 @@ class RunEventKind(StrEnum):
     # single_request=True means exactly one model request (enables per-request pricing).
     USAGE = "usage"
     ERROR = "error"  # data: {"message", "retryable": bool}
-    FINAL = "final"  # data: {"text", "session_id"}; always the last event on success
+    # data: {"text", "session_id", "compacted"?}; always the last event on success.
+    # compacted=True: the session's older items were compacted this turn.
+    FINAL = "final"
 
 
 @dataclass(frozen=True)
@@ -81,10 +83,14 @@ class RunRequest:
     repair_session: bool = False
     fresh_session: bool = False  # deliberate rotation; never replay old raw transcript
     bounded_task_models: dict[str, str] = field(default_factory=dict)
-    # OpenAI prompt caching (openai_agents only; other harnesses ignore these).
-    # None key: the SDK derives its own per conversation. None retention: omitted.
+    # OpenAI prompt caching (openai_agents only; other harnesses ignore it).
+    # None: the SDK derives its own key per conversation.
     prompt_cache_key: str | None = None
-    prompt_cache_retention: str | None = None
+    # Per-run Handler context (<handler_context> block: memory index, linked
+    # memory, speaker) to send this turn as a user-role input item before the
+    # prompt (openai_agents only). None when the session already holds the same
+    # block, or the harness gets it inside `instructions` (Codex).
+    context: str | None = None
 
 
 class HarnessError(Exception):

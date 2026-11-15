@@ -9,8 +9,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..auth import Authenticator, Principal
 from ..context import RunContext
-from ..instructions import build_instruction_components
-from ..observability.prompt_tokens import prompt_token_breakdown, render_components
+from ..instructions import build_instruction_components, context_as_message
+from ..observability.prompt_tokens import (
+    prompt_parts_breakdown, prompt_token_breakdown, render_components,
+    render_context, render_instructions,
+)
 from ..memory import MemoryTools
 from ..settings import (
     MODELS, ModelName, ReasoningEffort, SettingsConflict, SettingsService,
@@ -72,8 +75,21 @@ def settings_router(service: SettingsService, auth: Authenticator,
             crontal_identity=crontal_identity, crontal_catalog=crontal_catalog,
             available_tools=tools,
             harness=effective.get("harness"))
-        return {"thread_type": kind.value, "prompt": render_components(components),
-                "token_breakdown": prompt_token_breakdown(components, model=effective.get("model"))}
+        model, harness = effective.get("model"), effective.get("harness")
+        separate = context_as_message(harness)
+        instructions = render_instructions(components)
+        return {"thread_type": kind.value, "harness": harness,
+                # Everything combined, as a harness without a context message
+                # (Codex) receives it.
+                "prompt": render_components(components),
+                "token_breakdown": prompt_token_breakdown(components, model=model),
+                # What is cached and what isn't: the instructions (identical for
+                # every thread of this type) and the per-run context message.
+                "context_delivery": "user_message" if separate else "instructions",
+                "instructions": instructions,
+                "context": render_context(components),
+                # instructions.stable_prefix.sha256 fingerprints the cached text.
+                "parts_token_breakdown": prompt_parts_breakdown(components, model=model)}
 
     @router.get("/api/chat/options")
     async def chat_options(thread_key: str | None = None, principal: Principal = user) -> dict:

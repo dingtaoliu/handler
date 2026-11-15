@@ -112,6 +112,7 @@ ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("memory_topics", "source_untrusted", "INTEGER NOT NULL DEFAULT 0"),
     ("memory_topics", "updated_thread_key", "TEXT"),
     ("threads", "context_links", "TEXT"),
+    ("threads", "context_hash", "TEXT"),
 ]
 # Indexes on added columns, created once the columns exist.
 ADDED_INDEXES = [
@@ -384,8 +385,17 @@ class SQLiteCore(SQLiteUsage):
 
     async def set_session(self, lease: Lease, session_id: str) -> bool:
         def write(db: sqlite3.Connection) -> bool:
-            db.execute("UPDATE threads SET session_id = ? WHERE key = ?",
+            # A new session holds no Handler context block yet.
+            db.execute("UPDATE threads SET session_id = ?, context_hash = NULL WHERE key = ?",
                        (session_id, lease.thread_key))
+            return True
+
+        return await self._fenced(lease, write)
+
+    async def set_context_hash(self, lease: Lease, context_hash: str | None) -> bool:
+        def write(db: sqlite3.Connection) -> bool:
+            db.execute("UPDATE threads SET context_hash = ? WHERE key = ?",
+                       (context_hash, lease.thread_key))
             return True
 
         return await self._fenced(lease, write)

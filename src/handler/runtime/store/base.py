@@ -124,7 +124,12 @@ class Store(EventQueue, Protocol):
         ...
 
     async def set_session(self, lease: Lease, session_id: str) -> bool:
-        """Record the harness session id for the thread. Fenced."""
+        """Record the harness session id for the thread and clear its
+        context_hash (a new session holds no context block). Fenced."""
+        ...
+
+    async def set_context_hash(self, lease: Lease, context_hash: str | None) -> bool:
+        """Record which Handler context block the thread's session holds. Fenced."""
         ...
 
     # --- runs ---

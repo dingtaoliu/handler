@@ -141,6 +141,36 @@ async def test_prompt_endpoint(store, user_token):
         assert r.status_code in (401, 403)
 
 
+async def test_prompt_endpoint_returns_instructions_and_context_separately(store, user_token):
+    service = SettingsService(store)
+    await service.put("persona", {"system": "SYS-TEXT", "persona": ""}, "t", None)
+    await service.put("threads", {"chat": {"harness": "openai_agents"}}, "t", None)
+    async with make_client(store, service, user_token) as c:
+        body = (await c.get("/api/settings/prompt", params={"thread_type": "chat"})).json()
+    assert body["harness"] == "openai_agents" and body["context_delivery"] == "user_message"
+    assert "SYS-TEXT" in body["instructions"] and "Reply to the user." in body["instructions"]
+    assert "You are talking with" not in body["instructions"]
+    assert "## Index" not in body["instructions"]
+    assert body["context"].startswith("<handler_context>")
+    assert "You are talking with u1" in body["context"] and "## Index" in body["context"]
+    parts = body["parts_token_breakdown"]
+    for name, text in (("instructions", body["instructions"]), ("context", body["context"])):
+        part = parts[name]
+        assert part["total_tokens"] == sum(c["tokens"] for c in part["components"]) > 0
+    names = [c["name"] for c in parts["instructions"]["components"]]
+    assert "thread_guidance" in names and "context_rules" in names
+    assert not any(c["dynamic"] for c in parts["instructions"]["components"])
+    assert [c["name"] for c in parts["context"]["components"]] == [
+        "context_open", "memory_index", "speaker", "context_close"]
+    assert parts["context"]["denominator"] == "rendered_context"
+    # The fingerprint is of the cached text.
+    import hashlib
+    assert parts["instructions"]["stable_prefix"]["sha256"] == hashlib.sha256(
+        body["instructions"].encode()).hexdigest()
+    # The combined view is kept for Codex and older clients.
+    assert "You are talking with u1" in body["prompt"]
+
+
 async def test_chat_options(store, user_token):
     service = SettingsService(store, InstanceDefaults("gpt-6-sol", "high"))
     async with make_client(store, service, user_token) as c:
