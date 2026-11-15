@@ -1,5 +1,40 @@
 # Handoff: handler rebuild
 
+## 2026-11-14 multi-tenant release (stage 1: everything switched off)
+
+Design: [multi-tenant-design.md](multi-tenant-design.md) (owner decisions in its
+Decisions table); next architecture step: [role-split-design.md](role-split-design.md)
+(proposed, not approved). Branch `feat/multi-tenant` merged to `main` at `25a3284`.
+
+- **Handler v61** (`25a3284`, image `8e201677a077`, 2,151,614,156 bytes); config-only
+  **v60** set `HANDLER_MERCHANT_ID=2`, `HANDLER_I_BSS__HANDLER_MERCHANT_ID=1`,
+  `HANDLER_I_YEUP__HANDLER_MERCHANT_ID=298`. **Crontal v126** (`0767312`, image
+  `e3766cca9a9d`, 746,877,878 bytes); Alembic `z1coverage20261112` →
+  **`y1hfree20261109`**, run under maintenance mode (about 1 minute).
+- **Backup b041** (schema and data). Schema-only dump, config and release snapshots in
+  `~/dev/backups/2026-11-14-pre-multi-tenant/` (mode 600, outside the repos).
+- **Rollback:** Handler **v59** (`ef3e1ff02d4e`), Crontal **v125** (`9423d0c63689`).
+  Git tags `deployed/crontal-agent-v59` (`8ca3d29`), `deployed/hephaestus-backend-test-v125`
+  (`63a3fa9`), and `pre-multi-tenant` in each repo. The old images were tested against the
+  migrated schema; downgrading the migration deletes pending merchant-level outbox rows.
+- **Live now:** shared Postgres pool (11 + 1 LISTEN for the process), `handler_control`
+  schema with per-tenant schema versions, empty quota tables in each tenant schema,
+  per-run and per-document-read memory logs, a process-wide cap of 2 document reads
+  (`HANDLER_DOC_READ_MAX_CONCURRENT`), one Crontal webhook per merchant-wide event.
+- **Still off:** tenant registry (`HANDLER_TENANT_REGISTRY` unset), plans enforcement for
+  the three env-defined tenants (Crontal marks merchants 1, 2, 298 paid; 14 others free),
+  every merchant's cutover switch, free pilot. Hold the registry until the role split
+  (role-split-design.md, open decision 1) unless the owner decides otherwise.
+- **Verified:** `/healthz`, `/i/main`, `/i/bss`, `/i/yeup` 200; unknown name 404; each
+  admin key 200 only on its own tenant (401 on the other two, 401 with no key);
+  Postgres connections **12/20** (was 16/20); `handler_control.tenant_schema_versions`
+  has core and mailbox rows for all three schemas; Crontal `/api/v1/time` 200 and live
+  proxy traffic (status, approvals, settings, prompt, `agent-access/routes/describe`)
+  all 200 with no app errors after maintenance ended.
+- **Watch next:** a few days of memory logs (R14 cause) and connection counts before
+  switching anything on. `HANDLER_MAX_CONCURRENT` is still 20; the review suggested 3,
+  but check each instance's lane limits first.
+
 ## Active: BSS sequential improvements
 
 **Latest November 13: automation dashboard shipped.** Handler **v59**
