@@ -267,6 +267,11 @@ Repo and code layout:
   - Settings → Threads picks the harness per thread type. It's read live when a thread is created, so no restart is needed; existing threads keep their harness.
   - `HANDLER_DEFAULT_HARNESS` seeds a fresh instance.
   - Codex is optional; the server starts with whichever harnesses are available.
+  - **`HANDLER_ALLOWED_HARNESSES`** (host setting, comma-separated; unset allows all, so the personal instance keeps Codex). Production sets `openai_agents` (role-split-design.md, owner decision 4). It is read once from the host's own environment and applies to every instance and registry tenant; `HANDLER_I_<NAME>__…` and tenant config cannot widen it. With it set:
+    - a harness not listed is never constructed;
+    - a `HANDLER_DEFAULT_HARNESS` outside it stops startup, and the platform API and registry refuse such tenant config (422 / validation error);
+    - saving or rolling back `threads` settings that name it returns 422; unset types default to an allowed harness, and the form offers only allowed ones;
+    - a thread whose stored harness is not allowed is not run and not switched: its run fails at once with no retry, and the thread parks with the reason. Startup logs an ERROR when saved `threads` settings still name one.
 
 ## 4. Crontal integration (both repos)
 

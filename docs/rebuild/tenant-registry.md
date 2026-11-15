@@ -21,6 +21,7 @@ this code.
 | `HANDLER_GLOBAL_MAX_RUNS` | 6 | Runs at once, whole process |
 | `HANDLER_PLAN_RUN_CAPS` | `free:1,paid:3` | Runs at once per tenant, by plan. An unknown plan gets the lowest |
 | `HANDLER_RUN_MAX_WAIT_SECONDS` | 60 | After this a waiting free tenant ranks with paid ones |
+| `HANDLER_ALLOWED_HARNESSES` | all | Harnesses the host may run, comma-separated; production sets `openai_agents`. Never in a tenant's environment. A tenant whose `HANDLER_DEFAULT_HARNESS` is outside it is refused (see HANDOFF §3) |
 
 A tenant's `limits.max_runs` overrides its plan cap. Each tenant's own
 `HANDLER_MAX_CONCURRENT` and lane capacities still apply beneath these.
@@ -64,7 +65,8 @@ accepted:
 
 If `HANDLER_ADMIN_KEY` is omitted at creation one is generated and returned once,
 as `admin_key`. Every check `instance_configs` makes runs on each write, and a
-conflict returns 409. Changes to a running tenant apply when it next restarts,
+conflict returns 409. A `HANDLER_DEFAULT_HARNESS` that is unknown or outside
+`HANDLER_ALLOWED_HARNESSES` returns 422. Changes to a running tenant apply when it next restarts,
 which happens as soon as it is quiescent.
 
 ## Lifecycle

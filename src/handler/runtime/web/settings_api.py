@@ -16,7 +16,7 @@ from ..observability.prompt_tokens import (
 )
 from ..memory import MemoryTools
 from ..settings import (
-    MODELS, ModelName, ReasoningEffort, SettingsConflict, SettingsService,
+    MODELS, HarnessNotAllowed, ModelName, ReasoningEffort, SettingsConflict, SettingsService,
 )
 from ..types import ThreadType
 
@@ -136,6 +136,8 @@ def settings_router(service: SettingsService, auth: Authenticator,
             raise HTTPException(409, str(exc))
         except ValidationError as exc:
             raise HTTPException(422, jsonable_encoder(exc.errors()))
+        except HarnessNotAllowed as exc:
+            raise HTTPException(422, str(exc))
 
     @router.get("/api/settings/{section}/history")
     async def history(section: str, _: Principal = user) -> list:
@@ -151,6 +153,8 @@ def settings_router(service: SettingsService, auth: Authenticator,
             return jsonable_encoder(await service.rollback(section, body.version, principal.identity))
         except SettingsConflict as exc:
             raise HTTPException(409, str(exc))
+        except HarnessNotAllowed as exc:
+            raise HTTPException(422, str(exc))
         except ValueError as exc:
             raise HTTPException(404, str(exc))
 

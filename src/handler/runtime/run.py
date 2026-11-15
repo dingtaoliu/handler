@@ -43,7 +43,7 @@ from .observability.prompt_tokens import (
 )
 from .observability.attribution import capture_attribution
 from .observability.recorder import RawSink, StepRecorder
-from .settings import EfficiencySettings, SettingsService
+from .settings import EfficiencySettings, HarnessNotAllowed, SettingsService, check_harness
 from .tasks import publish_task
 from .task_outcomes import bind_run_task, finish_task_run
 from .store.base import Store
@@ -85,6 +85,9 @@ class RunConfig:
     instance_name: str = "main"
     default_model: str | None = None
     plan_limits: Any = None  # LiveLimits for a registry tenant
+    # HANDLER_ALLOWED_HARNESSES (None: all). A thread on another harness is not
+    # run: it fails at once, with no retry, and parks with the reason.
+    allowed_harnesses: frozenset[str] | None = None
 
     @property
     def workspaces_dir(self) -> Path:
@@ -624,6 +627,11 @@ class RunExecutor:
         slug = thread_slug(thread.key)
         mcp_token: str | None = None
         try:
+            try:
+                check_harness(thread.harness, self.config.allowed_harnesses,
+                              f"thread {thread.key}")
+            except HarnessNotAllowed as exc:
+                raise HarnessError(str(exc), retryable=False) from exc
             if harness is None:
                 raise HarnessError(f"unknown harness {thread.harness!r}", retryable=False)
             workspace = self.config.workspaces_dir / slug

@@ -48,6 +48,45 @@ async def resolve_harness(source: HarnessSource) -> str:
     return source if isinstance(source, str) else await source()
 
 
+# Host setting: the harnesses this host may run, comma-separated. Unset allows
+# all (the personal instance keeps Codex); production sets `openai_agents`,
+# because Codex's sandbox restricts writes but not reads on a shared disk.
+ALLOWED_HARNESSES_ENV = "HANDLER_ALLOWED_HARNESSES"
+
+
+class HarnessNotAllowed(ValueError):
+    """A harness this host does not allow (HANDLER_ALLOWED_HARNESSES)."""
+
+
+def parse_allowed_harnesses(raw: str | None) -> frozenset[str] | None:
+    """HANDLER_ALLOWED_HARNESSES as a set; None (unset or empty) allows every harness."""
+    names = frozenset(name.strip() for name in (raw or "").split(",") if name.strip())
+    if not names:
+        return None
+    unknown = sorted(names - {h.value for h in HarnessName})
+    if unknown:
+        raise ValueError(f"{ALLOWED_HARNESSES_ENV}: unknown harness {', '.join(unknown)}; "
+                         f"choose from {', '.join(h.value for h in HarnessName)}")
+    return names
+
+
+def check_harness(name: str | None, allowed: frozenset[str] | None, where: str) -> None:
+    """Raise HarnessNotAllowed when `name` is set and this host does not allow it."""
+    if allowed is not None and name and name not in allowed:
+        raise HarnessNotAllowed(
+            f"{where}: harness {name!r} is not allowed on this host "
+            f"({ALLOWED_HARNESSES_ENV}={','.join(sorted(allowed))})")
+
+
+def default_harness_name(allowed: frozenset[str] | None) -> str:
+    """The built-in harness for a thread type nothing has set: Codex where allowed."""
+    if allowed is None or HarnessName.CODEX.value in allowed:
+        return HarnessName.CODEX.value
+    if HarnessName.OPENAI_AGENTS.value in allowed:
+        return HarnessName.OPENAI_AGENTS.value
+    return sorted(allowed)[0]
+
+
 class ModelName(StrEnum):
     """Models the Codex harness lists (`codex debug models`, visibility=list)."""
 
@@ -306,6 +345,9 @@ class SettingsService:
         self.defaults = defaults or InstanceDefaults()
         self.harness_defaults = harness_defaults
         self.only_harness: str | None = None  # a plan that allows just this harness
+        # The host's HANDLER_ALLOWED_HARNESSES (None: all). Saving threads settings
+        # that name another harness is refused; nothing is switched silently.
+        self.allowed_harnesses: frozenset[str] | None = None
         # What a section holds before anything is saved, when it isn't the
         # model's own defaults (e.g. Crontal's memory kinds; see
         # Integration.settings_defaults). Saved versions always win.
@@ -329,7 +371,8 @@ class SettingsService:
     async def resolve_thread(self, entry: dict, *, harness: str | None = None,
                              thread_model: str | None = None) -> dict:
         """Concrete harness/model/effort a run uses with no per-message override."""
-        harness = self.only_harness or harness or entry.get("harness") or HarnessName.CODEX.value
+        harness = (self.only_harness or harness or entry.get("harness")
+                   or default_harness_name(self.allowed_harnesses))
         fallback = await self.fallback(harness)
         return {
             "harness": harness,
@@ -353,7 +396,8 @@ class SettingsService:
         fallbacks = await self.harness_fallbacks()
         out = {}
         for name, entry in value.items():
-            harness = (entry or {}).get("harness") or HarnessName.CODEX.value
+            harness = ((entry or {}).get("harness")
+                       or default_harness_name(self.allowed_harnesses))
             out[name] = {"harness": harness,
                          **(fallbacks.get(harness) or await self.fallback(harness))}
         return out
@@ -365,7 +409,8 @@ class SettingsService:
             if self.only_harness:
                 return self.only_harness
             threads, _ = await self.get("threads")
-            return (threads.get(thread_type) or {}).get("harness") or HarnessName.CODEX.value
+            return ((threads.get(thread_type) or {}).get("harness")
+                    or default_harness_name(self.allowed_harnesses))
 
         return lookup
 
@@ -373,20 +418,57 @@ class SettingsService:
         model = MODELS[section]
         stored = await self.store.get_settings(section)
         if stored:
-            return model.model_validate(stored.value).model_dump(mode="json"), stored.version
+            value = self._threads_input(stored.value) if section == "threads" else stored.value
+            return model.model_validate(value).model_dump(mode="json"), stored.version
         return self.default_value(section), None
 
     def default_value(self, section: str) -> dict:
         model = MODELS[section]
         if section in self.section_defaults:
             return model.model_validate(self.section_defaults[section]).model_dump(mode="json")
-        return model().model_dump(mode="json")
+        value = model().model_dump(mode="json")
+        if section == "threads":
+            # Nothing saved yet: start every type on a harness this host allows.
+            harness = default_harness_name(self.allowed_harnesses)
+            for entry in value.values():
+                entry["harness"] = harness
+        return value
+
+    def _threads_input(self, value: Any) -> Any:
+        """A threads value whose unset harnesses default to one the host allows.
+
+        The model's own default is Codex; with Codex not allowed, a type left
+        out (or saved before it existed) would otherwise be refused at run time.
+        """
+        fallback = default_harness_name(self.allowed_harnesses)
+        if fallback == HarnessName.CODEX.value or not isinstance(value, dict):
+            return value
+        value = dict(value)
+        for name in ThreadsSettings.model_fields:
+            entry = value.get(name)
+            if entry is None:
+                if name in ("email", "mail") and ("crontal" in value or "email" in value):
+                    continue  # copied from the closest type (ThreadsSettings validator)
+                value[name] = {"harness": fallback}
+            elif isinstance(entry, dict) and "harness" not in entry:
+                value[name] = {**entry, "harness": fallback}
+        return value
+
+    def check_harnesses(self, threads: dict) -> None:
+        """Raise HarnessNotAllowed if a threads value names a disallowed harness."""
+        for thread_type, entry in threads.items():
+            check_harness((entry or {}).get("harness"), self.allowed_harnesses,
+                          f"threads.{thread_type}")
 
     async def put(
         self, section: str, value: dict, updated_by: str | None,
         expected_version: int | None,
     ) -> SettingsVersion:
+        if section == "threads":
+            value = self._threads_input(value)
         validated = MODELS[section].model_validate(value).model_dump(mode="json")
+        if section == "threads":
+            self.check_harnesses(validated)
         stored = await self.store.put_settings(
             section, validated, updated_by=updated_by, expected_version=expected_version,
         )
@@ -409,7 +491,15 @@ class SettingsService:
         return await self.put(section, old.value, updated_by, current_version)
 
     def schemas(self) -> dict[str, dict]:
-        return {name: model.model_json_schema() for name, model in MODELS.items()}
+        schemas = {name: model.model_json_schema() for name, model in MODELS.items()}
+        if self.allowed_harnesses is not None:
+            # Offer only the harnesses this host allows in the settings form.
+            defs = schemas["threads"]["$defs"]
+            defs["HarnessName"]["enum"] = [h.value for h in HarnessName
+                                           if h.value in self.allowed_harnesses]
+            defs["ThreadSettings"]["properties"]["harness"]["default"] = (
+                default_harness_name(self.allowed_harnesses))
+        return schemas
 
     async def seed_from_files(self, handler_yaml: Path | None, agent_md: Path | None) -> None:
         values = {}

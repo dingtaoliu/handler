@@ -15,6 +15,7 @@ from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..settings import HarnessName, HarnessNotAllowed, check_harness
 from .host import TenantHost
 from .registry import TenantRegistry
 
@@ -41,7 +42,8 @@ class TenantBody(BaseModel):
     secrets: dict[str, str | None] = Field(default_factory=dict)
 
 
-def platform_router(registry: TenantRegistry, host: TenantHost, platform_key: str) -> APIRouter:
+def platform_router(registry: TenantRegistry, host: TenantHost, platform_key: str, *,
+                    allowed_harnesses: frozenset[str] | None = None) -> APIRouter:
     router = APIRouter(prefix="/platform")
 
     def check(authorization: str | None) -> None:
@@ -77,6 +79,14 @@ def platform_router(registry: TenantRegistry, host: TenantHost, platform_key: st
             rejected = sorted(set(supplied) - allowed)
             if rejected:
                 raise HTTPException(422, f"{label} keys not allowed: {', '.join(rejected)}")
+        harness = body.config.get("HANDLER_DEFAULT_HARNESS")
+        if harness is not None:
+            if harness not in {h.value for h in HarnessName}:
+                raise HTTPException(422, f"unknown harness {harness!r}")
+            try:
+                check_harness(harness, allowed_harnesses, "HANDLER_DEFAULT_HARNESS")
+            except HarnessNotAllowed as exc:
+                raise HTTPException(422, str(exc)) from exc
         changes = {key: value for key, value in (("plan", body.plan), ("limits", body.limits),
                                                  ("integrations", body.integrations))
                    if value is not None}

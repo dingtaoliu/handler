@@ -60,7 +60,14 @@ from .observability.logging import configure_json_logging
 from .observability.pricing import PriceTable
 from .run import RunConfig, RunExecutor, thread_slug
 from .scheduler import Scheduler
-from .settings import HarnessName, InstanceDefaults, SettingsService
+from .settings import (
+    ALLOWED_HARNESSES_ENV,
+    HarnessName,
+    InstanceDefaults,
+    SettingsService,
+    check_harness,
+    parse_allowed_harnesses,
+)
 from .sinks import Outbox
 from .store.postgres import PostgresStore
 from .store.postgres_hub import DEFAULT_POOL_MAX, PostgresHub
@@ -379,7 +386,10 @@ _PRIVATE_ENV = {
 REGISTRY_ENV = "HANDLER_TENANT_REGISTRY"
 PLATFORM_KEY_ENV = "HANDLER_PLATFORM_KEY"
 TENANT_SECRET_ENV = "HANDLER_TENANT_SECRET_KEY"
-_HOST_ONLY_ENV = {REGISTRY_ENV, PLATFORM_KEY_ENV, TENANT_SECRET_ENV, "HANDLER_INSTANCES"}
+# HANDLER_ALLOWED_HARNESSES is read once from the host's own environment and
+# applies to every instance and tenant; none can widen it.
+_HOST_ONLY_ENV = {REGISTRY_ENV, PLATFORM_KEY_ENV, TENANT_SECRET_ENV, "HANDLER_INSTANCES",
+                  ALLOWED_HARNESSES_ENV}
 
 # Thread types the core owns; integrations may not redefine them.
 CORE_THREAD_TYPES = frozenset({"chat", "automation"})
@@ -531,6 +541,7 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
                    max_wait=float(env.get("HANDLER_RUN_MAX_WAIT_SECONDS", "60")))
 
     plan_table = parse_plan_table(env.get(PLAN_LIMITS_ENV))
+    allowed_harnesses = parse_allowed_harnesses(env.get(ALLOWED_HARNESSES_ENV))
 
     def validate(tenants: list[Tenant]) -> None:
         for tenant in tenants:
@@ -553,6 +564,8 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
                 raise ValueError(f"invalid instance name: {name!r}")
             if cfg.admin_key == platform_key:
                 raise ValueError(f"{name}: an admin key must differ from the platform key")
+            check_harness(cfg.default_harness, allowed_harnesses,
+                          f"{name}: HANDLER_DEFAULT_HARNESS")
         validate_instance_configs(resolved)
 
     registry = TenantRegistry(hub, box, validate)
@@ -564,7 +577,8 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
     def runtime_for(tenant: Tenant):
         name, cfg, scoped, base = tenant_instance_config(args, env, tenant, box)
         return instance_runtime(cfg, scoped, base_path=base, instance_name=name, hub=hub, gate=gate,
-                                plan_limits=LiveLimits(limits_for(tenant)))
+                                plan_limits=LiveLimits(limits_for(tenant)),
+                                allowed_harnesses=allowed_harnesses)
 
     tenants = TenantHost(
         registry, runtime_for, limits_for=limits_for,
@@ -587,7 +601,8 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
             await hub.close()
 
     host = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    host.include_router(platform_router(registry, tenants, platform_key))
+    host.include_router(platform_router(registry, tenants, platform_key,
+                                        allowed_harnesses=allowed_harnesses))
     host.mount("/", tenants)
     host.state.tenants, host.state.registry, host.state.run_gate = tenants, registry, gate
     return host
@@ -599,6 +614,7 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
     configure_read_limit(env.get(READ_LIMIT_ENV))
     if env.get(REGISTRY_ENV) == "1":
         return create_registry_host(args, env, configs)
+    allowed_harnesses = parse_allowed_harnesses(env.get(ALLOWED_HARNESSES_ENV))
     hubs = _shared_hubs(configs, env)
 
     @contextlib.asynccontextmanager
@@ -611,7 +627,8 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
             # same task. Separate owner tasks let them drain concurrently.
             try:
                 async with instance_runtime(cfg, scoped, base_path=base, instance_name=name,
-                                            hub=hubs.get(cfg.database_url)) as app:
+                                            hub=hubs.get(cfg.database_url),
+                                            allowed_harnesses=allowed_harnesses) as app:
                     ready.set_result(app)
                     await stop.wait()
             except BaseException as exc:
@@ -661,8 +678,12 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                            base_path: str = "", instance_name: str = "",
                            registry: IntegrationRegistry | None = None,
                            hub: PostgresHub | None = None, gate: RunGate | None = None,
-                           plan_limits: LiveLimits | None = None):
-    """Own one instance and close all its resources when the host stops."""
+                           plan_limits: LiveLimits | None = None,
+                           allowed_harnesses: frozenset[str] | None = None):
+    """Own one instance and close all its resources when the host stops.
+
+    `allowed_harnesses` is the host's HANDLER_ALLOWED_HARNESSES (None: all).
+    """
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     env = dict(env)
@@ -714,6 +735,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             Path(args.handler_yaml).expanduser() if args.handler_yaml else None,
             Path(args.agent_md).expanduser() if args.agent_md else None,
         )
+        settings.allowed_harnesses = allowed_harnesses
+        check_harness(args.default_harness, allowed_harnesses,
+                      f"{instance_name or 'main'}: HANDLER_DEFAULT_HARNESS")
         if args.default_harness:
             # Fresh instances only: once threads settings exist, the UI owns them.
             threads_cfg, threads_version = await settings.get("threads")
@@ -722,6 +746,16 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                     per_type["harness"] = args.default_harness
                 await settings.put("threads", threads_cfg, updated_by="default-harness",
                                    expected_version=None)
+        if allowed_harnesses is not None:
+            threads_cfg, _ = await settings.get("threads")
+            refused = sorted(f"{kind}={entry['harness']}" for kind, entry in threads_cfg.items()
+                             if entry.get("harness") not in allowed_harnesses)
+            if refused:
+                # Saved before the host allow-list: new threads of these types
+                # would be refused at run time. Change them in Settings → Threads.
+                logger.error("threads settings name a harness this host does not allow",
+                             extra={"instance": instance_name or "main", "types": refused,
+                                    "allowed": sorted(allowed_harnesses)})
         limits_cfg, _ = await settings.get("limits")
         grants_cfg, grants_version = await settings.get("grants")
 
@@ -770,7 +804,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                            timeout_seconds=float(limits_cfg["run_timeout_seconds"]),
                            max_attempts=int(limits_cfg["max_attempts"]),
                            instance_name=instance_name or "main",
-                           default_model=args.model, plan_limits=plan_limits)
+                           default_model=args.model, plan_limits=plan_limits,
+                           allowed_harnesses=allowed_harnesses)
         local_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
         file_store = (S3FileStore.from_env(prefix=env.get("HANDLER_FILE_PREFIX", ""), env=dict(env))
                       if args.file_store == "s3" else LocalFileStore(data_dir / "files"))
@@ -780,8 +815,11 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         gateway.register(SpreadsheetTools(
             lambda key: config.workspaces_dir / thread_slug(key), artifact_store))
         harnesses: dict = {}
+        codex_allowed = allowed_harnesses is None or HarnessName.CODEX.value in allowed_harnesses
         if plan_limits is not None and not plan_limits.current.allow_codex:
             settings.only_harness = HarnessName.OPENAI_AGENTS.value
+        elif not codex_allowed:
+            logger.info("codex harness off: not in %s", ALLOWED_HARNESSES_ENV)
         else:
             try:
                 harnesses["codex"] = CodexHarness(
@@ -796,7 +834,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             except FileNotFoundError as exc:
                 logger.warning("codex harness off: %s", exc)
         api_key = env.get("OPENAI_API_KEY") or env.get("CODEX_API_KEY")
-        if api_key:
+        if allowed_harnesses is not None and HarnessName.OPENAI_AGENTS.value not in allowed_harnesses:
+            logger.info("openai_agents harness off: not in %s", ALLOWED_HARNESSES_ENV)
+        elif api_key:
             harnesses["openai_agents"] = OpenAIAgentsHarness(
                 api_key, default_model=args.model, default_reasoning_effort=args.reasoning_effort)
         else:
