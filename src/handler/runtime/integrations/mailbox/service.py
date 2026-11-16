@@ -34,13 +34,14 @@ from email.utils import formatdate, make_msgid
 from pathlib import Path
 from typing import Any, Callable
 
+from ... import documents
 from ...gateway.secret_box import EncryptedSecrets, SecretUnreadable
 from ...run import thread_slug
 from ...settings import resolve_harness
 from ...types import Event, Lane, ThreadSpec, ThreadType, new_id, utcnow
 from .config import Mailbox, MailboxTest
 from .events import EVENT_TYPE, THREAD_TYPE
-from .message import MailMessage, normalize_subject, is_reply_subject, parse_message
+from .message import MailMessage, is_reply_subject, normalize_subject, parse_message_file
 from .store import MailStore
 from .transport import (
     CONNECT_TIMEOUT_SECONDS,
@@ -363,7 +364,8 @@ class MailboxService:
                      uid: int | None, internaldate: datetime | None = None, wake: bool,
                      headers_only: bool = False, size: int | None = None) -> str:
         """Store one message. Returns "duplicate", "stored" or "woke"."""
-        parsed = await asyncio.to_thread(parse_message, raw, headers_only=headers_only)
+        parsed = await documents.capped_parse("mailbox_ingest", parse_message_file, raw,
+                                              headers_only=headers_only)
         existing = await self.mail.find_message(mailbox.id, parsed.message_id)
         if existing is not None:
             if uid is not None and (existing.get("folder") in (None, folder)) and (

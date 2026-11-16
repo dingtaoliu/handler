@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import AbstractSet, Any, Awaitable, Callable
 
+from . import documents
 from .bus import BusMessage, RunEventBus
 from .context import RunContext, current_run, reset_current_run, set_current_run
 from .gateway.tokens import RunTokens
@@ -36,7 +37,7 @@ from .images import MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE, downscale, sniff_fi
 from .instructions import build_instruction_components, context_as_message
 from .mail.intake import render_email_event, resolve_act_as
 from .memory import MemoryTools
-from .observability.memory import process_memory
+from .observability.memory import RunPeak, process_memory
 from .observability.pricing import PriceTable
 from .observability.prompt_tokens import (
     context_digest, prompt_cache_key, render_components, render_context, render_instructions,
@@ -485,17 +486,21 @@ class RunExecutor:
         logger.info("run started", extra={"harness": run.harness, "events": len(events)})
         RunExecutor._active_runs += 1
         self._log_run_memory("start")
+        peak = RunPeak()
+        sampler = asyncio.create_task(peak.sample(), name=f"memory:{run.id}")
         try:
             await self._run_with_heartbeat(lease, thread, run, events, repair=repair)
         finally:
-            self._log_run_memory("end")
+            sampler.cancel()
+            self._log_run_memory("end", run_peak_rss_mb=peak.finish(),
+                                 reader_peak_rss_mb=documents.pop_reader_peak(run.id))
             RunExecutor._active_runs -= 1
             reset_current_run(token)
 
-    def _log_run_memory(self, phase: str) -> None:
+    def _log_run_memory(self, phase: str, **extra: Any) -> None:
         logger.info("run memory", extra={
             "phase": phase, "instance": self.config.instance_name,
-            "active_runs": RunExecutor._active_runs, **process_memory()})
+            "active_runs": RunExecutor._active_runs, **process_memory(), **extra})
 
     async def _renew(self, lease: Lease) -> Lease | None:
         """Extend the lease, retrying store errors while it is still valid."""
@@ -639,7 +644,7 @@ class RunExecutor:
                     name="handler", url=self.mcp_url,
                     headers={"Authorization": f"Bearer {mcp_token}"},
                 ))
-            images, attached = self._attachments(events, workspace)
+            images, attached = await self._attachments(events, workspace)
             prompt = render_turn(events)
             if attached:
                 prompt += "\n\nAttached files: " + ", ".join(attached)
@@ -713,13 +718,15 @@ class RunExecutor:
             if mcp_token is not None and self.tokens is not None:
                 self.tokens.revoke(mcp_token)
 
-    def _attachments(self, events: list[Event], workspace: Path) -> tuple[list[Path], list[str]]:
+    async def _attachments(self, events: list[Event], workspace: Path
+                           ) -> tuple[list[Path], list[str]]:
         """Copy every attachment under attachments/; images also go to the model.
 
         Vision images (PNG/JPEG/WebP/GIF by their bytes) are handed to the
         harness as image input, at most MAX_IMAGES_PER_MESSAGE per message;
         one over MAX_IMAGE_BYTES is sent as a downscaled copy. Returns the
-        image paths (inside the workspace) and the prompt's file list.
+        image paths (inside the workspace) and the prompt's file list. Copies
+        run in a thread and downscaling in the reader pool, off the event loop.
         """
         images: list[Path] = []
         attached: list[str] = []
@@ -735,7 +742,7 @@ class RunExecutor:
                 if (target_dir / name).exists():
                     name = f"{meta.id[:8]}-{name}"
                 target = target_dir / name
-                shutil.copyfile(source, target)
+                await asyncio.to_thread(shutil.copyfile, source, target)
                 rel = f"attachments/{name}"
                 if sniff_file(target) is None:
                     attached.append(rel)
@@ -746,8 +753,14 @@ class RunExecutor:
                     continue
                 vision: Path | None = target
                 if target.stat().st_size > MAX_IMAGE_BYTES:
-                    vision = downscale(target, target_dir / f"{Path(name).stem}.downscaled",
-                                       max_bytes=MAX_IMAGE_BYTES)
+                    try:
+                        vision = await documents.capped_read(
+                            "attachment_image", downscale, target,
+                            target_dir / f"{Path(name).stem}.downscaled",
+                            max_bytes=MAX_IMAGE_BYTES)
+                    except documents.ReadError:
+                        logger.warning("could not downscale an attachment", exc_info=True)
+                        vision = None
                 if vision is None:
                     attached.append(f"{rel} (image too large to show)")
                     continue

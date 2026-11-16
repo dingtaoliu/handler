@@ -271,12 +271,14 @@ async def save_files(parsed: ParsedEmail, raw: bytes, write: WriteFile, *,
             local = scratch / attachment.filename
             local.write_bytes(attachment.data)
             try:
-                text = await asyncio.wait_for(
-                    documents.capped_read("email_intake", documents.to_text, local),
+                text, error = await asyncio.wait_for(
+                    documents.capped_preview("email_intake", local,
+                                             max_chars=documents.MAX_TEXT_CHARS),
                     timeout=min(EXTRACT_TIMEOUT_SECONDS, remaining))
             except TimeoutError:
-                text = None
-                entry["extract_error"] = "timed out"
+                text, error = None, "timed out"
+            if error:
+                entry["extract_error"] = error
             if text and text.strip():
                 text_path = f"{folder}/extracted/{attachment.filename}.md"
                 await write(text_path, text.encode())

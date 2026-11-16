@@ -37,7 +37,7 @@ from urllib.parse import unquote, urlsplit
 
 import httpx
 
-from .. import documents
+from .. import documents, main_limits
 from ..storage import ensure_workspace_room
 from ..context import RunContext
 from ..types import Risk
@@ -314,7 +314,10 @@ class CrontalApiTools:
                 return ToolResult(f"upload_file not found in the workspace: {upload}",
                                   is_error=True)
             field = str(args.get("upload_field") or "file")
-            kwargs["files"] = {field: (source.name, source.read_bytes())}
+            try:
+                kwargs["files"] = {field: (source.name, main_limits.read_bounded(source, upload))}
+            except main_limits.FileTooLarge as exc:
+                return ToolResult(str(exc), is_error=True)
             form = dict(args.get("form") or {})
             if path.split("?", 1)[0].rstrip("/") == FILES_UPLOAD:
                 form = await self._with_provenance(ctx, str(upload), form)
@@ -412,8 +415,10 @@ class CrontalApiTools:
         if not options.get("include_text", True):
             return ToolResult(result)
         budget = max(1000, min(MAX_TEXT_CHARS, int(options.get("max_output_chars", MAX_TEXT_CHARS))))
-        text = await documents.capped_read("crontal_api", documents.to_text, workspace / saved,
-                                           max_chars=budget + 1)
+        text, error = await documents.capped_preview("crontal_api", workspace / saved,
+                                                     max_chars=budget + 1)
+        if error:
+            result["text_error"] = error
         if text:
             result["text"] = text[:budget]
             if len(text) > budget:

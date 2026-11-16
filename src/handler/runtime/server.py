@@ -28,8 +28,10 @@ import uvicorn
 
 from .auth import Authenticator, Principal, add_cli_commands, run_cli
 from .bus import RunEventBus
+from . import main_limits
+from .context import TenantScope, reset_current_tenant, set_current_tenant
 from .dispatcher import Dispatcher
-from .documents import READ_LIMIT_ENV, configure_read_limit
+from .documents import configure_readers, shutdown_readers
 from .files import LocalFileStore, S3FileStore
 from .gateway.api import approvals_router, questions_router
 from .web.memory_recovery_api import memory_recovery_router
@@ -585,6 +587,7 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
         finally:
             await tenants.shutdown()
             await hub.close()
+            await asyncio.to_thread(shutdown_readers)
 
     host = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     host.include_router(platform_router(registry, tenants, platform_key))
@@ -596,7 +599,8 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
 def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> FastAPI:
     env = dict(os.environ if env is None else env)
     configs = instance_configs(args, env)
-    configure_read_limit(env.get(READ_LIMIT_ENV))
+    configure_readers(env)
+    main_limits.configure(env)
     if env.get(REGISTRY_ENV) == "1":
         return create_registry_host(args, env, configs)
     hubs = _shared_hubs(configs, env)
@@ -642,6 +646,7 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
                     logger.error("instance lifecycle failed", exc_info=result)
             for hub in hubs.values():
                 await hub.close()
+            await asyncio.to_thread(shutdown_readers)
 
     return FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -663,6 +668,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                            hub: PostgresHub | None = None, gate: RunGate | None = None,
                            plan_limits: LiveLimits | None = None):
     """Own one instance and close all its resources when the host stops."""
+    # Everything this instance runs (its tasks, and through TenantScope its
+    # requests) shares host pools such as the reader pool as this tenant.
+    tenant_token = set_current_tenant(instance_name or "main")
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     env = dict(env)
@@ -944,6 +952,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         intake_observers.extend(o for _, o in contributions.email_intake_observers)
         for _, router in contributions.routers:
             app.include_router(router)
+        app.add_middleware(TenantScope, tenant=instance_name or "main")
         app.state.integrations = integrations
         app.state.gateway, app.state.outbox = gateway, outbox
         app.state.lifecycle = SimpleNamespace(dispatcher=dispatcher, store=store, outbox=outbox,
@@ -989,6 +998,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
     finally:
         unregister_workspace_limit(data_dir / "workspaces")
         await store.close()
+        reset_current_tenant(tenant_token)
 
 
 SHUTDOWN_BUDGET_SECONDS = 25.0

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 from . import converted
@@ -17,30 +18,41 @@ SCAN_SAMPLE_PAGES = 12
 _PRINTER_MARKS = {"C", "M", "Y", "K", "CM", "MY", "CY", "CMY", "CMYK"}
 
 
+MAX_UPLOAD_BYTES = 50_000_000
+
+
 @dataclass(frozen=True)
-class PDFInput:
-    data: bytes
+class PDFUpload:
+    path: Path  # the file to upload: the original, or a copy of the selected pages
     description: str
+    size: int
+    copy: bool  # `path` is a temporary copy the caller removes
 
 
-def prepare_input(path: Path, *, display: str, pages: str | None = None) -> PDFInput:
-    """Keep the original PDF, or copy selected pages without rasterizing them."""
+def prepare_upload(path: Path, *, display: str, pages: str | None = None,
+                   scratch: Path) -> PDFUpload:
+    """Check the PDF, and copy selected pages to `scratch` without rasterizing them.
+
+    Runs in a reader process: only paths cross the pipe, never the PDF's bytes.
+    """
     import fitz
 
-    original = path.read_bytes()
+    target, copy = Path(path), False
     try:
-        with fitz.open(stream=original, filetype="pdf") as source:
+        with fitz.open(path, filetype="pdf") as source:
             if source.needs_pass:
                 raise ReadError(f"{display} is password-protected")
             if not source.page_count:
                 raise ReadError(f"{display} has no pages")
             wanted = _parse_pages(pages, source.page_count)
-            data = original
             if pages:
                 with fitz.open() as selected:
                     for index in wanted:
                         selected.insert_pdf(source, from_page=index, to_page=index)
                     data = selected.tobytes(garbage=4, deflate=True, no_new_id=True)
+                target, copy = Path(scratch) / f"{uuid.uuid4().hex}.pdf", True
+                target.write_bytes(data)
+                del data
             description = (f"{display}: original pages {_ranges(wanted)} of "
                            f"{source.page_count}, supplied as a PDF. "
                            "Read all supplied pages, including tables and scanned content.")
@@ -48,9 +60,12 @@ def prepare_input(path: Path, *, display: str, pages: str | None = None) -> PDFI
         raise
     except Exception as exc:
         raise ReadError(f"could not open {display} as a PDF: {exc}") from exc
-    if len(data) >= 50_000_000:
+    size = target.stat().st_size
+    if size >= MAX_UPLOAD_BYTES:
+        if copy:
+            target.unlink(missing_ok=True)
         raise ReadError(f"{display} exceeds the 50 MB PDF input limit; select fewer pages")
-    return PDFInput(data, description)
+    return PDFUpload(target, description, size, copy)
 
 
 def read(path: Path, options: ReadOptions) -> Reading:
