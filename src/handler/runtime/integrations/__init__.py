@@ -2,29 +2,28 @@
 
 See docs/rebuild/integrations.md. `base` holds the interface, `registry` the
 in-tree registry and per-instance loading.
+
+The names below load on first use (PEP 562), so a reader process that only
+parses mail (`mailbox.message`) doesn't import the registry and every
+integration with it.
 """
 
-from .base import (
-    BackgroundTask,
-    Integration,
-    IntegrationConfig,
-    IntegrationContext,
-    PromptFragment,
-    SettingsSection,
-    ThreadTypeSpec,
-    UIManifestEntry,
-)
-from .registry import (
-    IntegrationError,
-    IntegrationRegistry,
-    LoadedIntegrations,
-    default_registry,
-    enabled_names,
-)
+from importlib import import_module
 
-__all__ = [
-    "BackgroundTask", "Integration", "IntegrationConfig", "IntegrationContext",
-    "IntegrationError", "IntegrationRegistry", "LoadedIntegrations", "PromptFragment",
-    "SettingsSection", "ThreadTypeSpec", "UIManifestEntry", "default_registry",
-    "enabled_names",
-]
+_EXPORTS = {
+    **dict.fromkeys(("BackgroundTask", "Integration", "IntegrationConfig",
+                     "IntegrationContext", "PromptFragment", "SettingsSection",
+                     "ThreadTypeSpec", "UIManifestEntry"), ".base"),
+    **dict.fromkeys(("IntegrationError", "IntegrationRegistry", "LoadedIntegrations",
+                     "default_registry", "enabled_names"), ".registry"),
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str):
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(_EXPORTS[name], __name__), name)
+    globals()[name] = value
+    return value
