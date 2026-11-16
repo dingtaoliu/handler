@@ -414,3 +414,19 @@ def test_settings_are_read_from_the_host_environment(tmp_path):
     env["HANDLER_DOC_READ_MAX_CONCURRENT"] = "zero"
     with pytest.raises(ValueError):
         server.create_host(server._parse_args(["serve"], env), env)
+
+
+async def test_the_host_lifespan_stops_the_readers(tmp_path):
+    import multiprocessing
+
+    from handler.runtime import server
+
+    env = {"HANDLER_RT_DATA_DIR": str(tmp_path), "HANDLER_ADMIN_KEY": "k",
+           "OPENAI_API_KEY": "sk-test"}
+    host = server.create_host(server._parse_args(["serve"], env), env)
+    file = tmp_path / "a.txt"
+    file.write_text("hi")
+    async with host.router.lifespan_context(host):
+        assert (await documents.capped_read("read_file", documents.read, file)).text == "hi"
+        assert multiprocessing.active_children()
+    assert multiprocessing.active_children() == [] and limiter._pool is None

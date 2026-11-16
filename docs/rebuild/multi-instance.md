@@ -91,21 +91,52 @@ the dyno.
 
 ## Memory and document reads
 
-Documents are decoded inside the server process, whose memory every instance
-shares. `HANDLER_DOC_READ_MAX_CONCURRENT` (default 2) caps simultaneous reads
-across the **whole process**, not per instance; it cannot be scoped to an instance.
-A read waits for a slot, and a read whose caller timed out keeps its slot until
-the decoding actually finishes. Codex's `handler-read` runs in its own process and
-is not counted. A read still waiting for a slot, or still running, after 5 seconds is
-logged every 5 seconds (`document read waiting for a slot` or `document read still
-running`), so a stuck read is visible.
+Parsing runs in the **reader pool** (`documents/pool.py`): child processes shared by
+the whole host, for document reads (`read_file`, bounded tasks, PDF uploads,
+download previews), email parsing (`/ingest/email`, mailbox ingest and attachment
+fetches) and attachment image downscaling. Codex's `handler-read` runs in its own
+process and is not counted.
 
-Each read logs `document read` (source, file type and size, wait, duration, memory
-before and after) and each run logs `run memory` at its start and end. Fields:
-`rss_mb` (or `rss_mb_before`/`rss_mb_after`), `peak_rss_mb` (high-water mark since
-the process started) and `swap_mb`; `active_runs` and `active_reads` show what else
-was running. Use these to find what drives a dyno over its quota before changing
-anything else. Memory is per process, so several runs in flight share one figure.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `HANDLER_DOC_READ_MAX_CONCURRENT` | 2 | Reader processes, for the **whole host**, not per instance |
+| `HANDLER_READER_TIMEOUT_SECONDS` | 120 | A call running longer has its process killed; the tool call gets an error |
+| `HANDLER_READER_MEMORY_MB` | 1536 | `RLIMIT_AS` per reader, Linux only (macOS doesn't enforce it); 0 turns it off. A reader's address space is about 800 MB before it reads anything, because of the preloaded libraries |
+| `HANDLER_READER_MAX_TASKS` | 50 | Calls before a reader is replaced |
+| `HANDLER_READER_MAX_RESULT_MB` | 64 | Largest result a reader returns; larger is an error |
+| `HANDLER_READER_IDLE_SECONDS` | 60 | An unused reader stops after this |
+| `HANDLER_TOOL_RESULT_MAX_CHARS` | 200,000 | A gateway tool result over this is cut, with a marker |
+| `HANDLER_MAIN_FILE_MAX_MB` | 50 | A workspace file a tool loads whole in the main process (Crontal upload, email attachment) is refused over this |
+
+- **Failures stay in their call.** A timeout, a caller giving up (e.g. a gateway tool
+  timeout), a reader that crashes or runs out of memory: that process is killed or
+  reaped and replaced, the call raises `ReaderFailed` (a `ReadError`, so tools report
+  `error: …`; previews report `text_error` / `extract_error`), and every other read
+  carries on.
+- **Fair by tenant.** A free slot goes to the waiting tenant holding the fewest slots.
+  A tenant may use every slot while no one else waits; when another tenant waits
+  with less than its share (slots / tenants reading), the newest read of a tenant
+  over its share is stopped and queued again (`document read stopped for another
+  tenant`). The tenant is the instance name, carried in a context variable that
+  each instance sets for its tasks and requests (`context.current_tenant`).
+- **Memory on Linux (measured, arm64, Python 3.12):** the fork server holds the
+  preloaded libraries, about 190 MB RSS, plus a 12 MB resource tracker; with no
+  readers running that is the whole idle cost. Two busy readers add about 75 MB of
+  their own each (PSS: server 98, readers 73 and 80). The main process no longer
+  loads PyMuPDF, MarkItDown, openpyxl or Pillow for parsing.
+- A read still waiting for a slot, or still running, after 5 seconds is logged every
+  5 seconds (`document read waiting for a slot` or `document read still running`,
+  with `tenant`, `active_reads`, `tenant_reads` and `limit`).
+
+Each read logs `document read` (source, tenant, file type and size, wait, duration,
+outcome, the reader's memory before and after and its peak during the call, the
+reader's pid and exit code, and `main_rss_mb`). Each run logs `run memory` at its
+start and end; the end line adds `run_peak_rss_mb` (the main process's highest RSS
+while the run was going, sampled each second; None without `/proc`) and
+`reader_peak_rss_mb` (the highest reader peak among its reads). Other fields:
+`rss_mb`, `peak_rss_mb` (high-water mark since the process started) and `swap_mb`;
+`active_runs` and `active_reads` show what else was running. Memory is per process,
+so several runs in flight share one main-process figure.
 
 ## Notifications to Crontal
 
