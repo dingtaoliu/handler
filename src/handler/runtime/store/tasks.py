@@ -8,10 +8,13 @@ and `_thread_timestamp` give one SQL text for SQLite and Postgres.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from ..types import Event, ThreadSpec, ThreadType
+
+logger = logging.getLogger("handler.runtime.store.tasks")
 
 TASK_STATUSES = ("queued", "running", "waiting_approval", "waiting_answer", "succeeded",
                  "failed", "dead")
@@ -57,6 +60,24 @@ def announce_routed(store: Any, event: Event, thread: ThreadSpec | None) -> None
         hook(event, thread)
     except Exception:  # noqa: BLE001
         pass
+
+
+async def announce_parked(store: Any, event: Event, thread: ThreadSpec | None) -> None:
+    """After a non-chat event was routed onto a parked thread, call the store's
+    `on_parked_event` hook, once per parking (take_park_notice). The event is
+    stored and queued either way; best effort and never raises.
+
+    A chat message revives the thread instead (see `_route`), so it never counts.
+    """
+    hook = getattr(store, "on_parked_event", None)
+    if hook is None or thread is None or event.type == "chat.message":
+        return
+    try:
+        if await store.take_park_notice(thread.key):
+            await hook(event, thread)
+    except Exception:  # noqa: BLE001
+        logger.warning("parked-thread notice failed", exc_info=True,
+                       extra={"thread_key": thread.key})
 
 
 def _json(value: Any) -> Any:
@@ -128,6 +149,38 @@ class TaskQueries:
             for name in ("pending_since", "available_at"):
                 row[name] = _date(row[name])
         return rows
+
+    async def parked_threads(self, *, limit: int = 100) -> list[dict]:
+        """Parked threads (`dead`: no retry left), with what they still have queued.
+
+        Each row: thread_key, thread_type, owner_user_id, harness, last_error,
+        attempts, pending_events (routed, unconsumed) and parked_at (when its
+        latest run ended), newest first.
+        """
+        rows = await self._thread_query(
+            "SELECT t.key AS thread_key, t.type AS thread_type, t.owner_user_id, t.harness, "
+            "t.last_error, t.attempts, "
+            "(SELECT COUNT(*) FROM events e WHERE e.thread_key = t.key "
+            " AND e.status = 'routed' AND e.consumed_by_run IS NULL) AS pending_events, "
+            "(SELECT MAX(COALESCE(r.finished_at, r.started_at)) FROM runs r "
+            " WHERE r.thread_key = t.key) AS parked_at "
+            "FROM threads t WHERE t.dead ORDER BY t.key LIMIT ?", (limit,))
+        for row in rows:
+            row["parked_at"] = _date(row["parked_at"])
+            row["pending_events"] = int(row["pending_events"] or 0)
+        floor = datetime.min.replace(tzinfo=timezone.utc)
+        rows.sort(key=lambda r: (r["parked_at"] or floor, r["thread_key"]), reverse=True)
+        return rows
+
+    async def take_park_notice(self, thread_key: str) -> bool:
+        """True once per parking: the thread is parked and nobody was told of new work yet.
+
+        Reset when the thread parks again (`fail`); see notifications.ParkNotifier.
+        """
+        rows = await self._thread_query(
+            "UPDATE threads SET park_noticed = TRUE WHERE key = ? AND dead "
+            "AND NOT park_noticed RETURNING key", (thread_key,))
+        return bool(rows)
 
     async def task_events(self, *, ids: list[str] | None = None,
                           pending_for: list[str] | None = None) -> list[dict]:

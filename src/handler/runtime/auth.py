@@ -170,6 +170,16 @@ def add_cli_commands(subparsers: argparse._SubParsersAction) -> None:
     revive.add_argument("--discard-pending", action="store_true",
                         help="drop the unanswered events instead of running them again")
     storage(revive)
+    parked = actions.add_parser("parked", help="list parked threads (no retry left)")
+    storage(parked)
+
+    delivery = subparsers.add_parser("delivery", help="repair outbox deliveries")
+    actions = delivery.add_subparsers(dest="action", required=True)
+    redeliver = actions.add_parser(
+        "redeliver", help="requeue dead deliveries of a sink (all, or one --key)")
+    redeliver.add_argument("sink")
+    redeliver.add_argument("--key", default=None, help="only this delivery")
+    storage(redeliver)
 
 
 def open_store(args: argparse.Namespace):
@@ -189,8 +199,18 @@ def open_store(args: argparse.Namespace):
 async def _run_cli(args: argparse.Namespace, store=None) -> int:
     store = store or open_store(args)
     try:
+        if args.command == "thread" and args.action == "parked":
+            for row in await store.parked_threads(limit=500):
+                print(f"{row['thread_key']}\tattempts={row['attempts']}\t"
+                      f"pending={row['pending_events']}\t{row['last_error'] or ''}")
+            return 0
         if args.command == "thread":
             return await _revive_thread(store, args)
+        if args.command == "delivery":
+            count = await store.redeliver(args.sink, args.key)
+            print(f"requeued {count} dead deliveries of {args.sink}"
+                  + (f" ({args.key})" if args.key else ""))
+            return 0 if count or args.key is None else 1
         if args.command == "user":
             if not USER_ID.fullmatch(args.user_id):
                 print(f"error: invalid user id (use {USER_ID.pattern})", file=sys.stderr)

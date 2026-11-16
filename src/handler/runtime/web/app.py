@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
@@ -27,6 +28,8 @@ from ..run import fill_tool_inputs
 from ..settings import HarnessSource, ModelName, ReasoningEffort, resolve_harness
 from ..types import Event, Lane, ThreadSpec, ThreadType
 from .auth_api import auth_router
+
+logger = logging.getLogger("handler.runtime.web")
 
 HEARTBEAT_SECONDS = 15.0
 MEMBER_SCAN_LIMIT = 1000  # threads scanned when filtering a member's list
@@ -304,6 +307,18 @@ def create_app(
         rows.sort(key=lambda t: (t.get("last_message_at") or t["created_at"], t["key"]), reverse=True)
         return rows[:100]
 
+    # Before the greedy /api/threads/{key:path} routes.
+    @router.get("/api/threads/parked")
+    async def parked_threads(principal: Principal = principal_dep) -> Any:
+        """Threads that stopped after their last attempt and wait for a person:
+        the error, attempts and how many events are queued on each."""
+        rows = [row for row in await store.parked_threads(limit=200)
+                if can_see_thread(principal, row["thread_key"])]
+        metadata = await store.thread_metadata([r["thread_key"] for r in rows],
+                                               principal.user_id)
+        return _json([{**row, "title": (metadata.get(row["thread_key"]) or {}).get("title")}
+                      for row in rows])
+
     @router.get("/api/events")
     async def list_events(source: str | None = None, status: str | None = None,
                           limit: int = 50, principal: Principal = principal_dep) -> Any:
@@ -345,6 +360,21 @@ def create_app(
             raise HTTPException(422, str(exc)) from exc
         bus.publish(BusMessage(key, None, "thread_updated", {}))
         return {**_json(thread), **_json((await store.thread_metadata([key], principal.user_id))[key])}
+
+    @router.post("/api/threads/{key:path}/retry")
+    async def retry_thread(key: str, principal: Principal = Depends(auth.require_admin)) -> Any:
+        """Run a parked thread again, with every event still queued on it."""
+        thread = await store.get_thread(key)
+        if thread is None:
+            raise HTTPException(404, "thread not found")
+        if not thread.dead:
+            raise HTTPException(409, "thread is not parked")
+        await store.revive_thread(key)
+        logger.info("parked thread retried", extra={"thread_key": key,
+                                                    "by": principal.identity})
+        bus.publish(BusMessage(key, None, "thread_updated", {}))
+        thread = await store.get_thread(key)
+        return {"thread": _json(thread), "pending_events": len(await store.pending_events(key))}
 
     @router.post("/api/threads/{key:path}/read")
     async def mark_read(key: str, body: ThreadReadRequest,

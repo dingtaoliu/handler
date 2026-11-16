@@ -103,7 +103,7 @@ async def test_outbox_retries_with_backoff_then_dead_letters(store, caplog):
         await outbox.deliver_once()
     row = await store.get_delivery("fake", "n1")
     assert row.status == DEAD and row.attempts == 3 and "down" in row.last_error
-    assert any(r.message == "delivery dead-lettered" for r in caplog.records)
+    assert any(r.message == "delivery dead" for r in caplog.records)
     assert len(await store.list_deliveries()) == 1
 
 
@@ -199,6 +199,25 @@ class FailingHarness:
         pass
 
 
+class FailingSink:
+    """Fails every delivery for good (non-retryable) until `fail` is cleared."""
+
+    name = "flaky"
+    retry = RetryPolicy(max_attempts=1)
+
+    def __init__(self):
+        self.fail = True
+        self.payloads = []
+
+    def accepts(self, event):
+        return True
+
+    async def deliver(self, payload):
+        if self.fail:
+            raise DeliveryError("HTTP 500", retryable=False)
+        self.payloads.append(payload)
+
+
 async def _failure_env(store, tmp_path: Path, *, retryable=False, cooldown=3600.0):
     await store.create_user(User("owner", "Owner"))
     await store.create_user(User("boss", "Boss", role="admin"))
@@ -240,7 +259,7 @@ async def test_dead_background_run_notifies_owner_and_admins_once(store, tmp_pat
     assert not await store.list_notifications("gone")
     assert not await store.list_notifications("member")
     assert "automation:daily" in boss.message and "model exploded" in boss.message
-    assert "Daily digest" in boss.message and boss.message.startswith("Automation run failed")
+    assert "Daily digest" in boss.message and boss.message.startswith("Automation thread parked")
     await notifier.outbox.deliver_once()
     (payload,) = sink.payloads
     assert payload["data"]["recipients"] == ["owner", "boss"]
@@ -260,9 +279,99 @@ async def test_retries_do_not_notify_until_dead(store, tmp_path):
     assert len(await store.list_notifications("boss")) == 1
 
 
-async def test_chat_failures_do_not_notify(store, tmp_path):
+async def test_parked_chat_tells_admins_but_not_the_speaker(store, tmp_path):
     dispatcher, _, _ = await _failure_env(store, tmp_path)
     await _put(store, "chat:owner:c1", ThreadType.CHAT, "e1")
     await _drain(dispatcher)
     assert (await store.get_thread("chat:owner:c1")).dead
-    assert not await store.list_notifications("boss")
+    (boss,) = await store.list_notifications("boss")
+    assert boss.message.startswith("Chat thread parked")
+    assert not await store.list_notifications("owner")  # saw the error in the chat
+
+
+async def test_parking_emits_one_operator_alert(store, tmp_path, caplog):
+    dispatcher, _, _ = await _failure_env(store, tmp_path)
+    await _put(store, "automation:daily", ThreadType.AUTOMATION, "e1")
+    with caplog.at_level("ERROR", logger="handler.runtime.run"):
+        await _drain(dispatcher)
+    (alert,) = [r for r in caplog.records if r.message == "thread parked"]
+    assert alert.levelname == "ERROR" and alert.thread_key == "automation:daily"
+    assert alert.tenant == "main" and alert.thread_type == "automation"
+    assert "model exploded" in alert.error and alert.attempts == 1
+
+
+async def test_new_event_on_parked_thread_is_queued_with_one_notice(store, tmp_path, caplog):
+    dispatcher, notifier, _ = await _failure_env(store, tmp_path)
+    store.on_parked_event = dispatcher.executor.failure_notifier.event_on_parked
+    await _put(store, "automation:daily", ThreadType.AUTOMATION, "e1")
+    await _drain(dispatcher)
+    assert len(await store.list_notifications("boss")) == 1  # the park notice
+    for idem in ("e2", "e3", "e4"):  # a burst
+        await _put(store, "automation:daily", ThreadType.AUTOMATION, idem)
+    await _drain(dispatcher)
+    pending = await store.pending_events("automation:daily")
+    assert [e.idempotency_key for e in pending] == ["e1", "e2", "e3", "e4"]  # kept, not run
+    notices = await store.list_notifications("boss")
+    assert len(notices) == 2
+    assert sum("waiting on parked thread" in n.message for n in notices) == 1
+    assert len(await store.list_notifications("owner")) == 2
+    (row,) = await store.parked_threads()
+    assert row["thread_key"] == "automation:daily" and row["pending_events"] == 4
+    assert "model exploded" in row["last_error"] and row["attempts"] == 1
+    # Retried and parked again: the next new event gets a notice again.
+    await store.revive_thread("automation:daily")
+    await _drain(dispatcher)
+    assert (await store.get_thread("automation:daily")).dead
+    await _put(store, "automation:daily", ThreadType.AUTOMATION, "e5")
+    assert sum("waiting on parked" in n.message
+               for n in await store.list_notifications("boss")) == 2
+
+
+async def test_chat_message_still_revives_a_parked_thread(store, tmp_path):
+    dispatcher, _, _ = await _failure_env(store, tmp_path)
+    store.on_parked_event = dispatcher.executor.failure_notifier.event_on_parked
+    await _put(store, "chat:owner:c1", ThreadType.CHAT, "e1")
+    await _drain(dispatcher)
+    await store.put(Event(type="chat.message", source="test", payload={"text": "again"},
+                          idempotency_key="e2", thread_key="chat:owner:c1", user_id="owner"),
+                    ThreadSpec(key="chat:owner:c1", type=ThreadType.CHAT, lane=Lane.INTERACTIVE,
+                               owner_user_id="owner", harness="fake"))
+    thread = await store.get_thread("chat:owner:c1")
+    assert not thread.dead and thread.attempts == 0
+    assert all("waiting on parked" not in n.message
+               for n in await store.list_notifications("boss"))
+
+
+async def test_dead_delivery_alerts_and_tells_admins_locally_once(store, caplog):
+    await store.create_user(User("boss", "Boss", role="admin"))
+    sink = FailingSink()
+    outbox = Outbox(store, [sink], tenant="bss")
+    local = Notifier(store, RunEventBus(), outbox=outbox, users_provider=lambda: [])
+    outbox.on_dead = FailureNotifier(local).delivery_dead
+    for key in ("k1", "k2"):
+        await store.enqueue_delivery(sink.name, key, {"n": key})
+    with caplog.at_level("ERROR", logger="handler.runtime.sinks"):
+        await outbox.deliver_once()
+    alerts = [r for r in caplog.records if r.message == "delivery dead"]
+    assert len(alerts) == 2 and alerts[0].tenant == "bss" and alerts[0].sink == sink.name
+    (notice,) = await store.list_notifications("boss")  # one per sink per cooldown
+    assert sink.name in notice.message and "redeliver" in notice.message.lower()
+    # Kept in Handler: nothing new queued for the failing sink.
+    assert {d.key for d in await store.list_deliveries()} == {"k1", "k2"}
+
+
+async def test_redeliver_requeues_dead_rows_and_they_deliver(store):
+    sink = FailingSink()
+    outbox = Outbox(store, [sink])
+    for key in ("k1", "k2"):
+        await store.enqueue_delivery(sink.name, key, {"n": key})
+    await outbox.deliver_once()
+    assert {d.status for d in await store.list_deliveries()} == {"dead"}
+    sink.fail = False
+    assert await store.redeliver(sink.name, "k1") == 1
+    assert await store.redeliver(sink.name, "k1") == 0  # pending now, not dead
+    assert await outbox.deliver_once() == 1
+    assert (await store.get_delivery(sink.name, "k1")).status == "delivered"
+    assert await store.redeliver(sink.name) == 1  # every dead row of the sink
+    assert await outbox.deliver_once() == 1
+    assert {d.status for d in await store.list_deliveries()} == {"delivered"}

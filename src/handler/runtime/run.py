@@ -1066,11 +1066,20 @@ class RunExecutor:
         self._publish(thread.key, run.id, "run_finished",
                       {"status": "failed", "error": run.error, "retry_in": retry_in})
         await self._publish_task(thread, run.id)
-        if failed and retry_in is None and self.failure_notifier is not None:
-            try:
-                await self.failure_notifier.run_failed(thread, run, await self._acting_as(thread))
-            except Exception:
-                logger.exception("failure notification failed")
+        if failed and retry_in is None:
+            # Parked: nothing runs on the thread until a person retries it (or,
+            # for chat, sends another message). The stable message is the
+            # operator's log-based alert.
+            logger.error("thread parked", extra={
+                "tenant": self.config.instance_name, "thread_key": thread.key,
+                "thread_type": str(thread.type), "run_id": run.id, "attempts": attempt,
+                "error": run.error[:500]})
+            if self.failure_notifier is not None:
+                try:
+                    await self.failure_notifier.run_failed(thread, run,
+                                                           await self._acting_as(thread))
+                except Exception:
+                    logger.exception("failure notification failed")
 
     async def _publish_task(self, thread: Thread, run_id: str) -> None:
         """Live task status for background (non-chat) threads."""

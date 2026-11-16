@@ -765,7 +765,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         crontal_catalog = _crontal_route_catalog(args, env, integrations, legacy_crontal)
         users = [u.strip() for u in args.users.split(",") if u.strip()]
         # Output sinks: integrations register only when configured.
-        outbox = Outbox(store)
+        outbox = Outbox(store, tenant=instance_name or "main")
         crontal_sink = crontal_sink_from_config(
             args.crontal_url, env.get("CRONTAL_AGENT_TOKEN"), env.get("HANDLER_WEBHOOK_SECRET"),
             instance_name) if legacy_crontal else None
@@ -850,11 +850,14 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
 
         settings.harness_defaults = harness_defaults
         workspace_sync = WorkspaceSync(file_store, data_dir)
+        failure_notifier = FailureNotifier(notifier)
+        store.on_parked_event = failure_notifier.event_on_parked
+        outbox.on_dead = failure_notifier.delivery_dead
         executor = RunExecutor(
             store, harnesses, bus, config, PriceTable.from_yaml(),
             tokens=tokens, mcp_url=f"http://{local_host}:{args.port}{base_path}/mcp/",
             settings=settings, memory_tools=memory_tools,
-            workspace_sync=workspace_sync, failure_notifier=FailureNotifier(notifier),
+            workspace_sync=workspace_sync, failure_notifier=failure_notifier,
             crontal_identity=crontal_id, crontal_catalog=crontal_catalog,
         )
         dispatcher = Dispatcher(
@@ -900,7 +903,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                                            available_tools_for=effective_tool_names))
         app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
                                         uploads=uploads, log_file=_log_file(args),
-                                        artifact_store=artifact_store))
+                                        artifact_store=artifact_store, outbox=outbox))
         email_secret = env.get("HANDLER_EMAIL_SECRET")
         intake_observers: list = []  # integrations add theirs below
         if email_secret:

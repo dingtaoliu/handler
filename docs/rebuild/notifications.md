@@ -17,17 +17,48 @@ core emits domain events, and integrations plug in sinks that deliver them.
    `next_attempt_at`; `FOR UPDATE SKIP LOCKED` on Postgres) and calls
    `sink.deliver(payload)`. On failure it retries with the sink's
    `RetryPolicy` (default 10 attempts: 10 s, 30 s, 2 min, 10 min, 30 min, then
-   hourly) and after the last attempt marks the row `dead` and logs
-   `delivery dead-lettered`. A `DeliveryError(retryable=False)` dead-letters
-   at once.
+   hourly) and after the last attempt marks the row `dead`. A
+   `DeliveryError(retryable=False)` dead-letters at once. Each dead row logs
+   one ERROR line, `delivery dead` (fields `tenant`, `sink`, `key`, `attempts`,
+   `error`), for a log-based operator alert, and the instance's admins get a
+   notice in Handler (at most one per sink per hour). That notice is
+   `local_only`: it is never handed to a sink, since the failing sink would
+   only dead-letter it in turn.
 
 A sink implements `name`, `retry`, `accepts(event)` and `async deliver(payload)`.
 The outbox is sink-agnostic; other events (e.g. `task.status_changed`) only
 need an emit call and a sink that accepts them.
 
-Inspect stuck deliveries in the instance's schema:
-`SELECT sink, key, status, attempts, last_error FROM deliveries WHERE status <> 'delivered'`.
-To retry a dead row, set `status = 'pending', next_attempt_at = now()`.
+Dead deliveries (admin only):
+
+- `GET /api/deliveries` lists dead rows (`?status=pending|delivered|` for others).
+- `POST /api/deliveries/redeliver` with `{"sink": "crontal", "key": "ntf_…"}`
+  requeues one; without `key`, every dead row of that sink. Requeued rows get a
+  fresh set of attempts and are due at once.
+- CLI: `handler-rt delivery redeliver <sink> [--key <key>]`.
+
+Automatic slow retries of dead rows are future work (role-split-design.md).
+
+## Parked threads
+
+A thread whose run fails with no retry left is **parked** (`threads.dead`):
+
+- Nothing runs on it until someone retries it. New events are still stored and
+  queued on it; a `chat.message` revives it at once (the person is asking again).
+- When it parks: one ERROR log line `thread parked` (fields `tenant`,
+  `thread_key`, `thread_type`, `run_id`, `attempts`, `error`) for the operator
+  alert, and a notice to the tenant's admins. For background threads the acting
+  user is told too; for chat only admins, since the speaker sees the error in the
+  chat. At most one park notice per thread per hour.
+- The first non-chat event that arrives while it is parked sends one more
+  notice ("waiting on parked thread") to the admins and the thread's owner; a
+  burst sends one (`threads.park_noticed`, cleared when the thread parks again).
+- `GET /api/threads/parked`: error, attempts, queued event count and when it
+  parked, filtered by thread visibility. `POST /api/threads/{key}/retry` (admin)
+  revives it with everything queued. The web UI shows a "parked" badge on the
+  thread and task, a Parked threads table on Activity, and Retry for admins.
+- CLI: `handler-rt thread parked`, `handler-rt thread revive <key>`.
+- No automatic retries yet (owner decision 6).
 
 ## Crontal sink
 

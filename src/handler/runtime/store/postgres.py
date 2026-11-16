@@ -31,7 +31,7 @@ from ..tenancy.limits import (
 )
 from .postgres_hub import CONTROL_SCHEMA, SCHEMA_LOCK, SHARED_CHANNEL, PostgresHub
 from .usage import PostgresUsage
-from .tasks import announce_routed
+from .tasks import announce_parked, announce_routed
 from ..types import (
     ABANDONED_ERROR,
     Event,
@@ -470,6 +470,7 @@ class PostgresCore(PostgresUsage):
             return stored
         self._wake.set()
         announce_routed(self, event, thread)
+        await announce_parked(self, event, thread)
         return True
 
     def _announce_released(self, released: list[tuple[Event, ThreadSpec]]) -> None:
@@ -615,8 +616,9 @@ class PostgresCore(PostgresUsage):
             await conn.execute(
                 "UPDATE threads SET attempts = attempts + 1, last_error = %s, "
                 "dead = %s, available_at = %s, lease_owner = NULL, "
-                "lease_until = NULL WHERE key = %s",
-                (strip_nul(error), retry_in_seconds is None, available_at, lease.thread_key),
+                "lease_until = NULL, park_noticed = park_noticed AND NOT %s WHERE key = %s",
+                (strip_nul(error), retry_in_seconds is None, available_at,
+                 retry_in_seconds is None, lease.thread_key),
             )
             await self._notify(conn)
             return True

@@ -18,6 +18,8 @@ const API = {
     threadMessages: (k) => `/api/threads/${enc(k)}/messages`,
     threadRuns: (k) => `/api/threads/${enc(k)}/runs`,
     threadStream: (k) => `/api/threads/${enc(k)}/stream`,
+    threadRetry: (k) => `/api/threads/${enc(k)}/retry`,
+    parked: "/api/threads/parked",
     stream: "/api/stream",
     run: (id) => `/api/runs/${enc(id)}`,
     chat: "/api/chat",
@@ -338,7 +340,7 @@ function renderThreadList(list = chat.threads) {
     $("thread-list").innerHTML = shown.length ? shown.map((t) => {
         const own = isOwnChat(t.key);
         const kind = t.type === "chat" ? (own ? "" : badge("other chat", "gray")) : badge(t.type, t.type === "automation" ? "blue" : "green");
-        const state = t.dead ? badge("dead", "red") : t.lease_owner ? badge("running", "blue") : t.pending_since ? badge("queued", "yellow") : "";
+        const state = t.dead ? badge("parked", "red") : t.lease_owner ? badge("running", "blue") : t.pending_since ? badge("queued", "yellow") : "";
         const unread = chat.unread.has(t.key) ? badge("new activity", "blue") : "";
         return `<div class="file-item thread-item ${t.key === chat.key ? "active" : ""}" role="button" tabindex="0" data-action="select-thread" data-key="${esc(t.key)}">
             <div class="file-name"><span class="t">${esc(threadTitle(t))}</span>${kind}${state}${unread}</div>
@@ -487,8 +489,9 @@ async function loadMessages(force) {
         html += (live.steps || []).map(stepHtml).join("");
     }
     if (t.last_error || (live && live.run.error)) {
-        const state = t.dead ? "Run failed and will not be retried" : t.pending_since ? "Run failed; retrying" : "Run failed";
-        html += `<div class="msg event run-error" role="status">${esc(state)}: ${esc(t.last_error || live.run.error)}</div>`;
+        const state = t.dead ? "Parked: the run failed and will not be retried" : t.pending_since ? "Run failed; retrying" : "Run failed";
+        const retry = t.dead && isAdmin() ? ` ${retryButton(t.key)}` : "";
+        html += `<div class="msg event run-error" role="status">${esc(state)}: ${esc(t.last_error || live.run.error)}${retry}</div>`;
     }
     box.innerHTML = html || empty("No messages yet. Agent activity will appear here.");
     hydrateBlobs(box);
@@ -852,7 +855,29 @@ loaders.automations = loadAutomations;
 const act = {run: null, items: [], cursor: null};
 const TASK_BADGE = {queued: "yellow", running: "blue", waiting_approval: "yellow", waiting_answer: "yellow",
     succeeded: "green", failed: "red", dead: "red"};
-const taskBadge = (s) => badge(s === "succeeded" ? "run completed" : String(s || "").replaceAll("_", " "), s === "succeeded" ? "gray" : TASK_BADGE[s] || "gray");
+const TASK_LABEL = {succeeded: "run completed", dead: "parked"};
+const taskBadge = (s) => badge(TASK_LABEL[s] || String(s || "").replaceAll("_", " "), s === "succeeded" ? "gray" : TASK_BADGE[s] || "gray");
+// Parked work waits for a person: admins can run it again with what is queued.
+const retryButton = (key) => `<button class="btn-small btn-primary" type="button" data-action="thread-retry" data-key="${esc(key)}">Retry</button>`;
+async function loadParked() {
+    const rows = await apiOpt(API.parked, []);
+    const box = $("activity-parked");
+    if (!rows || !rows.length) { box.innerHTML = ""; return; }
+    box.innerHTML = `<div class="section-title">Parked threads</div><p class="muted">These stopped after their last attempt. New events still queue on them; nothing runs until someone retries.</p><div class="table-wrap"><table class="data-table"><thead><tr><th>Thread</th><th>Type</th><th>Error</th><th>Attempts</th><th>Queued</th><th>Parked</th><th></th></tr></thead><tbody>` +
+        rows.map((r) => `<tr><td><a class="link" role="button" tabindex="0" data-action="goto-thread" data-key="${esc(r.thread_key)}">${esc(r.title || r.thread_key)}</a></td>
+            <td>${badge(r.thread_type, "gray")}</td><td class="err-text">${esc(String(r.last_error || "").slice(0, 200))}</td>
+            <td>${esc(r.attempts)}</td><td>${esc(r.pending_events)}</td><td>${esc(fmtTime(r.parked_at))}</td>
+            <td>${isAdmin() ? retryButton(r.thread_key) : ""}</td></tr>`).join("") + "</tbody></table></div>";
+}
+actions["thread-retry"] = async (el) => {
+    el.disabled = true;
+    try {
+        const r = await sendJson("POST", API.threadRetry(el.dataset.key), {});
+        toast(`Retrying with ${r.pending_events} queued event(s)`);
+    } finally { el.disabled = false; }
+    if (activeTab === "activity") await loadActivity();
+    else { await loadThreads(); await loadMessages(true); }
+};
 const outcomeBadge = (t) => badge(String(t.task_outcome?.outcome || "unknown").replaceAll("_", " "), t.task_outcome?.outcome === "completed" ? "green" : "gray");
 async function loadIgnoredEmail() {
     const rows = await apiOpt("/api/events?source=email&status=ignored&limit=30", []);
@@ -878,7 +903,8 @@ function taskRow(t) {
         <td>${taskBadge(t.status)}<div>Task: ${outcomeBadge(t)}</div></td><td>${badge(t.thread_type, "gray")}</td>
         <td><b>${esc(t.trigger_summary)}</b><div class="muted">${esc(t.thread_title)}</div>
             ${t.summary ? `<div class="muted">${esc(t.summary)}</div>` : ""}
-            ${t.error ? `<div class="err-text">${esc(String(t.error).slice(0, 200))}</div>` : ""}</td>
+            ${t.error ? `<div class="err-text">${esc(String(t.error).slice(0, 200))}</div>` : ""}
+            ${t.status === "dead" && isAdmin() ? retryButton(t.thread_key) : ""}</td>
         <td title="${esc(when || "")}">${esc(fmtTime(when))}<div class="muted">${esc(fmtAge(when))} ago</div></td>
         <td>${esc(dur)}</td><td>${tokens}</td><td>${fmtCost(t.cost_usd)}</td></tr>`;
 }
@@ -890,6 +916,7 @@ function renderTasks() {
 }
 async function loadActivity() {
     loadIgnoredEmail().catch(() => {});
+    loadParked().catch(() => {});
     if (!chat.stream) connectStream();  // live task_updated messages
     const page = await api("/api/tasks?" + taskQuery());
     act.items = page.items || []; act.cursor = page.next_cursor;

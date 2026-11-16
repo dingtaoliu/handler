@@ -1,6 +1,7 @@
 # Shared host resources: inbox, runner and outbox
 
-Status: **owner decisions settled November 15, 2026; build not started**. First written
+Status: **owner decisions settled November 15, 2026; steps 0 and 1 built on
+`feat/shared-runtime`** (not deployed; see Build order). First written
 November 14, 2026 as a split into separate processes. Rewritten November 15, 2026 after
 review with the owner, who narrowed the goal to a single host. Follows
 [multi-tenant-design.md](multi-tenant-design.md).
@@ -299,6 +300,14 @@ the same database; rollback is flipping it.
 | 5 | Idempotent tool side effects | A run retried after a crash does not repeat a sent email or a Crontal write |
 | 6 | Outbox subscriptions and one delivery pool with per-tenant limits | A failing sink for one tenant does not delay another tenant's deliveries |
 | 7 | Thread strategies registered per type; the automation special case moved into its strategy | `run.py` has no checks on thread type |
+
+Progress (branch `feat/shared-runtime`, November 15, 2026):
+
+- **Step 0, Handler parts: built.** `HANDLER_ALLOWED_HARNESSES` (HANDOFF §3) and the
+  workspace upload when each run ends. The Crontal `client_message_id` is not done.
+- **Step 1: built.** Parked threads with notices, the `thread parked` alert and Retry;
+  `delivery dead` alert, admin notice and redeliver (notifications.md). The poison-event
+  split and the slow final delivery retry are not done.
 
 The tenant registry (multi-tenant stage 2) is switched on only at the end of step 3, so
 production never runs the activation lifecycle this design removes.

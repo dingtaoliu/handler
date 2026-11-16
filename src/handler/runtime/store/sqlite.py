@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from .usage import SQLiteUsage
-from .tasks import announce_routed
+from .tasks import announce_parked, announce_routed
 from ..types import (
     ABANDONED_ERROR,
     Event,
@@ -113,6 +113,7 @@ ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("memory_topics", "updated_thread_key", "TEXT"),
     ("threads", "context_links", "TEXT"),
     ("threads", "context_hash", "TEXT"),
+    ("threads", "park_noticed", "INTEGER NOT NULL DEFAULT 0"),
 ]
 # Indexes on added columns, created once the columns exist.
 ADDED_INDEXES = [
@@ -233,6 +234,7 @@ class SQLiteCore(SQLiteUsage):
         if inserted:
             self._wake.set()
             announce_routed(self, event, thread)
+            await announce_parked(self, event, thread)
         return inserted
 
     async def claim(
@@ -318,9 +320,11 @@ class SQLiteCore(SQLiteUsage):
             )
             db.execute(
                 "UPDATE threads SET attempts = attempts + 1, last_error = ?, "
-                "dead = ?, available_at = ?, lease_owner = NULL, lease_until = NULL "
+                "dead = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, "
+                "park_noticed = CASE WHEN ? THEN 0 ELSE park_noticed END "
                 "WHERE key = ?",
-                (error, retry_in_seconds is None, available_at, lease.thread_key),
+                (error, retry_in_seconds is None, available_at, retry_in_seconds is None,
+                 lease.thread_key),
             )
             return True
 

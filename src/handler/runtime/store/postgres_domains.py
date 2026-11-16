@@ -14,7 +14,7 @@ from typing import Any, TypeVar
 from psycopg.types.json import Jsonb
 
 from ..tenancy.limits import OverLimit
-from .tasks import announce_routed
+from .tasks import announce_parked, announce_routed
 from ..types import (
     Approval,
     ApprovalStatus,
@@ -151,6 +151,7 @@ class ScheduleMixin(_Rows):
         self._wake.set()
         if routed:
             announce_routed(self, event, thread)
+            await announce_parked(self, event, thread)
         return True
 
 
