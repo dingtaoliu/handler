@@ -223,31 +223,13 @@ async def tenant(pg_dsn, clock):
 def test_the_read_cap_can_be_raised():
     try:
         assert limiter.configure_read_limit("6") == 6
-        assert limiter._pool()._max_workers == 6
+        assert limiter.reader_pool().settings.size == 6
     finally:
         limiter.configure_read_limit(None)
     assert limiter.DEFAULT_READ_LIMIT == 2
 
 
-async def test_a_read_waiting_for_a_slot_is_logged(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(limiter, "SLOW_READ_SECONDS", 0.05)
-    limiter.configure_read_limit("1")
-    release = threading.Event()
-    file = tmp_path / "a.pdf"
-    file.write_text("x")
-    try:
-        with caplog.at_level(logging.WARNING, logger="handler.runtime.documents"):
-            first = asyncio.create_task(limiter.capped_read("a", lambda p: release.wait(5), file))
-            second = asyncio.create_task(limiter.capped_read("b", lambda p: "ok", file))
-            await asyncio.sleep(0.2)
-            release.set()
-            await first
-            assert await second == "ok"
-    finally:
-        limiter.configure_read_limit(None)
-    messages = {r.getMessage() for r in caplog.records}
-    assert "document read waiting for a slot" in messages
-    assert "document read still running" in messages
+# The waiting-for-a-slot log is covered with the reader pool in test_document_read_cap.py.
 
 
 # --- 7: storage checks don't walk the tree on every write ---------------------------

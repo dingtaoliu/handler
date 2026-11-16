@@ -35,7 +35,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .. import documents
+from .. import documents, main_limits
 from ..storage import ensure_workspace_room
 from ..context import RunContext
 from ..types import Risk
@@ -373,10 +373,12 @@ class GmailTools:
             data = _b64decode(body.get("data", ""))
         saved = self._save(ctx, message_id, filename, data)
         workspace = self._workspace_for(ctx.thread_key)
-        text = await documents.capped_read("gmail", documents.to_text, workspace / saved,
-                                           max_chars=MAX_TEXT_CHARS + 1)
+        text, error = await documents.capped_preview("gmail", workspace / saved,
+                                                     max_chars=MAX_TEXT_CHARS + 1)
         result: dict[str, Any] = {"filename": filename, "mime_type": mime, "size": len(data),
                                   "saved_to": saved}
+        if error:
+            result["text_error"] = error
         if text:
             result["text"] = text[:MAX_TEXT_CHARS]
             if len(text) > MAX_TEXT_CHARS:
@@ -404,7 +406,10 @@ class GmailTools:
             source = (workspace / path).resolve()
             if workspace not in source.parents or not source.is_file():
                 raise GmailError(f"attachment not found in the workspace: {path}")
-            data = source.read_bytes()
+            try:
+                data = main_limits.read_bounded(source, path)
+            except main_limits.FileTooLarge as exc:
+                raise GmailError(str(exc)) from None
             if pins is not None and pins.get(path) != hashlib.sha256(data).hexdigest():
                 raise GmailError(f"attachment {path} changed after the send was approved; "
                                  "not sent. Request the send again.")

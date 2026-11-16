@@ -19,7 +19,7 @@ from email.utils import getaddresses
 from pathlib import Path
 from typing import Any, Callable
 
-from ... import documents
+from ... import documents, main_limits
 from ...storage import ensure_workspace_room
 from ...context import RunContext
 from ...gateway.base import ToolResult, ToolSpec
@@ -28,7 +28,7 @@ from ...types import Risk, new_id
 from ...uploads import sanitize_filename
 from .config import Mailbox
 from .intake import INTAKE_ID, intake_mailbox
-from .message import parse_message
+from .message import parse_message_file
 from .service import MailboxService, thread_key
 from .store import MailStore
 from .transport import MailError
@@ -360,7 +360,7 @@ class MailTools:
         workspace = self._workspace_for(ctx.thread_key)
         saved = match.get("path")
         if saved and (workspace / saved).is_file():
-            data = (workspace / saved).read_bytes()
+            size = (workspace / saved).stat().st_size
         else:
             if row["account_id"] == INTAKE_ID:
                 raise ToolError("Attachments of email intake mail are not kept in the "
@@ -368,18 +368,22 @@ class MailTools:
                                 "thread that received the message.")
             mailbox = await self._mailbox(row["account_id"])
             raw = await self.service.fetch_raw(mailbox, row)
-            parsed = await asyncio.to_thread(parse_message, raw)
+            parsed = await documents.capped_parse("mailbox", parse_message_file, raw)
             index = int(match.get("index") or 0)
             if index >= len(parsed.attachments):
                 raise ToolError("the attachment is no longer in the message on the server")
             data = parsed.attachments[index].data
+            size = len(data)
             name = sanitize_filename(match.get("filename"), default="attachment")
             saved = self._save(ctx, f"mail/{row['account_id']}/{row['id']}/{name}", data)
-        text = await documents.capped_read("mailbox", documents.to_text, workspace / saved,
-                                           max_chars=MAX_TEXT_CHARS + 1)
+            del data, parsed
+        text, error = await documents.capped_preview("mailbox", workspace / saved,
+                                                     max_chars=MAX_TEXT_CHARS + 1)
         result: dict[str, Any] = {"filename": match.get("filename"),
-                                  "mime_type": match.get("content_type"), "size": len(data),
+                                  "mime_type": match.get("content_type"), "size": size,
                                   "saved_to": saved}
+        if error:
+            result["text_error"] = error
         if text:
             result["text"] = text[:MAX_TEXT_CHARS]
             if len(text) > MAX_TEXT_CHARS:
@@ -428,7 +432,10 @@ class MailTools:
             source = (workspace / path).resolve()
             if workspace not in source.parents or not source.is_file():
                 raise ToolError(f"attachment not found in the workspace: {path}")
-            data = source.read_bytes()
+            try:
+                data = main_limits.read_bounded(source, path)
+            except main_limits.FileTooLarge as exc:
+                raise ToolError(str(exc)) from None
             if pins is not None and pins.get(path) != hashlib.sha256(data).hexdigest():
                 raise ToolError(f"attachment {path} changed after the send was approved; "
                                 "not sent. Request the send again.")

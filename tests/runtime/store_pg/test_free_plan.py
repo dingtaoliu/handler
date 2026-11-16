@@ -576,11 +576,10 @@ async def test_at_the_cap_with_nothing_quiescent_requests_wait_and_mail_is_spool
 
 async def test_a_spooled_message_stops_retrying_but_is_never_deleted(base_env, pg_dsn, monkeypatch, caplog):
     from handler.runtime.web import email_ingest
+    from tests.runtime import reader_fakes
 
-    def unparseable(raw):
-        raise ValueError("cannot parse")
-
-    monkeypatch.setattr(email_ingest, "parse_email", unparseable)
+    # Parsing runs in a reader process, so the stand-in must be importable there.
+    monkeypatch.setattr(email_ingest, "parse_email_file", reader_fakes.unparseable)
     monkeypatch.setattr(host_module, "SPOOL_RETRY_SECONDS", 0.0)
     monkeypatch.setattr(host_module, "SPOOL_MAX_ATTEMPTS", 3)
     async with serve(base_env) as (app, client):

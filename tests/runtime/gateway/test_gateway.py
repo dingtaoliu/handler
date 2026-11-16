@@ -207,3 +207,30 @@ async def test_duplicate_registration_rejected(gateway, tools):
     import pytest
     with pytest.raises(ValueError):
         gateway.register(tools)
+
+
+async def test_an_oversized_tool_result_is_cut_with_a_marker(gateway, store, monkeypatch):
+    from handler.runtime import main_limits
+
+    monkeypatch.setattr(main_limits, "max_tool_result_chars", 1000)
+    result = await gateway.call(CTX, "echo", {"text": "x" * 5000})
+    assert not result.is_error and isinstance(result.content, str)
+    assert result.content.startswith('{"echo":"xxx') and len(result.content) < 1200
+    assert "[tool result truncated: 1,000 of 5,0" in result.content
+    [entry] = await store.list_audit("run1")
+    assert entry.result_size == len(result.content)
+
+
+async def test_tool_handlers_run_with_the_callers_run_context(gateway, tools):
+    from handler.runtime.context import current_run
+
+    seen = []
+
+    async def handler(ctx, args):
+        seen.append(current_run())
+        return "ok"
+
+    spec = next(s for s in tools.tools() if s.name == "echo")
+    gateway.register(type(spec)(**{**spec.__dict__, "name": "who", "handler": handler}))
+    await gateway.call(CTX, "who", {"text": "x"})
+    assert seen == [CTX] and current_run() is None

@@ -820,11 +820,10 @@ async def test_replay_goes_through_the_gate_and_does_not_double_count(base_env, 
 
 async def test_a_refused_replay_stays_spooled_for_a_later_try(base_env, pg_dsn, monkeypatch):
     from handler.runtime.web import email_ingest
+    from tests.runtime import reader_fakes
 
-    def unparseable(raw):
-        raise ValueError("cannot parse")
-
-    monkeypatch.setattr(email_ingest, "parse_email", unparseable)
+    # Parsing runs in a reader process, so the stand-in must be importable there.
+    monkeypatch.setattr(email_ingest, "parse_email_file", reader_fakes.unparseable)
     async with serve(base_env) as (app, client):
         await create(client, secrets=MAIL_SECRETS)
         await client.post("/platform/tenants/42/disable", headers=PLATFORM)

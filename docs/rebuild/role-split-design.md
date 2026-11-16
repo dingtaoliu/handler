@@ -1,6 +1,6 @@
 # Shared host resources: inbox, runner and outbox
 
-Status: **owner decisions settled November 15, 2026; steps 0 and 1 built on
+Status: **owner decisions settled November 15, 2026; steps 0, 1 and 4 built on
 `feat/shared-runtime`** (not deployed; see Build order). First written
 November 14, 2026 as a split into separate processes. Rewritten November 15, 2026 after
 review with the owner, who narrowed the goal to a single host. Follows
@@ -298,7 +298,7 @@ the same database; rollback is flipping it.
 | 1 | Parked threads with the Retry action; redeliver for dead deliveries; notices and alerts on both | No work stops without a notice and a way to retry |
 | 2 | One timer over `handler_control.due_work`; one housekeeping pass; one bus for the host; cancel as a stored flag | No per-tenant scheduler, housekeeping or poller tasks remain |
 | 3 | One claim loop across tenants; tenant context cache; one routed app and one MCP route; the new integration contract; `TenantHost` lifecycle removed. Then switch on the registry and import `main`, `bss` and `yeup` | With 50 idle tenants, the process issues no tenant-scoped queries; a busy tenant cannot delay another's chat; the three tenants run unchanged from the registry |
-| 4 | Reader pool as child processes, with email parsing and image downscaling moved in; size caps in the main process; memory logged per run | A synthetic oversized PDF kills only its child, and the tool call reports an error |
+| 4 | Reader pool as child processes, with email parsing and image downscaling moved in; size caps in the main process; memory logged per run | A synthetic oversized PDF kills only its child, and the tool call reports an error. **Built** on `feat/shared-runtime-readers` (not deployed); see [multi-instance.md](multi-instance.md#memory-and-document-reads). Not behind `HANDLER_SHARED_RUNTIME`: it applies to the current host too |
 | 5 | Idempotent tool side effects | A run retried after a crash does not repeat a sent email or a Crontal write |
 | 6 | Outbox subscriptions and one delivery pool with per-tenant limits | A failing sink for one tenant does not delay another tenant's deliveries |
 | 7 | Thread strategies registered per type; the automation special case moved into its strategy | `run.py` has no checks on thread type |

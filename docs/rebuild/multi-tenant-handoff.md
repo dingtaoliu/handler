@@ -45,9 +45,9 @@ is at the top of [HANDOFF.md](HANDOFF.md).
 
 ## Known gaps and accepted risks
 
-- **The R14 cause is unproven.** The leading hypothesis is in-process document reading. The proper fix is the document-reader process pool in the role split.
-- **Uncapped work:** email parsing and image downscaling (`run.py` `_attachments`, on the event loop) are not under the document-read cap.
-- **The 2-read cap is shared by all tenants,** so one hung PDF delays every tenant's reads. This was kept deliberately and is logged every 5 s.
+- **The R14 cause is unproven.** The leading hypothesis is in-process document reading. Role-split step 4 (branch `feat/shared-runtime-readers`, not yet deployed) moves all parsing into a reader process pool; after release, compare `run memory` (`run_peak_rss_mb`, `reader_peak_rss_mb`) and `document read` logs with the R14 times. The fork server costs about 190 MB idle on Linux, so check total dyno memory after the release.
+- ~~Uncapped work: email parsing and image downscaling~~ — closed by step 4: both run in the reader pool.
+- ~~The 2-read cap is shared by all tenants, so one hung PDF delays every tenant's reads~~ — closed by step 4: a read times out (120 s) and is killed, and a tenant over its share is preempted while another waits.
 - **Gmail** is unavailable for any tenant Crontal creates, because there are no per-tenant Google credentials.
 - **Starting guesses, not measurements:** the free plan's 200,000 tokens and 15 turns per run, 100 MB of uploads, 200 MB of workspace, and the active-tenant cap of 40. Tune them from Phase 0 data and the usage ledger.
 - **Crontal Alembic can't build a fresh Postgres database from scratch.** The second migration expects a `user` table, an older problem. New migrations are tested only by the suite.

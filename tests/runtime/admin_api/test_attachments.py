@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import os
 
 from PIL import Image
@@ -133,7 +134,7 @@ async def test_chat_rejects_more_than_six_images(client, world):
     assert ok.status_code == 200
 
 
-async def test_large_images_are_downscaled_for_the_model(client, world, monkeypatch):
+async def test_large_images_are_downscaled_for_the_model(client, world, monkeypatch, caplog):
     monkeypatch.setattr(run_module, "MAX_IMAGE_BYTES", 600_000)
     noise = Image.frombytes("RGB", (1200, 900), os.urandom(1200 * 900 * 3))
     buf = io.BytesIO()
@@ -142,7 +143,11 @@ async def test_large_images_are_downscaled_for_the_model(client, world, monkeypa
     f = await upload(client, world, "alice", "big.png", big, "image/png")
     await client.post("/api/chat", headers=world.h("alice"), json={
         "text": "see", "conversation_id": "c", "attachments": [f["id"]]})
-    req = await run_once(world)
+    with caplog.at_level(logging.INFO, logger="handler.runtime.documents"):
+        req = await run_once(world)
+    # Downscaling ran in a reader process, not on the event loop.
+    assert [r.source for r in caplog.records
+            if r.getMessage() == "document read"] == ["attachment_image"]
     attachments = req.workspace / "attachments"
     assert (attachments / "big.png").read_bytes() == big  # original kept as a file
     (shown,) = req.images

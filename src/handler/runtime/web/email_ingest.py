@@ -19,7 +19,6 @@ and keyed by its sender as well as its root Message-ID (``thread_key``).
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import hmac
@@ -34,6 +33,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from .. import documents
 from ..mail.dkim import TxtResolver, doh_resolver
 from ..mail.intake import (
     build_payload,
@@ -43,7 +43,7 @@ from ..mail.intake import (
     save_files,
     thread_key,
 )
-from ..mail.parse import parse_email
+from ..mail.parse import parse_email_file
 from ..run import thread_slug
 from ..settings import HarnessSource, SettingsService, resolve_harness
 from ..store.base import Store
@@ -140,7 +140,7 @@ def email_ingest_router(
         if not body.strip():
             raise HTTPException(422, "empty email")
         try:
-            parsed = await asyncio.to_thread(parse_email, body)
+            parsed = await documents.capped_parse("email_ingest", parse_email_file, body)
         except Exception as exc:  # noqa: BLE001 - the parser is lenient; be safe
             logger.warning("unparseable email", extra={"error": str(exc)})
             raise HTTPException(422, "unparseable email")

@@ -23,6 +23,7 @@ from email.header import Header, decode_header
 from email.message import Message
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
+from pathlib import Path
 
 from ...mail.parse import html_to_text
 from ...uploads import sanitize_filename
@@ -262,6 +263,11 @@ def _walk(msg: Message):
             yield from _walk(part)
         else:
             yield part
+
+
+def parse_message_file(path: Path, *, headers_only: bool = False) -> MailMessage:
+    """`parse_message` of a file: the form the reader pool runs (no bytes over the pipe)."""
+    return parse_message(Path(path).read_bytes(), headers_only=headers_only)
 
 
 def parse_message(raw: bytes, *, headers_only: bool = False) -> MailMessage:
