@@ -30,7 +30,9 @@ Owner decisions from the November 15 review:
    the shared runtime and are imported into the tenant registry, which is switched on
    after build step 3.
 6. **Parked work waits for a person for now.** A parked thread is shown with its error and
-   a Retry action, its tenant's admins are told and the operator is alerted. Automatic
+   a Retry action and the operator is alerted. For background threads the tenant's
+   admins are told too; chat sends no notice, since the speaker sees the error and
+   retries by writing again. Automatic
    retries of parked threads are future work, with exponential backoff.
 7. **A side effect with an unknown outcome is never resent automatically.** The call is
    parked and a person is asked, as with an approval.
@@ -238,7 +240,7 @@ which are recorded and never run (multi-tenant owner decision 3).
 | Before the inbox commits | Not stored; the sender must resend. Email, mailbox and Crontal events have stable idempotency keys | The Crontal frontend sends a `client_message_id` per chat message, so a resend is not stored twice |
 | Waiting for the runner | Stored, pending until claimed | Unchanged |
 | During a run | A crash lets the lease expire; the thread is claimed again. Retryable errors get 3 attempts with backoff | Unchanged |
-| After the last attempt | The thread is marked `dead`. Its events and inputs are kept, and a failure notice is sent. Only a new chat message or `handler-rt revive` brings it back; new non-chat events queue silently | **Parked**, visible in the UI and admin console with the error and a Retry action. The tenant's admins are told and the operator is alerted. The thread strategy decides what a new event does. Automatic retries with exponential backoff are future work |
+| After the last attempt | The thread is marked `dead`. Its events and inputs are kept, and a failure notice is sent. Only a new chat message or `handler-rt revive` brings it back; new non-chat events queue silently | **Parked**, visible in the UI and admin console with the error and a Retry action. The operator is alerted, and for background threads the tenant's admins are told. The thread strategy decides what a new event does. Automatic retries with exponential backoff are future work |
 | A poison event | One event failing every attempt parks the whole thread | On the last attempt, retry the events one at a time and park only the one that fails |
 | Tool side effects | A retried run repeats calls that changed something outside Handler | Before a tool marked as writing outside Handler runs, store the call under a key from the thread, input events and the call's position. A retry gets the stored result back. A call whose outcome is unknown is parked for a person, never resent |
 | Delivery | 10 attempts over several hours, then `dead` with no way to redeliver | A redeliver action for one row or all, an alert, and a slow final retry before parking |

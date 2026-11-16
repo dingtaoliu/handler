@@ -47,9 +47,9 @@ A thread whose run fails with no retry left is **parked** (`threads.dead`):
   queued on it; a `chat.message` revives it at once (the person is asking again).
 - When it parks: one ERROR log line `thread parked` (fields `tenant`,
   `thread_key`, `thread_type`, `run_id`, `attempts`, `error`) for the operator
-  alert, and a notice to the tenant's admins. For background threads the acting
-  user is told too; for chat only admins, since the speaker sees the error in the
-  chat. At most one park notice per thread per hour.
+  alert. For background threads, a notice to the tenant's admins and the acting
+  user. Chat sends no notice: the speaker sees the error in the chat, and their
+  next message retries it. At most one park notice per thread per hour.
 - The first non-chat event that arrives while it is parked sends one more
   notice ("waiting on parked thread") to the admins and the thread's owner; a
   burst sends one (`threads.park_noticed`, cleared when the thread parks again).

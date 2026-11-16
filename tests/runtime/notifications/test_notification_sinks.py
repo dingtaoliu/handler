@@ -279,14 +279,14 @@ async def test_retries_do_not_notify_until_dead(store, tmp_path):
     assert len(await store.list_notifications("boss")) == 1
 
 
-async def test_parked_chat_tells_admins_but_not_the_speaker(store, tmp_path):
+async def test_parked_chat_sends_no_notice(store, tmp_path):
     dispatcher, _, _ = await _failure_env(store, tmp_path)
     await _put(store, "chat:owner:c1", ThreadType.CHAT, "e1")
     await _drain(dispatcher)
     assert (await store.get_thread("chat:owner:c1")).dead
-    (boss,) = await store.list_notifications("boss")
-    assert boss.message.startswith("Chat thread parked")
-    assert not await store.list_notifications("owner")  # saw the error in the chat
+    # The speaker sees the error in the chat and retries by writing again.
+    assert not await store.list_notifications("boss")
+    assert not await store.list_notifications("owner")
 
 
 async def test_parking_emits_one_operator_alert(store, tmp_path, caplog):

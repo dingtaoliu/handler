@@ -89,11 +89,12 @@ class Notifier:
 class FailureNotifier:
     """Tell people when work stops: a thread parks, or a delivery dead-letters.
 
-    A thread parks when its run fails with no retry left (`threads.dead`). The
-    tenant's admins are told, and for background threads also the acting user;
-    for chat the speaker already sees the error in the conversation, so only
-    admins. At most one park notice per thread per `cooldown_seconds`, so a
-    thread that keeps being retried and parking does not flood anyone.
+    A thread parks when its run fails with no retry left (`threads.dead`). For
+    background threads the acting user and the tenant's admins are told. Chat
+    sends no notice: the speaker already sees the error in the conversation, and
+    their next message retries it. At most one park notice per thread per
+    `cooldown_seconds`, so a thread that keeps being retried and parking does not
+    flood anyone.
     """
 
     def __init__(self, notifier: Notifier, *, cooldown_seconds: float = 3600.0,
@@ -125,7 +126,9 @@ class FailureNotifier:
 
     async def run_failed(self, thread: Thread, run: Run, acting_as: str | None) -> bool:
         """The thread parked after this run. True if a notice was sent."""
-        recipients = [] if thread.type == ThreadType.CHAT or not acting_as else [acting_as]
+        if thread.type == ThreadType.CHAT:
+            return False
+        recipients = [acting_as] if acting_as else []
         recipients = list(dict.fromkeys(recipients + await self._admins()))
         if not recipients or self._cooling(thread.key):
             return False
