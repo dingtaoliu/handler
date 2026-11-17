@@ -265,7 +265,9 @@ async def test_email_over_limit_is_stored_held_and_acknowledged(base_env, pg_dsn
         response = await client.post("/i/m42/ingest/email", content=body, headers=signed_email(body))
         assert response.status_code == 202 and response.json()["status"] == "held"
         assert rows(pg_dsn, "SELECT status FROM handler_m42.events WHERE type = 'email.received'") == [("held",)]
-        assert FakeHarness.runs == []
+        # The fill inputs may run meanwhile (parsing the email in a reader takes
+        # a moment); the held email must not.
+        assert not any("Over the limit" in str(run) for run in FakeHarness.runs)
 
 
 async def test_email_held_over_the_limit_is_later_processed(base_env, pg_dsn, monkeypatch):
