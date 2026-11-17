@@ -3,6 +3,7 @@ they are module-level (sent by reference) and coordinate through files."""
 
 import os
 import signal
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -65,3 +66,13 @@ def touch_memory(path, megabytes: int) -> int:
         block[offset] = 1
     time.sleep(1)
     return megabytes
+
+
+def pdf_text_modules(path) -> tuple[str | None, str, list[str]]:
+    """Preview and read a PDF, then report which converters the child imported."""
+    from handler.runtime import documents
+
+    preview = documents.to_text(path)
+    reading = documents.read(path, max_chars=2000)
+    return preview, reading.text, sorted(m for m in ("markitdown", "pdfminer", "fitz")
+                                         if m in sys.modules)

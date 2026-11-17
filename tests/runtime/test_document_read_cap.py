@@ -390,6 +390,31 @@ async def test_conversions_are_cached_across_reader_processes(tmp_path):
     assert cache._dir is None  # the main process keeps its in-memory cache
 
 
+async def test_pdf_text_reads_in_a_capped_reader_without_markitdown(tmp_path):
+    import fitz
+
+    configure(limit=1, tasks=1, rss=220)  # every call gets a new child, at the default cap
+    path = tmp_path / "spec.pdf"
+    doc = fitz.open()
+    for n in range(8):
+        page = doc.new_page()
+        for line in range(30):
+            page.insert_text((40, 40 + 22 * line), f"p{n + 1} row {line} 316L round bar 25mm")
+    doc.save(path)
+    doc.close()
+    preview, first, modules = await documents.capped_read("test", fakes.pdf_text_modules, path)
+    assert modules == ["fitz"]  # MarkItDown and pdfminer never load for a PDF
+    assert preview.startswith("--- page 1 of 8 ---\np1 row 0 316L round bar 25mm")
+    body = first.split("\n\n[")[0]
+    assert preview.startswith(body) and f"of {len(preview):,}." in first
+    nxt = int(first.split("offset=")[1].split(" ")[0])
+    second = await documents.capped_read("read_file", documents.read, path, offset=nxt,
+                                         max_chars=2000)
+    assert second.text.startswith(preview[nxt:nxt + 40])  # continued in another child
+    text, error = await documents.capped_preview("gmail", path, max_chars=documents.MAX_TEXT_CHARS)
+    assert error is None and text == preview
+
+
 def test_memory_reads_proc_status(tmp_path, monkeypatch):
     status = tmp_path / "status"
     status.write_text("Name: x\nVmHWM:\t  204800 kB\nVmRSS:\t  102400 kB\nVmSwap:\t    1024 kB\n")
