@@ -127,14 +127,27 @@ class GrantPolicy:
     def decide(
         self, ctx: RunContext, spec: ToolSpec, args: dict[str, Any]
     ) -> tuple[Decision, str]:
+        if why := self.excluded(spec):
+            return Decision.DENY, why
         decision, reason = self._decide_with_floors(ctx, spec, args)
-        if self._plan_limits is not None:
-            limits = self._plan_limits.current
-            if spec.action.startswith("automation.") and not limits.automations:
-                return Decision.DENY, "automations are not included in this plan"
-            if limits.strict_grants:
-                return strict_floor(ctx, spec, args, decision, reason)
+        if self._plan_limits is not None and self._plan_limits.current.strict_grants:
+            return strict_floor(ctx, spec, args, decision, reason)
         return decision, reason
+
+    def excluded(self, spec: ToolSpec) -> str | None:
+        """Why the tenant's current plan leaves `spec` out entirely, else None.
+
+        Read from the live limits, so the tool view built for each run (and every
+        call) follows a plan change without a restart.
+        """
+        if self._plan_limits is None:
+            return None
+        limits = self._plan_limits.current
+        if spec.action.startswith("automation.") and not limits.automations:
+            return "automations are not included in this plan"
+        if spec.risk == Risk.EXEC and limits.strict_grants:
+            return "running code is not included in this plan"
+        return None
 
     def _decide_with_floors(
         self, ctx: RunContext, spec: ToolSpec, args: dict[str, Any]

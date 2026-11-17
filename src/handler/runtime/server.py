@@ -803,8 +803,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                          TaskOutcomeTools(store), NotifyTools(store, bus, notifier=notifier),
                          QuestionTools(questions)):
             gateway.register(provider)
-        if plan_limits is None or plan_limits.current.automations:
-            gateway.register(AutomationTools(store, scheduler))  # not offered on plans without
+        # Registered on every plan: each run's tool view and every call follow the
+        # live plan (GrantPolicy.excluded), so an upgrade or downgrade needs no restart.
+        gateway.register(AutomationTools(store, scheduler))
         tokens = RunTokens()
         mcp_app = create_mcp_app(gateway, tokens)
 
