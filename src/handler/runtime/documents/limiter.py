@@ -31,6 +31,7 @@ from typing import Any, TypeVar
 
 from ..context import current_run, current_tenant
 from ..observability.memory import process_memory
+from . import families
 from .pool import PoolSettings, ReaderCall, ReaderFailed, ReaderPool
 
 logger = logging.getLogger("handler.runtime.documents")
@@ -150,7 +151,8 @@ async def capped_read(source: str, function: Callable[..., T], /, *args: Any, **
     pool = reader_pool()
     tenant = current_tenant() or ""
     call = ReaderCall(tenant)
-    task = asyncio.ensure_future(pool.run(call, function, args, kwargs))
+    family = families.needed(function, args, kwargs)
+    task = asyncio.ensure_future(pool.run(call, function, args, kwargs, family=family))
     waited = 0.0
     try:
         while True:
@@ -185,6 +187,8 @@ async def capped_read(source: str, function: Callable[..., T], /, *args: Any, **
         "rss_mb_before": memory.get("rss_mb_before"), "rss_mb_after": memory.get("rss_mb_after"),
         "peak_rss_mb": memory.get("peak_rss_mb"), "swap_mb": memory.get("swap_mb"),
         "reader_pid": memory.get("reader_pid"), "exit_code": outcome.exit_code,
+        "family": family, "reader_replaced": outcome.replaced,
+        "reader_recycled": outcome.recycled,
         "main_rss_mb": main["rss_mb"],
     })
     return outcome.value(_display(args, kwargs), pool.settings.timeout_seconds,

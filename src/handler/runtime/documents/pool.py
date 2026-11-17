@@ -22,7 +22,15 @@ tenant, carries on.
   1 GB of address space, so a limit tight enough to matter crashes ordinary
   reads. Set it only as a loose backstop.
 - A child is recycled after `max_tasks` calls and stopped after
-  `idle_seconds` unused, so a heap a large parse left behind is given back.
+  `idle_seconds` unused, so a heap a large parse left behind is given back. It
+  is also recycled after a call that leaves its RSS above RECYCLE_RSS_FRACTION
+  of `max_rss_mb`, so the next call doesn't start near the cap.
+- Library families (families.py): a child that has loaded PyMuPDF and then
+  MarkItDown, or the reverse, is over a 220 MB cap on the imports alone. So a
+  call that needs one family never gets an idle child holding the other: that
+  child is stopped first and the call gets a fresh one (the pool never runs
+  more than `size` children). Same family or a light call (spreadsheets,
+  images, email) reuses a child as before. Children report what they loaded.
 - Fairness is applied only at admission; a running read is never stopped for
   another tenant. A free slot goes to the waiting tenant holding the fewest
   slots, oldest call first. While another tenant is waiting, a tenant holding
@@ -66,6 +74,10 @@ PRELOAD = [
     "handler.runtime.mail.parse",
 ]
 RSS_SAMPLE_SECONDS = 0.2
+# Recycle a child whose RSS after a call is above this share of max_rss_mb. Not
+# lower: a child that has just read a PDF holds about 160 MB (PyMuPDF), one that
+# read a docx about 150 MB (MarkItDown), and those should be reused.
+RECYCLE_RSS_FRACTION = 0.75
 _CLEAR_REFS = Path("/proc/self/clear_refs")
 
 
@@ -99,6 +111,8 @@ class Outcome:
     duration_ms: int = 0
     active: int = 0
     exit_code: int | None = None
+    replaced: str | None = None  # the idle child stopped before this call: "family"
+    recycled: str | None = None  # why this call's child was then stopped: tasks | rss
 
     def value(self, name: str, timeout: float, max_rss_mb: int = 0) -> Any:
         if self.status == "ok":
@@ -171,7 +185,7 @@ def _child_main(conn: Any, memory_mb: int, max_result_bytes: int, cache_dir: str
     signal.signal(signal.SIGINT, signal.SIG_IGN)  # the parent decides when we stop
     _limit_memory(memory_mb)
     from ..observability.logging import configure_json_logging
-    from . import cache
+    from . import cache, families
 
     configure_json_logging("WARNING")
     if cache_dir:
@@ -199,7 +213,7 @@ def _child_main(conn: Any, memory_mb: int, max_result_bytes: int, cache_dir: str
         after = process_memory()
         memory = {"rss_mb_before": before["rss_mb"], "rss_mb_after": after["rss_mb"],
                   "peak_rss_mb": after["peak_rss_mb"], "swap_mb": after["swap_mb"],
-                  "reader_pid": os.getpid()}
+                  "reader_pid": os.getpid(), "families": families.loaded()}
         reply = _dump((status, result, memory), max_result_bytes)
         result = None
         try:
@@ -295,6 +309,11 @@ class _Worker:
         self.idle_since = time.monotonic()
         self.stopped_for: str | None = None
         self.peak_rss_mb: float | None = None
+        self.families: set[str] = set()  # heavy libraries it has loaded (families.py)
+
+    def suits(self, family: str | None) -> bool:
+        """Running a call that needs `family` won't add a second heavy library."""
+        return family is None or self.families <= {family}
 
     def call(self, request: bytes, timeout: float, max_rss_mb: int = 0) -> tuple:
         """Send one call and wait, sampling RSS; kill on timeout or over max_rss_mb."""
@@ -359,6 +378,8 @@ class ReaderCall:
     worker: _Worker | None = None
     started_at: float = 0.0
     cancelled: bool = False
+    family: str | None = None  # the heavy library this call needs (families.py)
+    retire: _Worker | None = None  # an idle child holding another family, stopped first
 
 
 class ReaderPool:
@@ -428,22 +449,44 @@ class ReaderPool:
             call = self._next()
             self._waiting.remove(call)
             call.running, call.started_at = True, time.monotonic()
-            call.worker = self._idle.pop() if self._idle else None
+            self._assign_idle(call)
             self._running.append(call)
             try:
                 call.loop.call_soon_threadsafe(_resolve, call.granted)
             except RuntimeError:  # the caller's loop is gone: give the slot back
                 self._running.remove(call)
                 call.running = False
-                if call.worker is not None:
-                    self._idle.append(call.worker)
-                    call.worker = None
+                self._return_idle(call)
+
+    def _assign_idle(self, call: ReaderCall) -> None:
+        """An idle child that suits the call's family (one already holding it
+        first), else none; with no suitable one, an idle child holding another
+        family is taken to be stopped, so the fresh one doesn't add a process."""
+        call.worker = call.retire = None
+        if not self._idle:
+            return
+        suitable = [w for w in self._idle if w.suits(call.family)]
+        if suitable:
+            worker = max(suitable, key=lambda w: (call.family in w.families, w.idle_since))
+            self._idle.remove(worker)
+            call.worker = worker
+        else:
+            call.retire = self._idle.pop()
+
+    def _return_idle(self, call: ReaderCall) -> None:
+        for worker in (call.worker, call.retire):
+            if worker is not None:
+                self._idle.append(worker)
+        call.worker = call.retire = None
 
     # ── calls ──
 
     async def run(self, call: ReaderCall, function: Callable[..., Any], args: tuple,
-                  kwargs: dict, *, timeout: float | None = None) -> Outcome:
+                  kwargs: dict, *, timeout: float | None = None,
+                  family: str | None = None) -> Outcome:
+        """`family`: the heavy library the call will load (families.needed)."""
         request = pickle.dumps((function, args, kwargs), protocol=pickle.HIGHEST_PROTOCOL)
+        call.family = family
         limit = self.settings.timeout_seconds if timeout is None else timeout
         loop = asyncio.get_running_loop()
         if not await self._acquire(call, loop):
@@ -476,8 +519,7 @@ class ReaderPool:
                 elif call in self._running:  # granted as we were cancelled
                     self._running.remove(call)
                     call.running = False
-                    if call.worker is not None:
-                        self._idle.append(call.worker)
+                    self._return_idle(call)
                     self._grant()
             raise
 
@@ -509,6 +551,11 @@ class ReaderPool:
         keep = False
         outcome = Outcome("crashed")
         try:
+            with self._lock:
+                retire, call.retire = call.retire, None
+            if retire is not None:
+                retire.close()  # it holds the other library family: stop it first
+                outcome.replaced = "family"
             if worker is not None and not worker.process.is_alive():
                 worker.close(0)  # died while idle (e.g. the OOM killer)
                 worker = None
@@ -522,8 +569,15 @@ class ReaderPool:
                 outcome.active = len(self._running)
             status, result, memory = worker.call(request, timeout, self.settings.max_rss_mb)
             worker.tasks += 1
+            worker.families.update(memory.pop("families", ()) if isinstance(memory, dict) else ())
             outcome.status, outcome.result, outcome.memory = status, result, memory
-            keep = status != "memory" and worker.tasks < self.settings.max_tasks
+            keep = status != "memory"
+            if keep and worker.tasks >= self.settings.max_tasks:
+                keep, outcome.recycled = False, "tasks"
+            after = _rss_mb(worker.process.pid)  # also on macOS, where the child can't tell
+            cap = self.settings.max_rss_mb
+            if keep and cap and after is not None and after > cap * RECYCLE_RSS_FRACTION:
+                keep, outcome.recycled = False, "rss"
         except _Stopped as stopped:
             outcome.status = stopped.reason
             if worker.peak_rss_mb is not None:

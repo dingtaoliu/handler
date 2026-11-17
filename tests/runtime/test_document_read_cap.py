@@ -415,6 +415,111 @@ async def test_pdf_text_reads_in_a_capped_reader_without_markitdown(tmp_path):
     assert error is None and text == preview
 
 
+def _real_files(tmp_path):
+    documents.shutdown_readers()  # start with no reader left by another test
+    import fitz
+    import openpyxl
+    from tests.runtime.test_documents import _docx
+
+    pdf = tmp_path / "spec.pdf"
+    doc = fitz.open()
+    for n in range(3):
+        doc.new_page().insert_text((72, 72), f"page {n + 1} 316L round bar 25mm EN 10088-3")
+    doc.save(pdf)
+    doc.close()
+    xlsx = tmp_path / "q.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.append(["Item", "Grade"])
+    wb.active.append(["flat bar", "316L"])
+    wb.save(xlsx)
+    return pdf, _docx(tmp_path / "spec.docx", "Spec paragraph: 316L round bar"), xlsx
+
+
+async def _reads(caplog, files):
+    """Read each file through the pool; (reader pid, family, replaced) per read."""
+    seen = []
+    for path in files:
+        with caplog.at_level(logging.INFO, logger="handler.runtime.documents"):
+            caplog.clear()
+            reading = await documents.capped_read("read_file", documents.read, path)
+        assert reading.text  # nothing refused
+        line = [r for r in caplog.records if r.getMessage() == "document read"][-1]
+        assert line.outcome == "ok"
+        seen.append((line.reader_pid, line.family, line.reader_replaced))
+    return seen
+
+
+@pytest.mark.parametrize("order", ["pdf docx pdf", "docx pdf docx"])
+async def test_a_call_needing_the_other_library_gets_a_fresh_reader(tmp_path, caplog, order):
+    configure(limit=1, rss=220)  # the 512 MB defaults
+    pdf, docx, _ = _real_files(tmp_path)
+    files = {"pdf": pdf, "docx": docx}
+    seen = await _reads(caplog, [files[name] for name in order.split()])
+    pids = [pid for pid, _, _ in seen]
+    assert len(set(pids)) == 3  # replaced before each switch, not after a refusal
+    assert [replaced for _, _, replaced in seen] == [None, "family", "family"]
+    assert {family for _, family, _ in seen} == {"pymupdf", "markitdown"}
+    assert len(limiter.reader_pool()._idle) == 1  # never more children than slots
+
+
+async def test_light_reads_keep_the_reader_between_pdfs(tmp_path, caplog):
+    configure(limit=1, rss=220)
+    pdf, _, xlsx = _real_files(tmp_path)
+    seen = await _reads(caplog, [pdf, xlsx, pdf])
+    assert len({pid for pid, _, _ in seen}) == 1
+    assert [family for _, family, _ in seen] == ["pymupdf", None, "pymupdf"]
+    assert all(replaced is None for _, _, replaced in seen)
+
+
+async def test_two_readers_keep_one_per_family(tmp_path, caplog):
+    configure(limit=2, rss=220)
+    pdf, docx, _ = _real_files(tmp_path)
+    await asyncio.gather(documents.capped_read("t", documents.read, pdf),
+                         documents.capped_read("t", documents.read, docx))
+    seen = await _reads(caplog, [pdf, docx, pdf])
+    assert all(replaced is None for _, _, replaced in seen)  # a suitable idle reader each time
+    assert seen[0][0] == seen[2][0] != seen[1][0]
+
+
+async def test_a_reader_left_above_the_backstop_is_recycled(tmp_path, monkeypatch):
+    from handler.runtime.documents import pool as pool_module
+
+    configure(limit=1, rss=2000)
+    file = tmp_path / "doc.pdf"
+    file.write_text("x")
+    first = await documents.capped_read("t", fakes.pid, file)
+    assert await documents.capped_read("t", fakes.pid, file) == first  # reused below it
+    monkeypatch.setattr(pool_module, "RECYCLE_RSS_FRACTION", 0.0001)  # every reader is above
+    second = await documents.capped_read("t", fakes.pid, file)
+    assert second == first  # the call ran there; its reader is then stopped
+    assert await documents.capped_read("t", fakes.pid, file) != first
+
+
+def test_families_predict_the_heavy_library(tmp_path):
+    from handler.runtime.documents import families, pdf, router
+
+    pdf_file, docx, xlsx = _real_files(tmp_path)
+    html_xls = tmp_path / "export.xls"
+    html_xls.write_text("<html><table><tr><td>316L</td></tr></table></html>")
+    (tmp_path / "a.txt").write_text("hello")
+    (tmp_path / "a.json").write_text("{}")
+    (tmp_path / "a.zip").write_bytes(b"PK\x05\x06" + b"\0" * 18)
+    (tmp_path / "old.doc").write_bytes(b"\xd0\xcf")
+
+    def read(name):
+        return families.needed(router.read, (tmp_path / name if isinstance(name, str) else name,), {})
+
+    assert read(pdf_file) == "pymupdf" and read(docx) == "markitdown" and read(xlsx) is None
+    assert read(html_xls) == "markitdown" and read("a.zip") == "markitdown"
+    assert read("a.txt") is None and read("a.json") == "markitdown"
+    assert read("old.doc") is None and read("missing.pdf") == "pymupdf"
+    preview = families.needed(router.to_text, (tmp_path / "a.txt",), {"max_chars": 10})
+    assert preview == "markitdown"  # previews convert text through MarkItDown
+    assert families.needed(router.to_text, (tmp_path / "a.png",), {}) is None
+    assert families.needed(pdf.prepare_upload, (pdf_file,), {}) == "pymupdf"
+    assert families.needed(fakes.pid, (pdf_file,), {}) is None
+
+
 def test_memory_reads_proc_status(tmp_path, monkeypatch):
     status = tmp_path / "status"
     status.write_text("Name: x\nVmHWM:\t  204800 kB\nVmRSS:\t  102400 kB\nVmSwap:\t    1024 kB\n")
