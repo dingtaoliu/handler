@@ -33,7 +33,7 @@ def restore_pool():
 
 
 def configure(**env):
-    names = {"limit": "HANDLER_DOC_READ_MAX_CONCURRENT",
+    names = {"limit": "HANDLER_DOC_READ_MAX_CONCURRENT", "rss": "HANDLER_READER_MAX_RSS_MB",
              "timeout": "HANDLER_READER_TIMEOUT_SECONDS", "memory": "HANDLER_READER_MEMORY_MB",
              "tasks": "HANDLER_READER_MAX_TASKS", "result": "HANDLER_READER_MAX_RESULT_MB",
              "idle": "HANDLER_READER_IDLE_SECONDS"}
@@ -158,16 +158,29 @@ async def test_a_read_over_the_memory_limit_fails_and_the_child_is_replaced(tmp_
     assert await documents.capped_read("read_file", fakes.allocate, file, 16) == 16 * 1024 * 1024
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is enforced only on Linux")
+async def test_a_reader_over_the_rss_cap_is_killed_and_replaced(tmp_path):
+    configure(limit=2, rss=150, memory=0)
+    file = tmp_path / "huge.xlsx"
+    file.write_text("x")
+    big, other = await asyncio.gather(
+        as_tenant("a", documents.capped_read("read_file", fakes.touch_memory, file, 400)),
+        as_tenant("b", documents.capped_read("read_file", fakes.text, file)),
+        return_exceptions=True)
+    assert other == "text"
+    assert isinstance(big, documents.ReaderFailed) and big.outcome == "rss"
+    assert "huge.xlsx is too large to read: the reader used more than 150 MB" in str(big)
+    assert await documents.capped_read("read_file", fakes.touch_memory, file, 20) == 20
+
+
 async def test_a_synthetic_oversized_pdf_kills_only_its_child(tmp_path):
-    """The step 4 check: rendering a huge page exceeds the child's memory limit."""
+    """The step 4 check: rendering a huge page takes the reader over its RSS cap."""
     import fitz
 
-    configure(limit=2, memory=1200)
+    configure(limit=2, rss=200)
     huge = tmp_path / "huge.pdf"
     with fitz.open() as doc:
-        # A 9,000-point page renders to a ~570 MB pixmap at the reader's DPI.
-        doc.new_page(width=9_000, height=9_000).insert_text((40, 40), "big")
+        # A 6,000-point page renders to a ~250 MB pixmap at the reader's DPI.
+        doc.new_page(width=6_000, height=6_000).insert_text((40, 40), "big")
         doc.save(huge)
     small = tmp_path / "notes.txt"
     small.write_text("fine")
@@ -179,7 +192,7 @@ async def test_a_synthetic_oversized_pdf_kills_only_its_child(tmp_path):
         as_tenant("a", read(huge, pages="1", as_images=True)),
         as_tenant("b", read(small)), return_exceptions=True)
     assert isinstance(oversized, documents.ReaderFailed), oversized
-    assert oversized.outcome == "memory" and "more memory than a reader may use" in str(oversized)
+    assert oversized.outcome in ("rss", "memory"), oversized.outcome
     assert other.text == "fine"
     assert (await read(small)).text == "fine"  # the replacement child serves the next read
 
@@ -202,43 +215,51 @@ async def test_children_are_recycled_after_their_task_count(tmp_path):
     assert pids[0] == pids[1] != pids[2] == pids[3] != pids[4]
 
 
-async def test_idle_children_stop(tmp_path):
+async def test_idle_children_and_the_fork_server_stop(tmp_path):
+    from multiprocessing import forkserver
+
     configure(limit=1, idle=0.2)
     pool = limiter.reader_pool()
     file = tmp_path / "a.csv"
     file.write_text("x")
     first = await documents.capped_read("read_file", fakes.pid, file)
-    await until(lambda: not pool._idle, timeout=5)
+    if sys.platform != "win32":
+        assert forkserver._forkserver._forkserver_pid is not None
+    await until(lambda: not pool._idle and forkserver._forkserver._forkserver_pid is None,
+                timeout=5)
     assert await documents.capped_read("read_file", fakes.pid, file) != first
 
 
-async def test_one_tenant_cannot_hold_every_slot_while_another_waits(tmp_path, caplog):
+async def test_fairness_is_at_admission_and_never_stops_a_running_read(tmp_path):
     configure(limit=2)
     pool = limiter.reader_pool()
-    gate = Gate(tmp_path)
-    hogs = [asyncio.create_task(as_tenant("a", gate.read())) for _ in range(2)]
-    await until(lambda: gate.started == 2)
+    gate_a = Gate(tmp_path / "a")
+    a = [asyncio.create_task(as_tenant("a", gate_a.read())) for _ in range(2)]
+    await until(lambda: gate_a.started == 2)
     assert pool.holding("a") == 2  # alone, a tenant may use every slot
-    with caplog.at_level(logging.WARNING, logger="handler.runtime.documents"):
-        # b's read runs at once: a's newest read is stopped and queued again.
-        other = await asyncio.wait_for(
-            as_tenant("b", documents.capped_read("read_file", fakes.text, gate.file)), 10)
-    assert other == "text"
-    assert any(r.getMessage() == "document read stopped for another tenant"
-               and r.tenant == "a" for r in caplog.records)
-    await until(lambda: gate.started == 3)  # the stopped read started again
-    assert all(not task.done() for task in hogs)
-    gate.release()
-    assert await asyncio.gather(*hogs) == ["doc.pdf"] * 2
+    a3 = asyncio.create_task(as_tenant("a", gate_a.read()))  # queued first
+    await asyncio.sleep(0.1)
+    gate_b = Gate(tmp_path / "b")
+    b = asyncio.create_task(as_tenant("b", gate_b.read()))
+    await asyncio.sleep(0.5)
+    # b waits: a's running reads are not stopped for it.
+    assert gate_a.started == 2 and gate_b.started == 0 and not any(t.done() for t in a)
+    # One of a's reads finishes; b takes the slot although a's third read is older.
+    (gate_a.root / "release").touch()
+    await until(lambda: gate_b.started == 1)
+    assert pool.holding("b") == 1
+    await asyncio.gather(*a)
+    gate_b.release()
+    assert await asyncio.gather(a3, b) == ["doc.pdf", "doc.pdf"]
 
 
-async def test_a_tenant_waits_for_its_own_reads_without_stopping_them(tmp_path):
+async def test_a_tenant_alone_queues_behind_its_own_reads(tmp_path):
     configure(limit=2)
     gate = Gate(tmp_path)
     reads = [asyncio.create_task(as_tenant("a", gate.read())) for _ in range(3)]
     await until(lambda: gate.started == 2)
     await asyncio.sleep(0.3)
-    assert gate.started == 2  # no preemption within one tenant
+    assert gate.started == 2  # its third read waits for one of its own
     gate.release()
     assert await asyncio.gather(*reads) == ["doc.pdf"] * 3
     assert gate.started == 3

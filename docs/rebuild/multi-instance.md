@@ -106,9 +106,10 @@ process and is not counted.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `HANDLER_DOC_READ_MAX_CONCURRENT` | 2 | Reader processes, for the **whole host**, not per instance |
+| `HANDLER_DOC_READ_MAX_CONCURRENT` | 1 | Reader processes, for the **whole host**, not per instance. 1 fits the 512 MB Basic dyno; see the budget below |
+| `HANDLER_READER_MAX_RSS_MB` | 220 | A reader whose RSS goes over this (sampled every 200 ms) is killed; the call fails with "… is too large to read" and the reader is replaced. 0 turns it off |
 | `HANDLER_READER_TIMEOUT_SECONDS` | 120 | A call running longer has its process killed; the tool call gets an error |
-| `HANDLER_READER_MEMORY_MB` | 1536 | `RLIMIT_AS` per reader, Linux only (macOS doesn't enforce it); 0 turns it off. A reader's address space is about 800 MB before it reads anything, because of the preloaded libraries |
+| `HANDLER_READER_MEMORY_MB` | 0 (off) | `RLIMIT_AS` per reader, Linux only (macOS doesn't enforce it). Off by default: a reader with PyMuPDF and MarkItDown loaded reserves well over 1 GB of address space, so a limit near 2 GB already crashed an ordinary large-PDF read. Only a loose backstop |
 | `HANDLER_READER_MAX_TASKS` | 50 | Calls before a reader is replaced |
 | `HANDLER_READER_MAX_RESULT_MB` | 64 | Largest result a reader returns; larger is an error |
 | `HANDLER_READER_IDLE_SECONDS` | 60 | An unused reader stops after this |
@@ -120,17 +121,46 @@ process and is not counted.
   reaped and replaced, the call raises `ReaderFailed` (a `ReadError`, so tools report
   `error: …`; previews report `text_error` / `extract_error`), and every other read
   carries on.
-- **Fair by tenant.** A free slot goes to the waiting tenant holding the fewest slots.
-  A tenant may use every slot while no one else waits; when another tenant waits
-  with less than its share (slots / tenants reading), the newest read of a tenant
-  over its share is stopped and queued again (`document read stopped for another
-  tenant`). The tenant is the instance name, carried in a context variable that
-  each instance sets for its tasks and requests (`context.current_tenant`).
-- **Memory on Linux (measured, arm64, Python 3.12):** the fork server holds the
-  preloaded libraries, about 190 MB RSS, plus a 12 MB resource tracker; with no
-  readers running that is the whole idle cost. Two busy readers add about 75 MB of
-  their own each (PSS: server 98, readers 73 and 80). The main process no longer
-  loads PyMuPDF, MarkItDown, openpyxl or Pillow for parsing.
+- **Fair by tenant, at admission only.** A running read is never stopped for another
+  tenant. A free slot goes to the waiting tenant holding the fewest slots, oldest call
+  first; while another tenant is waiting, a tenant holding its share
+  (ceil(slots / active tenants)) can't start another read. A tenant alone may use
+  every slot. The tenant is the instance name, carried in a context variable that each
+  instance sets for its tasks and requests (`context.current_tenant`).
+- **Nothing runs while idle.** The fork server preloads only the reader modules; a
+  reader imports PyMuPDF, MarkItDown, openpyxl or Pillow when a call needs them. The
+  fork server and resource tracker start with the first read and stop with the last
+  idle reader, `HANDLER_READER_IDLE_SECONDS` after the last read.
+
+### Memory budget (measured November 17, amd64 Linux, Python 3.12, release image)
+
+Whole process tree: main process (the host, idle, SQLite) + fork server + resource
+tracker + readers. RSS in MB.
+
+| | Before the follow-up (preload, 2 readers, no RSS cap) | Now (1 reader, cap 220) |
+| --- | --- | --- |
+| Idle, before any read | 154 (main only) | 154 (main only) |
+| 60 s after the last read | 395 (main 157, fork server 212, tracker 26) | 157 (main only) |
+| Every reader busy on a 400-page PDF and a 60,000-row xlsx | 779 RSS / 503 PSS, and the PDF reader crashed under `RLIMIT_AS` | 440 RSS / 400 PSS (main 157, server 45, tracker 26, reader 212); the PDF read failed "too large to read", the xlsx read succeeded |
+| First read, cold (PDF / xlsx) | 2.7 s / about 2.3 s (fork server start with preload) | 1.1–1.2 s / 1.0–1.2 s |
+| Warm read (PDF / xlsx) | 48 / 12 ms | 45 / 11 ms |
+
+With no cap, the 400-page PDF's text conversion took one reader to **6 GB** over two
+minutes. Reader peaks per file with no cap: xlsx (60,000 rows) 73 MB; HTML (5,000
+paragraphs) 152 MB; PDF text through MarkItDown (pdfminer) 244 MB for 2 pages, 311 MB
+for 10, 597 MB for 30, 1.57 GB for 100. PyMuPDF's own text extraction of the same
+100- and 400-page PDFs added nothing measurable to its 155 MB import (0.3 s and 1.1 s).
+A reader that has imported PyMuPDF alone is about 145 MB; with MarkItDown, about 200 MB.
+
+- **512 MB Basic dyno:** 1 reader with a 220 MB cap keeps main (about 155 idle, more in
+  runs) + fork server 45 + tracker 26 + reader 220 near 450 MB. The cost: PDF text
+  conversion through MarkItDown needs more than 220 MB even for a 2-page PDF, so PDF
+  text previews (downloads, email attachments, bounded tasks) fail with
+  "too large to read" until PDF text extraction moves to PyMuPDF. `read_file` on a PDF
+  uploads the file to the model and parses nothing, so chat reading of PDFs is
+  unaffected; xlsx, CSV, Word, HTML and images fit.
+- **1 GB dyno:** 2 readers at 300 MB (measured busy tree 584 RSS / 516 PSS), or 3 at
+  220 MB, stay under about 900 MB with room for the main process.
 - A read still waiting for a slot, or still running, after 5 seconds is logged every
   5 seconds (`document read waiting for a slot` or `document read still running`,
   with `tenant`, `active_reads`, `tenant_reads` and `limit`).

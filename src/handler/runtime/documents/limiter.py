@@ -7,9 +7,10 @@ slot, or still running, is logged every SLOW_READ_SECONDS; each finished read
 logs its child's memory.
 
 Settings (environment, read by the host at startup):
-- HANDLER_DOC_READ_MAX_CONCURRENT: reader processes (default 2)
+- HANDLER_DOC_READ_MAX_CONCURRENT: reader processes (default 1, for a 512 MB dyno)
 - HANDLER_READER_TIMEOUT_SECONDS: a call running longer is killed (default 120)
-- HANDLER_READER_MEMORY_MB: RLIMIT_AS per child, Linux only, 0 = off (default 1536)
+- HANDLER_READER_MAX_RSS_MB: a reader over this RSS is killed (default 220, 0 = off)
+- HANDLER_READER_MEMORY_MB: RLIMIT_AS per child, Linux only (default 0 = off)
 - HANDLER_READER_MAX_TASKS: calls before a child is replaced (default 50)
 - HANDLER_READER_MAX_RESULT_MB: the largest result a child returns (default 64)
 - HANDLER_READER_IDLE_SECONDS: an unused child stops after this (default 60)
@@ -36,16 +37,17 @@ logger = logging.getLogger("handler.runtime.documents")
 
 T = TypeVar("T")
 READ_LIMIT_ENV = "HANDLER_DOC_READ_MAX_CONCURRENT"
-DEFAULT_READ_LIMIT = 2
+DEFAULT_READ_LIMIT = 1  # the 512 MB dyno's memory budget; see multi-instance.md
 SLOW_READ_SECONDS = 5.0  # log a read still waiting for a slot, or still running, after this
 _SETTINGS_ENV = {
     "timeout_seconds": ("HANDLER_READER_TIMEOUT_SECONDS", float),
+    "max_rss_mb": ("HANDLER_READER_MAX_RSS_MB", int),
     "memory_mb": ("HANDLER_READER_MEMORY_MB", int),
     "max_tasks": ("HANDLER_READER_MAX_TASKS", int),
     "max_result_mb": ("HANDLER_READER_MAX_RESULT_MB", int),
     "idle_seconds": ("HANDLER_READER_IDLE_SECONDS", float),
 }
-_MINIMUM = {"timeout_seconds": 0.001, "memory_mb": 0, "max_tasks": 1, "max_result_mb": 1,
+_MINIMUM = {"timeout_seconds": 0.001, "max_rss_mb": 0, "memory_mb": 0, "max_tasks": 1, "max_result_mb": 1,
             "idle_seconds": 0.01}
 
 _lock = threading.Lock()
@@ -185,7 +187,8 @@ async def capped_read(source: str, function: Callable[..., T], /, *args: Any, **
         "reader_pid": memory.get("reader_pid"), "exit_code": outcome.exit_code,
         "main_rss_mb": main["rss_mb"],
     })
-    return outcome.value(_display(args, kwargs), pool.settings.timeout_seconds)
+    return outcome.value(_display(args, kwargs), pool.settings.timeout_seconds,
+                         pool.settings.max_rss_mb)
 
 
 async def capped_preview(source: str, path: Path, *, max_chars: int) -> tuple[str | None, str | None]:

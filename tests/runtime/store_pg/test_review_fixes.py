@@ -264,7 +264,7 @@ def test_the_read_cap_can_be_raised():
         assert limiter.reader_pool().settings.size == 6
     finally:
         limiter.configure_read_limit(None)
-    assert limiter.DEFAULT_READ_LIMIT == 2
+    assert limiter.DEFAULT_READ_LIMIT == 1
 
 
 # The waiting-for-a-slot log is covered with the reader pool in test_document_read_cap.py.
