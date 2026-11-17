@@ -16,7 +16,7 @@ All build work is finished and committed. Nothing is pushed or deployed.
 | | State |
 | --- | --- |
 | Production | Handler **v62** on `crontal-agent` (`7c7fde2`); Handler `main` is `6bfb180` (a docs commit on top). Tenants `main` (schema `handler_crontal`), `bss` (`handler_bss`), `yeup` (`handler_yeup`). Crontal on `hephaestus-backend-test` |
-| Handler integration branch | `feat/shared-runtime`, HEAD **`db00880`**, in worktree `/Users/dannyliu/dev/repos/handler-wt-shared-runtime`. Contains everything for Releases 1 and 2 |
+| Handler integration branch | `feat/shared-runtime` in worktree `/Users/dannyliu/dev/repos/handler-wt-shared-runtime`. Release 2's code ends at **`db00880`**; commits after it change only this handoff, so merging the branch head is equivalent |
 | Crontal branch | `feat/chat-client-message-id`, **`18a3018`** (one commit on Crontal `main` at `08d2d1f`), in worktree `/Users/dannyliu/dev/repos/hephaestus-wt-client-msg-id`. Release 3 |
 | Merged, safe to remove | `feat/shared-runtime-readers` (`/Users/dannyliu/dev/repos/handler-wt-shared-readers`) and `feat/shared-runtime-gating` (`/Users/dannyliu/dev/repos/handler-wt-shared-gating`): both merged into `feat/shared-runtime` |
 | Main checkouts | `/Users/dannyliu/dev/repos/handler` and `/Users/dannyliu/dev/repos/hephaestus` hold other sessions' uncommitted work. Don't edit them, and never build images from them |
