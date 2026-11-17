@@ -258,3 +258,15 @@ async def test_fifty_puts_and_three_concurrent_claimers(store, spec, event):
     events = [await store.pending_events(f"thread-{i}") for i in range(10)]
     assert all(len(group) == 5 for group in events)
     assert len({e.id for group in events for e in group}) == 50
+
+
+async def test_has_claimable_matches_what_claim_would_find(store, clock, spec, event):
+    """The run gate queues a tenant on this; SQLite instances share the host gate too."""
+    assert not await store.has_claimable(Lane.INTERACTIVE)
+    await store.put(event("one"), spec)
+    assert await store.has_claimable(Lane.INTERACTIVE)
+    assert not await store.has_claimable(Lane.BACKGROUND)
+    [lease] = await store.claim("worker", Lane.INTERACTIVE, 10, 60)
+    assert not await store.has_claimable(Lane.INTERACTIVE)  # leased
+    clock.advance(61)
+    assert await store.has_claimable(Lane.INTERACTIVE)  # the lease expired

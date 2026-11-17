@@ -59,6 +59,10 @@ class EventQueue(Protocol):
         """
         ...
 
+    async def has_claimable(self, lane: Lane) -> bool:
+        """Whether `claim` would find a thread in `lane` now (the run gate queues on it)."""
+        ...
+
     async def heartbeat(self, lease: Lease, lease_seconds: float) -> Lease | None:
         """Extend a lease. Returns the new lease, or None if it was lost."""
         ...

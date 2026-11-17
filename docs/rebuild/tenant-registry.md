@@ -24,7 +24,9 @@ this code.
 | `HANDLER_ALLOWED_HARNESSES` | all | Harnesses the host may run, comma-separated; production sets `openai_agents`. Never in a tenant's environment. A tenant whose `HANDLER_DEFAULT_HARNESS` is outside it is refused (see HANDOFF §3) |
 
 A tenant's `limits.max_runs` overrides its plan cap. Each tenant's own
-`HANDLER_MAX_CONCURRENT` and lane capacities still apply beneath these.
+`HANDLER_MAX_CONCURRENT` and lane capacities still apply beneath these. The three
+run-gate settings apply with the registry off too: env-defined instances share the same
+host gate, each counted as `paid` with no `max_runs` override.
 
 ## Import
 

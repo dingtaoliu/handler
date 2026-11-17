@@ -266,6 +266,18 @@ class SQLiteCore(SQLiteUsage):
 
         return await self._call(write)
 
+    async def has_claimable(self, lane: Lane) -> bool:
+        def read(db: sqlite3.Connection) -> bool:
+            now = _timestamp(self._clock())
+            return db.execute(
+                "SELECT EXISTS (SELECT 1 FROM threads WHERE lane = ? "
+                "AND pending_since IS NOT NULL AND dead = 0 "
+                "AND (available_at IS NULL OR available_at <= ?) "
+                "AND (lease_until IS NULL OR lease_until < ?))",
+                (lane.value, now, now)).fetchone()[0] == 1
+
+        return await self._call(read)
+
     async def heartbeat(self, lease: Lease, lease_seconds: float) -> Lease | None:
         renewed: Lease | None = None
 
