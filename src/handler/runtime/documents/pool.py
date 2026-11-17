@@ -2,26 +2,31 @@
 
 Parsing is CPU-heavy, blocking library code that can briefly use hundreds of
 MB, and a Python thread can't be stopped. A child process can: a read that
-runs too long is killed, a child that dies takes only its own call with it,
-and the pool starts a replacement. Every other call, of any tenant, carries on.
+runs too long or grows too large is killed, a child that dies takes only its
+own call with it, and the pool starts a replacement. Every other call, of any
+tenant, carries on.
 
 - Children come from the `forkserver` start method (`spawn` where there is
-  none). The fork server preloads the reader libraries once, so children
-  share those pages and start in milliseconds.
+  none). The fork server preloads only the light reader modules; a child
+  imports PyMuPDF, MarkItDown, openpyxl or Pillow when its first call needs
+  them. The fork server starts with the first read and stops with the last
+  idle child, so a host with no reads for `idle_seconds` holds no reader
+  processes at all.
 - A call sends the function by reference plus small arguments (file paths,
   options), never file bytes, and gets the parsed result back. A result over
   `max_result_mb` is refused in the child.
-- On Linux each child's address space is capped with RLIMIT_AS (macOS doesn't
-  enforce it, so there the cap is skipped). Hitting it raises MemoryError in
-  the child, or kills it; either way the call fails and the child is replaced.
+- Memory: the thread waiting on a child samples its RSS every 200 ms and
+  kills it over `max_rss_mb` ("too large to read"). RLIMIT_AS (Linux only;
+  macOS doesn't enforce it) stays as a loose backstop at `memory_mb`; hitting
+  it raises MemoryError in the child or kills it. Either way the call fails
+  and the child is replaced.
 - A child is recycled after `max_tasks` calls and stopped after
   `idle_seconds` unused, so a heap a large parse left behind is given back.
-- Fairness: the slots are shared by tenants. A free slot goes to the waiting
-  tenant holding the fewest slots (oldest call first). A tenant may use every
-  slot while no one else waits; when another tenant is waiting with less than
-  its share (slots / contending tenants), the newest call of a tenant over its
-  share is stopped and queued again, so one tenant's hung PDFs cannot hold
-  every slot. A stopped call loses only its progress; reads are idempotent.
+- Fairness is applied only at admission; a running read is never stopped for
+  another tenant. A free slot goes to the waiting tenant holding the fewest
+  slots, oldest call first. While another tenant is waiting, a tenant holding
+  its share (ceil(slots / active tenants)) or more can't start a new read. A
+  tenant alone may use every slot.
 
 Callers use `limiter.capped_read`, which adds the logging.
 """
@@ -29,7 +34,9 @@ Callers use `limiter.capped_read`, which adds the logging.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
+import math
 import multiprocessing
 import os
 import pickle
@@ -51,12 +58,13 @@ from .types import ReadError
 logger = logging.getLogger("handler.runtime.documents")
 
 PROCESS_NAME = "handler-reader"
-# Imported once by the fork server; children share these pages.
+# Imported once by the fork server: the reader modules, not the libraries they
+# load lazily (those would hold ~165 MB in the server while no one reads).
 PRELOAD = [
     "handler.runtime.documents.pool", "handler.runtime.documents.router",
-    "handler.runtime.documents.conversion", "handler.runtime.images",
-    "handler.runtime.mail.parse", "fitz", "PIL.Image", "openpyxl", "xlrd", "markitdown",
+    "handler.runtime.mail.parse",
 ]
+RSS_SAMPLE_SECONDS = 0.2
 _CLEAR_REFS = Path("/proc/self/clear_refs")
 
 
@@ -72,7 +80,8 @@ class ReaderFailed(ReadError):
 class PoolSettings:
     size: int = 2
     timeout_seconds: float = 120.0
-    memory_mb: int = 1536  # RLIMIT_AS per child, Linux only; 0 turns it off
+    max_rss_mb: int = 300  # a child over this RSS is killed; 0 turns it off
+    memory_mb: int = 2048  # RLIMIT_AS per child, Linux only, a backstop; 0 turns it off
     max_tasks: int = 50
     max_result_mb: int = 64
     idle_seconds: float = 60.0
@@ -82,7 +91,7 @@ class PoolSettings:
 class Outcome:
     """What one call did. `value()` returns the result or raises its error."""
 
-    status: str  # ok | error | timeout | crashed | memory | too_large | cancelled
+    status: str  # ok | error | timeout | crashed | memory | rss | too_large | cancelled
     result: Any = None
     memory: dict[str, Any] = field(default_factory=dict)
     queued_ms: int = 0
@@ -90,7 +99,7 @@ class Outcome:
     active: int = 0
     exit_code: int | None = None
 
-    def value(self, name: str, timeout: float) -> Any:
+    def value(self, name: str, timeout: float, max_rss_mb: int = 0) -> Any:
         if self.status == "ok":
             return self.result
         if self.status == "error":
@@ -99,6 +108,8 @@ class Outcome:
             "timeout": f"reading {name} took longer than {timeout:g}s and was stopped",
             "memory": f"reading {name} needed more memory than a reader may use, and was "
                       "stopped",
+            "rss": f"{name} is too large to read: the reader used more than "
+                   f"{max_rss_mb} MB of memory and was stopped",
             "too_large": f"the result of reading {name} is too large to return",
             "crashed": f"the reader stopped unexpectedly while reading {name}"
                        + (f" (signal {-self.exit_code})" if self.exit_code
@@ -235,6 +246,35 @@ def _context() -> Any:
     return multiprocessing.get_context("spawn")
 
 
+def _rss_mb(pid: int) -> float | None:
+    """A process's resident set in MB: /proc on Linux, libproc on macOS."""
+    try:
+        with open(f"/proc/{pid}/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1048576
+    except (OSError, ValueError, IndexError):
+        pass
+    if sys.platform == "darwin":
+        return _darwin_rss_mb(pid)
+    return None
+
+
+_libproc: Any = None
+
+
+def _darwin_rss_mb(pid: int) -> float | None:
+    global _libproc
+    try:
+        if _libproc is None:
+            _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        info = ctypes.create_string_buffer(96)  # struct proc_taskinfo
+        size = _libproc.proc_pidinfo(pid, 4, ctypes.c_uint64(0), info, 96)  # PROC_PIDTASKINFO
+        if size < 16:
+            return None
+        return int.from_bytes(info.raw[8:16], "little") / 1048576  # pti_resident_size
+    except OSError:
+        return None
+
+
 class _Stopped(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -253,13 +293,25 @@ class _Worker:
         self.tasks = 0
         self.idle_since = time.monotonic()
         self.stopped_for: str | None = None
+        self.peak_rss_mb: float | None = None
 
-    def call(self, request: bytes, timeout: float) -> tuple:
+    def call(self, request: bytes, timeout: float, max_rss_mb: int = 0) -> tuple:
+        """Send one call and wait, sampling RSS; kill on timeout or over max_rss_mb."""
+        deadline = time.monotonic() + timeout
         try:
             self.conn.send_bytes(request)
-            if not self.conn.poll(timeout):
-                self.kill("timeout")
-                raise _Stopped("timeout")
+            while True:
+                left = deadline - time.monotonic()
+                if self.conn.poll(max(0.0, min(RSS_SAMPLE_SECONDS, left))):
+                    break
+                if max_rss_mb and (rss := _rss_mb(self.process.pid)) is not None \
+                        and rss > max_rss_mb:
+                    self.peak_rss_mb = rss
+                    self.kill("rss")
+                    raise _Stopped("rss")
+                if left <= 0:
+                    self.kill("timeout")
+                    raise _Stopped("timeout")
             data = self.conn.recv_bytes()
         except (EOFError, OSError):
             raise _Stopped(self.stopped_for or "crashed") from None
@@ -305,7 +357,6 @@ class ReaderCall:
     granted: Any = None
     worker: _Worker | None = None
     started_at: float = 0.0
-    preempted: bool = False
     cancelled: bool = False
 
 
@@ -322,6 +373,7 @@ class ReaderPool:
         self._closed = False
         self._reaper: threading.Thread | None = None
         self._stop_reaper = threading.Event()
+        self._server_lock = threading.Lock()
         self.started = 0  # children started, for tests and logs
 
     # ── state ──
@@ -336,12 +388,25 @@ class ReaderPool:
             return self._holding(tenant)
 
     def _holding(self, tenant: str) -> int:
-        return sum(1 for c in self._running if c.tenant == tenant and not c.preempted)
+        return sum(1 for c in self._running if c.tenant == tenant)
 
     def _share(self) -> int:
-        tenants = {c.tenant for c in self._running if not c.preempted}
-        tenants |= {c.tenant for c in self._waiting}
-        return max(1, self.settings.size // max(1, len(tenants)))
+        """ceil(slots / tenants reading or waiting)."""
+        tenants = {c.tenant for c in self._running} | {c.tenant for c in self._waiting}
+        return max(1, math.ceil(self.settings.size / max(1, len(tenants))))
+
+    def _next(self) -> ReaderCall:
+        """The waiting call to start: fewest slots held, oldest first; a tenant at
+        its share waits while another tenant does. Never leaves a slot idle."""
+        order = {id(c): i for i, c in enumerate(self._waiting)}
+        ranked = sorted(self._waiting, key=lambda c: (self._holding(c.tenant), c.queued_at,
+                                                      order[id(c)]))
+        share = self._share()
+        tenants = {c.tenant for c in self._waiting}
+        for call in ranked:
+            if len(tenants) == 1 or self._holding(call.tenant) < share:
+                return call
+        return ranked[0]
 
     def scratch_dir(self) -> Path:
         """A private directory for files handed to readers (removed on close)."""
@@ -359,9 +424,7 @@ class ReaderPool:
 
     def _grant(self) -> None:
         while self._waiting and len(self._running) < self.settings.size:
-            order = {id(c): i for i, c in enumerate(self._waiting)}
-            call = min(self._waiting, key=lambda c: (self._holding(c.tenant), c.queued_at,
-                                                     order[id(c)]))
+            call = self._next()
             self._waiting.remove(call)
             call.running, call.started_at = True, time.monotonic()
             call.worker = self._idle.pop() if self._idle else None
@@ -375,25 +438,6 @@ class ReaderPool:
                     self._idle.append(call.worker)
                     call.worker = None
 
-    def _preempt(self) -> None:
-        if len(self._running) < self.settings.size:
-            return
-        share = self._share()
-        starving = sum(1 for c in self._waiting if self._holding(c.tenant) < share)
-        stopping = sum(1 for c in self._running if c.preempted)
-        while starving > stopping:
-            over = [c for c in self._running
-                    if not c.preempted and self._holding(c.tenant) > share]
-            if not over:
-                return
-            victim = max(over, key=lambda c: c.started_at)
-            victim.preempted = True
-            stopping += 1
-            logger.warning("document read stopped for another tenant", extra={
-                "tenant": victim.tenant, "share": share, "limit": self.settings.size})
-            if victim.worker is not None:
-                victim.worker.kill("preempted")
-
     # ── calls ──
 
     async def run(self, call: ReaderCall, function: Callable[..., Any], args: tuple,
@@ -401,22 +445,19 @@ class ReaderPool:
         request = pickle.dumps((function, args, kwargs), protocol=pickle.HIGHEST_PROTOCOL)
         limit = self.settings.timeout_seconds if timeout is None else timeout
         loop = asyncio.get_running_loop()
-        while True:
-            if not await self._acquire(call, loop):
-                return Outcome("closed")
-            work = loop.run_in_executor(self._executor(), self._dispatch, call, request, limit)
-            try:
-                outcome = await asyncio.shield(work)
-            except asyncio.CancelledError:
-                with self._lock:
-                    call.cancelled = True
-                    if call.worker is not None:
-                        call.worker.kill("cancelled")
-                raise
-            if outcome.status != "preempted":
-                outcome.queued_ms = round((call.started_at - call.queued_at) * 1000)
-                return outcome
-            call.preempted = False  # queued again with its original age
+        if not await self._acquire(call, loop):
+            return Outcome("closed")
+        work = loop.run_in_executor(self._executor(), self._dispatch, call, request, limit)
+        try:
+            outcome = await asyncio.shield(work)
+        except asyncio.CancelledError:
+            with self._lock:
+                call.cancelled = True
+                if call.worker is not None:
+                    call.worker.kill("cancelled")
+            raise
+        outcome.queued_ms = round((call.started_at - call.queued_at) * 1000)
+        return outcome
 
     async def _acquire(self, call: ReaderCall, loop: Any) -> bool:
         call.loop, call.granted = loop, loop.create_future()
@@ -425,7 +466,6 @@ class ReaderPool:
                 return False
             self._waiting.append(call)
             self._grant()
-            self._preempt()
         try:
             return await call.granted
         except asyncio.CancelledError:
@@ -454,7 +494,8 @@ class ReaderPool:
             if self._context is None:
                 self._context = _context()
             context = self._context
-        worker = _Worker(context, self.settings, str(root / "cache"))
+        with self._server_lock:  # not while the reaper stops the fork server
+            worker = _Worker(context, self.settings, str(root / "cache"))
         with self._lock:
             self.started += 1
             self._start_reaper()
@@ -474,17 +515,19 @@ class ReaderPool:
                 worker = self._spawn()
             with self._lock:
                 call.worker = worker
-                if call.preempted or call.cancelled or self._closed:
-                    worker.kill("preempted" if call.preempted
-                                else "cancelled" if call.cancelled else "closed")
+                if call.cancelled or self._closed:
+                    worker.kill("cancelled" if call.cancelled else "closed")
             with self._lock:
                 outcome.active = len(self._running)
-            status, result, memory = worker.call(request, timeout)
+            status, result, memory = worker.call(request, timeout, self.settings.max_rss_mb)
             worker.tasks += 1
             outcome.status, outcome.result, outcome.memory = status, result, memory
             keep = status != "memory" and worker.tasks < self.settings.max_tasks
         except _Stopped as stopped:
             outcome.status = stopped.reason
+            if worker.peak_rss_mb is not None:
+                outcome.memory = {"peak_rss_mb": round(worker.peak_rss_mb, 1),
+                                  "reader_pid": worker.process.pid}
         except Exception as exc:  # noqa: BLE001 - e.g. the child could not start
             logger.warning("reader process failed", exc_info=True)
             outcome.status, outcome.result = "error", ReadError(
@@ -497,8 +540,6 @@ class ReaderPool:
                 if keep and not self._closed:
                     worker.idle_since = time.monotonic()
                     self._idle.append(worker)
-                if call.preempted and not call.cancelled:
-                    outcome.status = "preempted"
                 self._grant()
             if worker is not None and not (keep and not self._closed):
                 outcome.exit_code = worker.close()
@@ -524,6 +565,15 @@ class ReaderPool:
                     self._idle.remove(worker)
             for worker in expired:
                 worker.close()
+            self._stop_server_if_unused()
+
+    def _stop_server_if_unused(self) -> None:
+        """Stop the fork server (and resource tracker) with the last child."""
+        with self._server_lock:
+            with self._lock:
+                if self._idle or self._running or self._waiting:
+                    return
+            _stop_server()
 
     def close(self) -> None:
         """Stop every child, fail queued calls and remove the scratch files."""
@@ -545,11 +595,32 @@ class ReaderPool:
             worker.close()
         if threads is not None:
             threads.shutdown(wait=True)
+        with self._server_lock:
+            _stop_server()
         self._stop_reaper.set()
         if self._reaper is not None:
             self._reaper.join(5)
         if root is not None:
             shutil.rmtree(root, ignore_errors=True)
+
+
+def _stop_server() -> None:
+    """Stop multiprocessing's fork server and resource tracker if they run.
+
+    Both start again on the next read. They use private stdlib methods
+    (present in 3.12 and 3.13); if those are missing, they keep running.
+    """
+    from multiprocessing import forkserver, resource_tracker
+
+    for owner, name in ((getattr(forkserver, "_forkserver", None), "_stop"),
+                        (getattr(resource_tracker, "_resource_tracker", None), "_stop")):
+        stop = getattr(owner, name, None)
+        if stop is None:
+            continue
+        try:
+            stop()
+        except Exception:  # noqa: BLE001 - best effort; it just stays up
+            logger.warning("could not stop a reader helper process", exc_info=True)
 
 
 def _resolve(future: Any, value: bool = True) -> None:

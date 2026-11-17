@@ -40,12 +40,13 @@ DEFAULT_READ_LIMIT = 2
 SLOW_READ_SECONDS = 5.0  # log a read still waiting for a slot, or still running, after this
 _SETTINGS_ENV = {
     "timeout_seconds": ("HANDLER_READER_TIMEOUT_SECONDS", float),
+    "max_rss_mb": ("HANDLER_READER_MAX_RSS_MB", int),
     "memory_mb": ("HANDLER_READER_MEMORY_MB", int),
     "max_tasks": ("HANDLER_READER_MAX_TASKS", int),
     "max_result_mb": ("HANDLER_READER_MAX_RESULT_MB", int),
     "idle_seconds": ("HANDLER_READER_IDLE_SECONDS", float),
 }
-_MINIMUM = {"timeout_seconds": 0.001, "memory_mb": 0, "max_tasks": 1, "max_result_mb": 1,
+_MINIMUM = {"timeout_seconds": 0.001, "max_rss_mb": 0, "memory_mb": 0, "max_tasks": 1, "max_result_mb": 1,
             "idle_seconds": 0.01}
 
 _lock = threading.Lock()
@@ -185,7 +186,8 @@ async def capped_read(source: str, function: Callable[..., T], /, *args: Any, **
         "reader_pid": memory.get("reader_pid"), "exit_code": outcome.exit_code,
         "main_rss_mb": main["rss_mb"],
     })
-    return outcome.value(_display(args, kwargs), pool.settings.timeout_seconds)
+    return outcome.value(_display(args, kwargs), pool.settings.timeout_seconds,
+                         pool.settings.max_rss_mb)
 
 
 async def capped_preview(source: str, path: Path, *, max_chars: int) -> tuple[str | None, str | None]:

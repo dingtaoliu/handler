@@ -56,3 +56,12 @@ def unparseable(path, *args, **kwargs):
 
 def nothing(path, *args, **kwargs):
     return None
+
+
+def touch_memory(path, megabytes: int) -> int:
+    """Hold `megabytes` of resident memory for a while (written, so it counts)."""
+    block = bytearray(megabytes * 1024 * 1024)
+    for offset in range(0, len(block), 4096):
+        block[offset] = 1
+    time.sleep(1)
+    return megabytes
