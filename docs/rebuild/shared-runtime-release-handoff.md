@@ -1,8 +1,9 @@
-# Handoff: merging and releasing the shared runtime, steps 0, 1 and 4
+# Handoff: merging and releasing the shared runtime (steps 0, 1 and 4, plus review fixes)
 
-For the agent taking over the merge and deployment. Written November 15, 2026. Read
-this first, then [role-split-design.md](role-split-design.md) (the design and owner
-decisions) and the release record at the top of [HANDOFF.md](HANDOFF.md).
+For the agent taking over the merge and deployment. Written November 15, 2026; brought up
+to date November 17, 2026 once all the work was built and merged. Read this first, then
+[role-split-design.md](role-split-design.md) (the design and owner decisions) and the
+release record at the top of [HANDOFF.md](HANDOFF.md).
 
 The owner has asked for the merge and deployment to be handed over. **Ask the owner before
 each production release.** This handoff authorizes preparing releases, not shipping
@@ -10,34 +11,47 @@ them. Never print secret config values or pass them as command arguments.
 
 ## Where things stand
 
+All build work is finished and committed. Nothing is pushed or deployed.
+
 | | State |
 | --- | --- |
-| Production | Handler **v62** on `crontal-agent` (`7c7fde2`); `main` is `6bfb180` (a docs commit on top). Tenants `main` (schema `handler_crontal`), `bss` (`handler_bss`), `yeup` (`handler_yeup`) |
-| Integration branch | `feat/shared-runtime` in worktree `/Users/dannyliu/dev/repos/handler-wt-shared-runtime` |
-| Reader-pool branch | `feat/shared-runtime-readers` in `/Users/dannyliu/dev/repos/handler-wt-shared-readers`. It has merged `feat/shared-runtime` (at `c9cae4e`). **The follow-up fixes are unfinished:** a Claude agent stopped at a usage limit with uncommitted edits to `documents/pool.py` only. Ask the owner whether that agent resumes or you finish it; never both (see Release 2) |
-| Main checkout | `/Users/dannyliu/dev/repos/handler` holds other sessions' uncommitted work. Don't edit it, and never build images from it |
+| Production | Handler **v62** on `crontal-agent` (`7c7fde2`); Handler `main` is `6bfb180` (a docs commit on top). Tenants `main` (schema `handler_crontal`), `bss` (`handler_bss`), `yeup` (`handler_yeup`). Crontal on `hephaestus-backend-test` |
+| Handler integration branch | `feat/shared-runtime`, HEAD **`db00880`**, in worktree `/Users/dannyliu/dev/repos/handler-wt-shared-runtime`. Contains everything for Releases 1 and 2 |
+| Crontal branch | `feat/chat-client-message-id`, **`18a3018`** (one commit on Crontal `main` at `08d2d1f`), in worktree `/Users/dannyliu/dev/repos/hephaestus-wt-client-msg-id`. Release 3 |
+| Merged, safe to remove | `feat/shared-runtime-readers` (`/Users/dannyliu/dev/repos/handler-wt-shared-readers`) and `feat/shared-runtime-gating` (`/Users/dannyliu/dev/repos/handler-wt-shared-gating`): both merged into `feat/shared-runtime` |
+| Main checkouts | `/Users/dannyliu/dev/repos/handler` and `/Users/dannyliu/dev/repos/hephaestus` hold other sessions' uncommitted work. Don't edit them, and never build images from them |
 
-Commits on `feat/shared-runtime`, oldest first:
+Test results at handover:
 
-| Commit | Content | Release |
-| --- | --- | --- |
-| `eafdcc0` | Design doc and owner decisions | 1 |
-| `a9437e8` | Upload a thread's workspace when its run ends (in the background; failure falls back to the 300 s sync) | 1 |
-| `625e38b` | `HANDLER_ALLOWED_HARNESSES`: only listed harnesses can be built, set as default, saved in threads settings or set through the platform API. A stored thread on a disallowed harness parks with a clear reason | 1 |
-| `9b14857` | Parked threads (alert, admin notice, one notice for new work while parked, list and Retry in API, CLI and UI). Dead deliveries (alert, admin notice at most hourly per sink, redeliver in API and CLI). New column `threads.park_noticed` | 1 |
-| `98358db` | No park notice for chat threads (owner decision); the operator log line stays | 1 |
-| `7f1b90b`, `9d13c08`, `07fd29b` | Reader pool: document, email and image parsing in child processes; tool result and file size caps; peak memory logged per run | 2 |
-| `c9cae4e` | Merge of the reader pool. One conflict in `server.py` `instance_runtime`, resolved by keeping both `allowed_harnesses` and the `set_current_tenant` line | 2 |
+| Commit | Suite |
+| --- | --- |
+| Handler `98358db` (Release 1) | 1,578 passed / 4 skipped |
+| Handler `db00880` (Release 2) | 1,623 passed / 5 skipped. The skip is a Linux-only address-space test. The Linux pool tests passed in an arm64 container |
+| Crontal `18a3018` (Release 3) | Backend 751 passed / 1 skipped. Frontend `npm run build` passes; `npx vitest run` 64/64; lint has 64 errors and 30 warnings, all already there, none in changed files |
 
-Suite results: `98358db` 1,578 passed / 4 skipped; `c9cae4e` 1,595 passed / 6 skipped. The
-2 extra skips are Linux-only memory tests.
+## Plan: three releases
 
-## Plan: two releases
+| Release | App | What | Commit |
+| --- | --- | --- | --- |
+| 1 | `crontal-agent` | Steps 0 and 1: native-only harness guard, workspace upload at run end, parked threads, dead-delivery redeliver | Handler `98358db` |
+| 2 | `crontal-agent` | Step 4 (reader pool, PyMuPDF for PDF text) and the run-gating fixes from Codex's review | Handler `db00880` |
+| 3 | `hephaestus-backend-test` | Chat sends `client_message_id` and a client-made `conversation_id` | Crontal `18a3018` |
 
-Ship steps 0 and 1 first. Ship the reader pool alone afterwards, because it has no on/off
-switch: undoing it means rolling back the whole release.
+Releases 1 and 2 are separate because the reader pool has no on/off switch: undoing it
+means rolling back the release. Release 3 is independent of both: current Handler already
+accepts both ids. It can go out before, between or after them.
 
-### Release 1: steps 0 and 1 (`98358db`)
+### Release 1: steps 0 and 1 (Handler `98358db`)
+
+**Contents:**
+
+| Commit | Change |
+| --- | --- |
+| `eafdcc0` | Design doc and owner decisions |
+| `a9437e8` | A thread's workspace uploads in the background when its run ends; a failed upload falls back to the 300 s sync |
+| `625e38b` | `HANDLER_ALLOWED_HARNESSES`: only listed harnesses can be built, set as default, saved in threads settings or set through the platform API. A stored thread on a disallowed harness parks with a clear reason |
+| `9b14857` | Parked threads: an alert, an admin notice, one notice for new work while parked, and a list and Retry in the API, CLI and UI. Dead deliveries: an alert, an admin notice at most hourly per sink, and redeliver in the API and CLI. New column `threads.park_noticed` |
+| `98358db` | No park notice for chat threads (owner decision). The operator log line stays |
 
 **Checks before release:**
 
@@ -54,24 +68,24 @@ switch: undoing it means rolling back the whole release.
 
    Run them with `heroku pg:psql -a hephaestus-backend-test` (Handler and Crontal share the
    database). If anything names `codex`, stop and ask the owner.
-2. **The flaky test.** One full-suite run out of about 10 had a single failure; its name
-   was not captured. The tests this work changed passed 8 times in a loop. Run the full
-   suite at least 5 times with `-rf`, and name any failure. Fix it if the new code caused
-   it (the background workspace upload is the first suspect). Otherwise record it as
-   pre-existing.
+2. **The intermittent test.** One full-suite run in about 10 failed once. The likely cause
+   is the held-email test in `tests/runtime/store_pg/test_review_fixes.py`, which depended
+   on parse timing. It also failed when run alone at `c9cae4e`. It is fixed in `6cedced`,
+   which is only on the Release 2 side. Run the suite on the Release 1 merge at least 3
+   times with `-rf`. A failure in that one test is the known timing flake (rerun it, or
+   cherry-pick `6cedced`, which is test-only). Investigate any other failure.
 3. **The UI in a browser.** The parked badge, the error with Retry, and the Parked threads
    table on Activity (`web/static/app/`) were only checked with `node --check`. Run
    Handler locally against a scratch database, park a thread (a run that fails with no
    retries left), and check the badge, Retry and the table. Never connect a local run to
    production stores.
 
-**Merge:** merge `98358db` into `main`, not the branch head, which includes the reader
-pool. Production follows `main`.
+**Merge:** merge `98358db` into `main`, not the branch head, which includes Release 2.
+Production follows `main`.
 
 ```sh
-cd /Users/dannyliu/dev/repos/handler-wt-shared-runtime
-git fetch . 98358db
-git checkout --detach main   # or work in a fresh worktree on main
+git -C /Users/dannyliu/dev/repos/handler worktree add ../handler-wt-release1 main
+cd /Users/dannyliu/dev/repos/handler-wt-release1
 git merge --no-ff 98358db -m "Merge shared runtime steps 0 and 1"
 ```
 
@@ -94,14 +108,14 @@ heroku container:release web -a crontal-agent
 ```
 
 `config:set` restarts the dyno on the old image. Setting the variable first is safe:
-`main` ignores it. Alternatively set it immediately after the release.
+v62 ignores it. Alternatively set it immediately after the release.
 
 **Verify:**
 
 - `/healthz`, `/i/main/healthz`, `/i/bss/healthz` and `/i/yeup/healthz` return 200; an
   unknown instance returns 404; cross-instance admin keys and no key return 401.
 - Startup logs: no harness ERROR. Check the column exists:
-  `SELECT column_name FROM information_schema.columns WHERE table_name = 'threads' AND column_name = 'park_noticed';`
+  `SELECT table_schema FROM information_schema.columns WHERE table_name = 'threads' AND column_name = 'park_noticed';`
   This should return one row per schema, after each tenant's first use.
 - A chat through Crontal's proxy works for one user each on `bss` and `yeup`.
 - `GET /i/<name>/api/threads/parked` returns a list (admin key).
@@ -115,134 +129,157 @@ so v62 runs on it unchanged. Unset `HANDLER_ALLOWED_HARNESSES` if desired; v62 i
 commit, image id and size, backup id, rollback target, verification evidence and suite
 count. Also mark steps 0 and 1 as released in `role-split-design.md`.
 
-### Release 2: the reader pool (step 4)
+### Release 2: reader pool, PyMuPDF and run gating (Handler `db00880`)
 
-**Follow-up done (November 17) on `feat/shared-runtime-readers`; release needs the
-owner's call on the memory budget below.** The three review problems:
+**Contents** (everything on `feat/shared-runtime` after `98358db`):
 
-1. **Idle memory: fixed.** The fork server preloads only the reader modules, and it and
-   the resource tracker stop with the last idle reader. Measured 60 s after the last
-   read: 157 MB for the whole tree (the main process alone), against 395 MB before.
-2. **Fair sharing no longer kills reads.** Fairness applies at admission only: fewest
-   slots held, oldest call first; while another tenant waits, a tenant at
-   ceil(slots / active tenants) can't start another read.
-3. **Memory cap: an RSS watchdog.** The thread waiting on each reader samples its RSS
-   every 200 ms and kills it over `HANDLER_READER_MAX_RSS_MB`; the call fails with
-   "… is too large to read" and the reader is replaced. `RLIMIT_AS` is now **off** by
-   default (`HANDLER_READER_MEMORY_MB=0`): at 2,048 MB it already crashed an ordinary
-   large-PDF read, because PyMuPDF and MarkItDown reserve so much address space.
+| Area | Commits | Change |
+| --- | --- | --- |
+| Reader pool | `7f1b90b`, `9d13c08`, `07fd29b`, `bdfdaef`, `90cf0d6` | Document, email and image parsing in child processes. Fairness applies only when a read starts. An RSS watchdog per reader (`HANDLER_READER_MAX_RSS_MB`, default 220). The fork server preloads nothing heavy and stops when idle. Tool result and file size caps in the main process. Peak memory logged per run |
+| PDF text | `26c5bca`, `88ac6c0`, `ec43185` | Whole-document PDF text comes from PyMuPDF instead of MarkItDown (owner approved) |
+| One library per reader | `8cdfaaa`, `db00880` | A reader holds PyMuPDF or MarkItDown, never both. A call needing the other library gets a fresh reader. A reader left above 75 % of the cap after a call is recycled |
+| Run gating | `6a489cb`, `77c6bc5`, `acead1e`, `518756b`, `b93bcfc` | Each run's tool view comes from the live plan, so a plan change applies on the next run without a restart. One host `RunGate` for the env tenants. Interactive before background across tenants. A duplicate chat message returns its original thread |
+| Test fix | `6cedced` | The held-email test no longer depends on parse timing |
+| Merges | `c9cae4e`, `8c987bb`, `f9756e6` | Integration merges. Conflicts were only in `server.py`'s `instance_runtime` signature and in the design doc |
 
-**Measured whole-tree memory** (amd64 container from the release image, Python 3.12,
-SQLite, fake model key; RSS in MB; details in
+**Behaviour changes to expect in production:**
+
+- **Concurrency.** The dyno runs at most **6 runs at once, 3 per tenant**
+  (`HANDLER_GLOBAL_MAX_RUNS` and `HANDLER_PLAN_RUN_CAPS` defaults). Each tenant's own lane
+  limits (2 chat and 1 background by default) still apply beneath that. Before, the cap
+  was each instance's lane capacity times 3. Measured peak concurrency is 2. **Not
+  checked:** whether production sets any of these gate variables, or stores lane limits in
+  each tenant's settings. Check `heroku config -a crontal-agent` for variable names only
+  (`heroku config -a crontal-agent | cut -d: -f1`), never values.
+- **Document reads.** `HANDLER_DOC_READ_MAX_CONCURRENT` now defaults to **1** (was 2), with
+  a 220 MB RSS cap per reader. A document too large for the cap fails with "… is too large
+  to read" instead of threatening the dyno.
+- **PDF output format.** PDF text changed from MarkItDown's text (lines separated by blank
+  lines, no page markers) to PyMuPDF page text: one `--- page N of M ---` block per page,
+  the format `pages=` reads already used. Paging (`offset`, `max_chars`, "Call read_file
+  with offset=…"), scan detection and page images are unchanged. Chat `read_file` on a PDF
+  with the native harness uploads the file and extracts nothing, so it is unaffected.
+- **Plan changes apply live.** This doesn't matter in production yet: the platform API
+  is off.
+
+**Measurements** (amd64 container, the v62 image's dependencies with the branch's `src`
+mounted, SQLite, fake model key; whole process tree; details in
 [multi-instance.md](multi-instance.md#memory-budget-measured-november-17-amd64-linux-python-312-release-image)):
 
-| | Before (preload, 2 readers, no RSS cap) | Now, defaults (1 reader, cap 220) |
+| | Before (first reader pool build) | Now (defaults) |
 | --- | --- | --- |
-| Idle, before any read | 154 | 154 |
-| 60 s after the last read | 395 | 157 |
-| Every reader busy (400-page PDF + 60,000-row xlsx) | 779 RSS / 503 PSS; PDF reader crashed | 440 RSS / 400 PSS; PDF refused "too large to read", xlsx read |
-| First read, cold: PDF / xlsx | 2.7 s / about 2.3 s | about 1.2 s / 1.1 s |
+| Idle, before any read | 154 MB | 154 MB |
+| 60 s after the last read | 395 MB | 157 MB (the main process only) |
+| Reader busy on a large file | 779 MB, and the PDF reader crashed | about 440 MB at most (main 157 + fork server 45 + tracker 26 + one reader at its 220 cap) |
+| PDF of 2, 30, 100 or 400 pages | MarkItDown: 244 MB to 6 GB | PyMuPDF: 164 MB peak, 0.5–1.0 s in a fresh reader; none refused |
+| Switching library (PDF ↔ docx) | — | about 0.5 s (PDF) or 0.9–1.3 s (docx) extra, on a switch only |
 
-**The main finding:** PDF text conversion through MarkItDown (pdfminer) is what uses
-memory. With no cap, one reader reached 244 MB for a 2-page PDF, 597 MB for 30 pages,
-1.57 GB for 100 and **6 GB** for 400 pages; before this pool that ran inside the main
-process, which fits the R14 errors. PyMuPDF's text extraction of the same files added
-nothing measurable (0.3 s for 100 pages). xlsx peaked at 73 MB, HTML at 152 MB.
+**MarkItDown's PDF conversion is the likely cause of the R14 errors.** It used 1.57 GB
+for a 100-page PDF, and before this pool it ran inside the main process.
 
-**Recommendation and defaults:** on the 512 MB Basic dyno, 1 reader with a 220 MB cap
-(`HANDLER_DOC_READ_MAX_CONCURRENT=1`, `HANDLER_READER_MAX_RSS_MB=220`, now the
-defaults): main (about 155 idle) + fork server 45 + tracker 26 + reader 220 is about
-450 MB. With MarkItDown, PDF **text** previews (downloads, email attachments, bounded
-tasks) failed "too large to read" at that cap even for small PDFs; chat `read_file` on
-a PDF uploads the file and parses nothing, so it was unaffected. Fixed: PDF text now
-comes from PyMuPDF (see below). On a
-1 GB dyno, 2 readers at 300 MB (busy tree measured 584 RSS / 516 PSS) or 3 at 220 MB
-fit.
-
-**PDF text moved to PyMuPDF (owner approved; done November 17 on
-`feat/shared-runtime`).** `documents/pdf.py` extracts whole-document PDF text
-(`read_file`/`handler-read` without `pages`, download and attachment previews, bounded
-tasks) with PyMuPDF, page by page; MarkItDown is no longer used or imported for PDFs
-(other formats keep it). **The output changed:** from MarkItDown's text (lines
-separated by blank lines, no page markers) to PyMuPDF page text, one
-`--- page N of M ---` block per page, the format `pages=` reads already used. Paging is
-unchanged (`offset`, `max_chars`, "Call read_file with offset=…"), from the cached page
-text. Scan detection and page images are unchanged. Measured through the pool at the
-220 MB cap (amd64, v62 image's dependencies, branch `src` mounted): 2-, 30-, 100- and
-400-page PDFs all read at a 164 MB reader peak, 0.5–1.0 s in a fresh reader; none
-refused (the old path refused even 2 pages at about 223 MB). A reader holding both
-PyMuPDF and MarkItDown would be over 220 MB on the imports alone, so the pool keeps one
-heavy library family per reader: a call needing the other family gets a fresh reader,
-the old one stopped first (about 0.5 s extra for a PDF, 0.9–1.3 s for a docx, on a
-switch only), and a reader left above 75 % of the cap after a call is recycled.
-Mixed sequences (PDF then docx, docx then PDF, PDF then xlsx then PDF) read with no
-refusals. Tables in
-[multi-instance.md](multi-instance.md#memory-budget-measured-november-17-amd64-linux-python-312-release-image).
+**Memory budget:** keep the defaults on the 512 MB Basic dyno (owner decision: stay on
+Basic until measurements show otherwise). On a 1 GB dyno, 2 readers at 300 MB or 3 at
+220 MB fit (measured busy tree 584 MB RSS for 2 at 300 MB).
 
 **Before release 2:**
 
-1. **Follow-up: done** (see above). The owner decides the memory budget (defaults: 1
-   reader, 220 MB). PDF text moved to PyMuPDF, and readers keep one library family
-   (both done, above).
-2. **Merge into the integration branch.** Merge `feat/shared-runtime-readers` into
-   `feat/shared-runtime`. Then run the full suite, and the pool tests in a Linux container.
-3. **Measure on amd64 Linux.** Run in a Docker container built from the release image
-   (`--platform linux/amd64`), with disposable storage and fake model credentials.
-   Measure:
-   - idle RSS of the whole process tree, before any read and 60 s after the last one;
-   - peak RSS during a large PDF read and an xlsx read;
-   - whole-tree RSS with every reader busy on a large file at once (the budget above);
-   - first-read latency;
-   - that a PDF exceeding the RSS cap kills only its child, and the tool call reports
-     "document too large".
+1. **Release 1 is live and has been watched for at least a day.**
+2. **Repeat the measurement on the real release build.** The numbers above came from the
+   branch's `src` mounted over v62's dependencies, not from a built image. Build the
+   release image (`--platform linux/amd64`) and run it with disposable storage, SQLite
+   and a fake model key, never production stores. Check:
+   - whole-tree idle RSS before any read and 60 s after the last one;
+   - a 100-page PDF read, a large xlsx and a docx in turn;
+   - that a file over the cap fails only its own call.
 
-   Compare idle RSS with v62's (about 140 MB at idle locally). Stop and report to the
-   owner if the idle cost is materially higher.
-   *Done November 17* (numbers above) with the branch's `src` mounted over the v62
-   image's dependencies, and an in-process read rather than a chat run; repeat the idle
-   and busy checks on the real release build.
-4. **Merge to `main`, then release** as in Release 1 (backup, clean worktree, amd64
-   build). All new env vars are optional, with defaults listed in
-   [multi-instance.md](multi-instance.md). `HANDLER_DOC_READ_MAX_CONCURRENT` now
-   defaults to **1** (was 2), and `HANDLER_READER_MAX_RSS_MB` to 220.
-5. **Verify.** Run Release 1's checks again. Then read a real PDF through one tenant's
-   chat. Look for `run memory` logs with `run_peak_rss_mb` and `reader_peak_rss_mb`.
-   Watch `heroku logs` for R14 over the following days, and compare with the period
-   before.
-6. **Rollback** to Release 1's version number. Record it in `HANDOFF.md` like Release 1.
+   Stop and report to the owner if idle RSS is materially above about 160 MB, or if a
+   reader peak exceeds 220 MB for an ordinary file.
+3. **Check production's gate settings** (see Concurrency above) and report the effective
+   limits to the owner.
+4. **Merge** `feat/shared-runtime` at `db00880` into `main` (after Release 1's merge), and
+   run the suite on the result.
+5. **Release** as in Release 1: backup, clean worktree, amd64 build, push, release. No new
+   variables are required; the new optional ones and their defaults are listed in
+   [multi-instance.md](multi-instance.md).
+
+**Verify:**
+
+- Release 1's checks again.
+- Read a real PDF in each tenant through a preview path: an email attachment, a Crontal
+  file preview, or a bounded task. Look for `document read` logs with `family`, and
+  `run memory` logs with `run_peak_rss_mb` and `reader_peak_rss_mb`.
+- Watch `heroku logs` for R14 over the following days, and compare with the days before.
+  Look for "too large to read" refusals, and tell the owner if ordinary files hit them.
+
+**Rollback:** to Release 1's release number. No schema change in Release 2.
+
+**Record** the release in `HANDOFF.md` like Release 1, and mark step 4 released in
+`role-split-design.md`.
+
+### Release 3: Crontal chat message ids (Crontal `18a3018`)
+
+**Change:** the chat panel gives each message a `client_message_id` once, and reuses it on
+resend after a timeout, network error or 5xx, so Handler stores and runs it once. A new
+conversation gets its `conversation_id` on the client when it starts, so a resent first
+message lands in the same thread. The backend forwards page context for such a
+conversation (`new_conversation` flag). A 4xx, including a 429 at the free monthly limit,
+counts as a clear rejection, so a later send gets a new id. That is intended: a dropped
+over-limit message is recorded under its id, so reusing it would never run.
+
+**Checks:** the suites listed above. Optionally, run Crontal locally against a local
+Handler and check in the browser's network tab that a resend carries the same
+`client_message_id`.
+
+**Merge and release:** merge `18a3018` into Crontal `main`, in a clean worktree, never the
+main checkout. Then follow Crontal's `.claude/skills/deploy/SKILL.md` for
+`hephaestus-backend-test`. This change has no Alembic migration; still confirm
+`alembic current` is at head afterwards. Take a backup first, as the skill requires.
+
+**Verify:** a chat through the agent panel works for one user each on `bss` and `yeup`.
+The `POST /api/v1/handler/chat` request body carries `client_message_id`, and a new
+conversation also carries `conversation_id` and `new_conversation`.
+
+**Rollback:** `heroku rollback` to the previous Crontal release; nothing else changes.
 
 ## Codex review, November 16 (findings and dispositions)
 
 | # | Finding | Disposition |
 | --- | --- | --- |
-| 1 | **Upgrade leaves paid tools missing.** Automation tools are registered at runtime start (`server.py` ~806). A plan change updates live limits (`tenancy/host.py` ~672), but an open SSE connection prevents the restart that would add the tools. Reproduced | **Fixed** on `feat/shared-runtime-gating` (step 3): every tool is registered on every plan, each run's tool view is built from the live plan, and the gateway refuses calls (and approvals) the current plan excludes. Tested with an upgrade and a downgrade under an open SSE stream |
-| 2 | **No shared run cap for env tenants.** With the registry off, `create_host` gives tenant runtimes no `RunGate`, so each instance's own limit (`HANDLER_MAX_CONCURRENT=20`) adds up across the dyno | **Fixed** on `feat/shared-runtime-gating`: `create_host` builds one host `RunGate` and passes it to every env instance, each configured `paid` as the registry imports it. With production's settings the dyno runs at most 6 at once, 3 per instance (was 3 instances × their lane capacities, `HANDLER_MAX_CONCURRENT=20` never binding). The SQLite store gained `has_claimable`, which a gated dispatcher needs |
-| 3 | **Reader pool is a release blocker**; a per-child cap needs a check across the whole tree | Agreed; Release 2 now has a memory budget for the whole tree |
-| 4 | **No interactive-before-background priority across tenants.** `RunGate` has no lane | **Fixed** on `feat/shared-runtime-gating`: dispatchers pass the lane to the gate, which ranks interactive before background across tenants, then paid before free; background work waiting past `HANDLER_RUN_MAX_WAIT_SECONDS` goes first once, so it can't starve |
-| 5 | **The chat client doesn't send `client_message_id`** (`hephaestus/frontend/src/api/services/handler-service.ts` ~108) | Already listed below; still open |
-| — | **Call position is too weak an idempotency key** for nondeterministic retries | Agreed. The design now keys on thread, input events, tool name and argument hash, with an intent row written before the call |
-| — | **90-day retention cleanup isn't implemented** | Agreed; added to step 2 |
+| 1 | **Upgrade leaves paid tools missing.** Automation tools were registered at runtime start (`server.py` ~806). A plan change updates live limits (`tenancy/host.py` ~672), but an open SSE connection prevented the restart that would add the tools. Reproduced | **Fixed** (`6a489cb`, Release 2): every tool is registered on every plan, each run's tool view comes from the live plan, and the gateway refuses calls and approvals the current plan excludes. Tested with an upgrade and a downgrade under an open SSE stream. Changing a tenant's integrations or secrets still needs a runtime restart; step 3's integration contract removes that |
+| 2 | **No shared run cap for env tenants** | **Fixed** (`77c6bc5`, Release 2): one host `RunGate` for every env instance, each configured `paid` as the registry imports it. The SQLite store gained `has_claimable`, without which a gated SQLite dispatcher would have crashed silently |
+| 3 | **Reader pool is a release blocker**; a per-child cap needs a check across the whole tree | **Fixed** (Release 2): the three pool fixes, whole-tree measurements, PyMuPDF for PDF text and one library family per reader |
+| 4 | **No interactive-before-background priority across tenants** | **Fixed** (`acead1e`, Release 2): interactive before background across tenants, then paid before free. Background work waiting past `HANDLER_RUN_MAX_WAIT_SECONDS` (60 s) goes first once, so it can't starve |
+| 5 | **The chat client doesn't send `client_message_id`** | **Fixed** (Crontal `18a3018`, Release 3) |
+| — | **Call position is too weak an idempotency key** for nondeterministic retries | Design changed: thread, input events, tool name and argument hash, with an intent row written before the call. Build order step 5 |
+| — | **90-day retention cleanup isn't implemented** | Added to build order step 2 |
 | — | **`multi-tenant-design.md` status was stale** | Fixed |
-| — | **A duplicate chat message reported a new thread** when the resend had no `conversation_id` | **Fixed** on `feat/shared-runtime-gating`: a duplicate returns the stored original's `event_id`, `thread_key` and `conversation_id` |
+| — | **A duplicate chat message reported a new thread** when the resend had no `conversation_id` (found while fixing 5) | **Fixed** (`518756b`, Release 2): a duplicate returns the stored original's `event_id`, `thread_key` and `conversation_id` |
 
 ## Not part of these releases
 
-- **Crontal frontend `client_message_id`** (step 0). This lives in the `hephaestus` repo,
-  where another agent may be working. Not started.
 - **Steps 2, 3, 5, 6 and 7 of the build order.** Steps 2 and 3 (one timer, one claim
-  loop, the integration contract) come next, on top of `feat/shared-runtime` after both
-  releases.
-- **The tenant registry stays off** until the end of step 3 (owner decision).
+  loop, the context cache, the integration contract) come next, on top of
+  `feat/shared-runtime` after Release 2.
+- **The tenant registry stays off** until the end of step 3 (owner decision). The
+  three env tenants are then imported into it.
+- **Automatic retries of parked threads and deliveries**, with exponential backoff, are
+  future work (owner decision).
 
 ## Working notes
 
-- **Tests:**
+- **Handler tests:**
   `cd <worktree> && PYTHONPATH=src /Users/dannyliu/dev/repos/handler/.venv/bin/python -m pytest tests/runtime -q -p no:cacheprovider`
   takes about 2 minutes. The Postgres tests start their own server from Homebrew binaries.
+- **Crontal tests:** in `backend/`, `PDM_IGNORE_ACTIVE_VENV=1 pdm run pytest -q`. Confirm
+  `api_server.__file__` resolves inside the worktree, and repair a worktree venv with a
+  plain `pdm sync`, never `--clean`. In `frontend/`: `npm run build`, `npx vitest run`,
+  `npm run lint`.
 - **Scratch Postgres on this Mac:** `initdb` into a temp directory and start with
   `-c unix_socket_directories=''`, because long socket paths fail.
 - **Production schema dumps** need `/opt/homebrew/opt/postgresql@17/bin/pg_dump`, because
   the server is 17.10. Pass credentials through `PG*` environment variables.
 - **Heroku apps:** `crontal-agent` is Handler. `hephaestus-backend-test` is Crontal and
   owns the shared database. Ignore `crontal-agent-bss` and `hephaestus-web-app`.
-- **Crontal needs no change** for either release.
+- **Measurement scripts** from the reader work (`measure.py`, `combos.py`) are in
+  `/private/tmp/claude-501/-Users-dannyliu-dev-repos-hephaestus/fa33381b-e25f-4d11-817c-618eb99f2408/scratchpad/pdfwork/`.
+  This is a temporary directory and may be gone.
