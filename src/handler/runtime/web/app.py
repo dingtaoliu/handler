@@ -267,6 +267,14 @@ def create_app(
         stored = await store.put(event, spec)
         if isinstance(stored, OverLimit):
             return JSONResponse(stored.payload(), status_code=429)
+        if not stored:
+            # A resend: report the thread the original went to, not this request's
+            # (a new random conversation when the client sent none).
+            original = await store.event_by_idempotency_key(event.idempotency_key)
+            prefix = f"chat:{user_id}:"
+            if original is not None and (original.thread_key or "").startswith(prefix):
+                event, key = original, original.thread_key
+                conversation_id = key.removeprefix(prefix)
         if context_links:
             # The message carries them too, so a run that starts first sees them.
             context_links = await store.add_thread_context_links(

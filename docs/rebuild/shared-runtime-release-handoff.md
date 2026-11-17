@@ -171,14 +171,15 @@ the owner's; bring the measurements.
 
 | # | Finding | Disposition |
 | --- | --- | --- |
-| 1 | **Upgrade leaves paid tools missing.** Automation tools are registered at runtime start (`server.py` ~806). A plan change updates live limits (`tenancy/host.py` ~672), but an open SSE connection prevents the restart that would add the tools. Reproduced | **Blocks switching on the registry.** It doesn't affect releases 1 or 2: the registry and platform API are off in production, so plans never change there. The fix is in step 3: a tool view built per run from live entitlements |
-| 2 | **No shared run cap for env tenants.** With the registry off, `create_host` gives tenant runtimes no `RunGate`, so each instance's own limit (`HANDLER_MAX_CONCURRENT=20`) adds up across the dyno | Agreed. Step 3 now uses one host `RunGate` for every tenant. Peak measured concurrency is 2, so this is not urgent |
+| 1 | **Upgrade leaves paid tools missing.** Automation tools are registered at runtime start (`server.py` ~806). A plan change updates live limits (`tenancy/host.py` ~672), but an open SSE connection prevents the restart that would add the tools. Reproduced | **Fixed** on `feat/shared-runtime-gating` (step 3): every tool is registered on every plan, each run's tool view is built from the live plan, and the gateway refuses calls (and approvals) the current plan excludes. Tested with an upgrade and a downgrade under an open SSE stream |
+| 2 | **No shared run cap for env tenants.** With the registry off, `create_host` gives tenant runtimes no `RunGate`, so each instance's own limit (`HANDLER_MAX_CONCURRENT=20`) adds up across the dyno | **Fixed** on `feat/shared-runtime-gating`: `create_host` builds one host `RunGate` and passes it to every env instance, each configured `paid` as the registry imports it. With production's settings the dyno runs at most 6 at once, 3 per instance (was 3 instances × their lane capacities, `HANDLER_MAX_CONCURRENT=20` never binding). The SQLite store gained `has_claimable`, which a gated dispatcher needs |
 | 3 | **Reader pool is a release blocker**; a per-child cap needs a check across the whole tree | Agreed; Release 2 now has a memory budget for the whole tree |
-| 4 | **No interactive-before-background priority across tenants.** `RunGate` has no lane | Agreed; added to step 3 |
+| 4 | **No interactive-before-background priority across tenants.** `RunGate` has no lane | **Fixed** on `feat/shared-runtime-gating`: dispatchers pass the lane to the gate, which ranks interactive before background across tenants, then paid before free; background work waiting past `HANDLER_RUN_MAX_WAIT_SECONDS` goes first once, so it can't starve |
 | 5 | **The chat client doesn't send `client_message_id`** (`hephaestus/frontend/src/api/services/handler-service.ts` ~108) | Already listed below; still open |
 | — | **Call position is too weak an idempotency key** for nondeterministic retries | Agreed. The design now keys on thread, input events, tool name and argument hash, with an intent row written before the call |
 | — | **90-day retention cleanup isn't implemented** | Agreed; added to step 2 |
 | — | **`multi-tenant-design.md` status was stale** | Fixed |
+| — | **A duplicate chat message reported a new thread** when the resend had no `conversation_id` | **Fixed** on `feat/shared-runtime-gating`: a duplicate returns the stored original's `event_id`, `thread_key` and `conversation_id` |
 
 ## Not part of these releases
 

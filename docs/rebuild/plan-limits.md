@@ -130,7 +130,10 @@ applies to every plan that has email. The platform API refuses `email_intake`,
 
 **Automations.** `/api/automations` and everything under it, including manual runs,
 get `feature: "automations"`. The `automation_*` tools are not offered, and the grant
-policy denies `automation.*` in any case. Existing schedules of a downgraded tenant
+policy denies `automation.*` in any case, including an approval granted after a
+downgrade. The tools are registered on every plan; each run's tool view is built from
+the live plan when the run starts (`GrantPolicy.excluded`), so an upgrade offers them
+on the next run and a downgrade removes them, with no restart. Existing schedules of a downgraded tenant
 are kept unchanged but do not fire and do not count towards `next_wake_at`. They
 resume on upgrade.
 

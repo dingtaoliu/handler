@@ -86,8 +86,15 @@ per tenant and no DDL. To force a re-apply, delete that tenant's row. The contro
 schema is created automatically and needs no migration.
 
 Notifications use one channel, `handler_work_shared`, with the schema name as the
-payload. Run concurrency is **per instance**, so add it across instances when sizing
-the dyno.
+payload.
+
+Run concurrency has one cap for the **whole host**: every instance's dispatcher shares
+one run gate, as on the registry host (see the settings in
+[tenant-registry.md](tenant-registry.md#settings)). Env-defined instances count as
+`paid`, the plan the registry gives them on import, so by default the host runs at
+most 6 at once (`HANDLER_GLOBAL_MAX_RUNS`) and each instance at most 3
+(`HANDLER_PLAN_RUN_CAPS`). An instance's own `HANDLER_MAX_CONCURRENT` and lane
+capacities still apply beneath those; they no longer add up across instances.
 
 ## Memory and document reads
 

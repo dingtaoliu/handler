@@ -117,8 +117,14 @@ class Gateway:
     def specs(self) -> list[ToolSpec]:
         return list(self._tools.values())
 
+    def excluded(self, spec: ToolSpec) -> str | None:
+        """Why the current plan leaves `spec` out (see GrantPolicy.excluded), else None."""
+        check = getattr(self._policy, "excluded", None)
+        return check(spec) if check is not None else None
+
     async def specs_for(self, ctx: RunContext) -> list[ToolSpec]:
-        """Effective tool inventory; invocation still enforces credentials/grants."""
+        """Effective tool inventory for a run, from the live plan and connector
+        capabilities; invocation still enforces credentials, grants and the plan."""
         resolved: dict[Callable, set[str]] = {}
         for check in self._capabilities.values():
             if check not in resolved:
@@ -127,8 +133,9 @@ class Gateway:
                 except Exception:
                     log.exception("Could not resolve connector capabilities")
                     resolved[check] = set()
-        return [spec for spec in self.specs() if spec.name not in self._capabilities
-                or spec.name in resolved[self._capabilities[spec.name]]]
+        return [spec for spec in self.specs() if not self.excluded(spec)
+                and (spec.name not in self._capabilities
+                     or spec.name in resolved[self._capabilities[spec.name]])]
 
     # ---- calls -------------------------------------------------------
 
@@ -299,6 +306,10 @@ class Gateway:
         )
         if spec is None:
             result = ToolResult(f"Unknown tool: {approval.tool}", is_error=True)
+        elif why := self.excluded(spec):  # the plan changed since the request
+            await self._audit(ctx, spec, approval.args, Decision.DENY, "denied", error=why,
+                              approval_id=approval_id)
+            result = ToolResult(f"Denied: {why}", is_error=True)
         else:
             result = await self._execute(ctx, spec, approval.args, Decision.ASK, approval.id)
         final = ApprovalStatus.FAILED if result.is_error else ApprovalStatus.EXECUTED

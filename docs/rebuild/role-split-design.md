@@ -297,7 +297,7 @@ the same database; rollback is flipping it.
 | 0 | Native-only host setting and registry check. Workspace flush when a run ends. `client_message_id` from the Crontal frontend | Codex cannot be enabled on production; a restart loses no finished run's files |
 | 1 | Parked threads with the Retry action; redeliver for dead deliveries; notices and alerts on both | No work stops without a notice and a way to retry |
 | 2 | One timer over `handler_control.due_work`; one housekeeping pass, including the 90-day retention cleanup (owner decision 9; not built yet); one bus for the host; cancel as a stored flag | No per-tenant scheduler, housekeeping or poller tasks remain |
-| 3 | One claim loop across tenants; one host `RunGate` for every tenant, env-defined ones included, ranking interactive before background across tenants (it has no lane today); tenant context cache; a tool view built per run from live entitlements, so a plan change takes effect on the next run (today tools are registered at runtime start, so an upgrade leaves paid tools missing until a restart); one routed app and one MCP route; the new integration contract; `TenantHost` lifecycle removed. Then switch on the registry and import `main`, `bss` and `yeup` | With 50 idle tenants, the process issues no tenant-scoped queries; a busy tenant cannot delay another's chat; the three tenants run unchanged from the registry |
+| 3 | One claim loop across tenants; one host `RunGate` for every tenant, env-defined ones included, ranking interactive before background across tenants (**done**); tenant context cache; a tool view built per run from live entitlements, so a plan change takes effect on the next run (**done**); one routed app and one MCP route; the new integration contract; `TenantHost` lifecycle removed. Then switch on the registry and import `main`, `bss` and `yeup`. **Partly done** on `feat/shared-runtime-gating` (see Progress) | With 50 idle tenants, the process issues no tenant-scoped queries; a busy tenant cannot delay another's chat; the three tenants run unchanged from the registry |
 | 4 | Reader pool as child processes, with email parsing and image downscaling moved in; size caps in the main process; memory logged per run | A synthetic oversized PDF kills only its child, and the tool call reports an error. **Built** on `feat/shared-runtime-readers` (not deployed); see [multi-instance.md](multi-instance.md#memory-and-document-reads). Not behind `HANDLER_SHARED_RUNTIME`: it applies to the current host too |
 | 5 | Idempotent tool side effects | A run retried after a crash does not repeat a sent email or a Crontal write |
 | 6 | Outbox subscriptions and one delivery pool with per-tenant limits | A failing sink for one tenant does not delay another tenant's deliveries |
@@ -310,6 +310,17 @@ Progress (branch `feat/shared-runtime`, November 15, 2026):
 - **Step 1: built.** Parked threads with notices, the `thread parked` alert and Retry;
   `delivery dead` alert, admin notice and redeliver (notifications.md). The poison-event
   split and the slow final delivery retry are not done.
+- **Step 3: partly built** on `feat/shared-runtime-gating` (November 17, 2026, not
+  deployed). Done: one host `RunGate` for env-defined instances too (each counted as
+  `paid`, as the registry imports them); the gate ranks interactive before background
+  across tenants, then paid before free, with aging for both (`HANDLER_RUN_MAX_WAIT_SECONDS`);
+  each run's tool view is built from the live plan (`GrantPolicy.excluded`), and the
+  gateway refuses calls and approvals the current plan excludes, so a plan change needs
+  no restart. Not done: one claim loop, the tenant context cache, one routed app and MCP
+  route, the integration contract and removing the `TenantHost` lifecycle. Changes to a
+  tenant's integrations or secrets still need its runtime to restart (integration tools,
+  routes and sinks are wired at start), and so does gaining Codex on an upgrade (the
+  harness is built at start; production allows only the native harness anyway).
 
 The tenant registry (multi-tenant stage 2) is switched on only at the end of step 3, so
 production never runs the activation lifecycle this design removes.

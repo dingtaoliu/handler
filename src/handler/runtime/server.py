@@ -529,6 +529,13 @@ def _plan_limit(tenant: Tenant) -> int | None:
     return int(value) if value is not None else None
 
 
+def _host_run_gate(env: Mapping[str, str]) -> RunGate:
+    """The one run gate every tenant's dispatcher shares, registry on or off."""
+    return RunGate(int(env.get("HANDLER_GLOBAL_MAX_RUNS", str(DEFAULT_MAX_RUNS))),
+                   parse_plan_caps(env.get("HANDLER_PLAN_RUN_CAPS", DEFAULT_PLAN_CAPS)),
+                   max_wait=float(env.get("HANDLER_RUN_MAX_WAIT_SECONDS", "60")))
+
+
 def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs: list) -> FastAPI:
     """Host tenants from `handler_control` and start each only when it has work."""
     platform_key, sealing_key = env.get(PLATFORM_KEY_ENV), env.get(TENANT_SECRET_ENV)
@@ -538,9 +545,7 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
     size = int(env.get("HANDLER_DB_SHARED_POOL_MAX", str(DEFAULT_POOL_MAX)))
     hub = PostgresHub(args.database_url, max_size=size)
     box = SecretBox(sealing_key)
-    gate = RunGate(int(env.get("HANDLER_GLOBAL_MAX_RUNS", str(DEFAULT_MAX_RUNS))),
-                   parse_plan_caps(env.get("HANDLER_PLAN_RUN_CAPS", DEFAULT_PLAN_CAPS)),
-                   max_wait=float(env.get("HANDLER_RUN_MAX_WAIT_SECONDS", "60")))
+    gate = _host_run_gate(env)
 
     plan_table = parse_plan_table(env.get(PLAN_LIMITS_ENV))
     allowed_harnesses = parse_allowed_harnesses(env.get(ALLOWED_HARNESSES_ENV))
@@ -620,6 +625,12 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
         return create_registry_host(args, env, configs)
     allowed_harnesses = parse_allowed_harnesses(env.get(ALLOWED_HARNESSES_ENV))
     hubs = _shared_hubs(configs, env)
+    # One run cap for the whole process, as on the registry host. Env-defined
+    # instances are paid with no max_runs override: the plan and limits the
+    # registry gives them when it imports them (Tenant's defaults).
+    gate = _host_run_gate(env)
+    for name, *_ in configs:
+        gate.configure(name, Tenant.plan, None)
 
     @contextlib.asynccontextmanager
     async def lifespan(host):
@@ -631,7 +642,7 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
             # same task. Separate owner tasks let them drain concurrently.
             try:
                 async with instance_runtime(cfg, scoped, base_path=base, instance_name=name,
-                                            hub=hubs.get(cfg.database_url),
+                                            hub=hubs.get(cfg.database_url), gate=gate,
                                             allowed_harnesses=allowed_harnesses) as app:
                     ready.set_result(app)
                     await stop.wait()
@@ -665,7 +676,9 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
                 await hub.close()
             await asyncio.to_thread(shutdown_readers)
 
-    return FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    host = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    host.state.run_gate = gate
+    return host
 
 
 async def serve(args: argparse.Namespace) -> None:
@@ -803,8 +816,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                          TaskOutcomeTools(store), NotifyTools(store, bus, notifier=notifier),
                          QuestionTools(questions)):
             gateway.register(provider)
-        if plan_limits is None or plan_limits.current.automations:
-            gateway.register(AutomationTools(store, scheduler))  # not offered on plans without
+        # Registered on every plan: each run's tool view and every call follow the
+        # live plan (GrantPolicy.excluded), so an upgrade or downgrade needs no restart.
+        gateway.register(AutomationTools(store, scheduler))
         tokens = RunTokens()
         mcp_app = create_mcp_app(gateway, tokens)
 

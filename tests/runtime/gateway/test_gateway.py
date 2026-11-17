@@ -234,3 +234,29 @@ async def test_tool_handlers_run_with_the_callers_run_context(gateway, tools):
     gateway.register(type(spec)(**{**spec.__dict__, "name": "who", "handler": handler}))
     await gateway.call(CTX, "who", {"text": "x"})
     assert seen == [CTX] and current_run() is None
+
+
+async def test_an_approval_granted_after_a_downgrade_does_not_run(gateway, store, emitted):
+    """Tools stay registered on every plan, so the plan is checked again at approval."""
+    from dataclasses import replace
+
+    from handler.runtime.gateway import GrantPolicy, ToolResult, ToolSpec
+    from handler.runtime.tenancy.limits import LiveLimits, PlanLimits
+    from handler.runtime.types import Risk
+
+    ran = []
+
+    async def create(ctx, args):
+        ran.append(args)
+        return ToolResult("created")
+
+    gateway.register(ToolSpec("automation_create", "automation.create", Risk.WRITE_INTERNAL, "",
+                              {"type": "object"}, create))
+    limits = LiveLimits(PlanLimits(plan="paid"))
+    gateway.set_policy(GrantPolicy({"actions": {"automation.*": "ask"}}, plan_limits=limits))
+    pending = (await gateway.call(CTX, "automation_create", {})).content
+    limits.current = replace(limits.current, plan="free", automations=False)
+    assert "automation_create" not in {s.name for s in await gateway.specs_for(CTX)}
+    approval = await gateway.approve(pending["approval_id"], "boss")
+    assert approval.status == ApprovalStatus.FAILED and ran == []
+    assert "not included in this plan" in approval.result["content"]

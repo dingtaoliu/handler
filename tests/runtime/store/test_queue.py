@@ -258,3 +258,4 @@ async def test_fifty_puts_and_three_concurrent_claimers(store, spec, event):
     events = [await store.pending_events(f"thread-{i}") for i in range(10)]
     assert all(len(group) == 5 for group in events)
     assert len({e.id for group in events for e in group}) == 50
+

@@ -59,12 +59,20 @@ class EventQueue(Protocol):
         """
         ...
 
+    async def has_claimable(self, lane: Lane) -> bool:
+        """Whether `claim` would find a thread in `lane` now (the run gate queues on it)."""
+        ...
+
     async def heartbeat(self, lease: Lease, lease_seconds: float) -> Lease | None:
         """Extend a lease. Returns the new lease, or None if it was lost."""
         ...
 
     async def pending_events(self, thread_key: str) -> list[Event]:
         """Routed events on the thread not yet consumed by a run, oldest first."""
+        ...
+
+    async def event_by_idempotency_key(self, key: str) -> Event | None:
+        """The stored event with this idempotency key, whatever its status."""
         ...
 
     async def complete(self, lease: Lease, run_id: str, event_ids: list[str]) -> bool:

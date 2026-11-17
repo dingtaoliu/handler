@@ -1012,7 +1012,7 @@ async def test_a_busy_tenant_cannot_starve_another(base_env, pg_dsn):
                                  idempotency_key=key, thread_key=key, user_id="u"), spec)
         await until(lambda: gate.running("m1") == 2)
         await quiet.put(chat("q", "quiet work"), SPEC)
-        await until(lambda: "m2" in gate._waiting)
+        await until(lambda: gate.waiting("m2"))
         FakeHarness.gate.set()
         FakeHarness.gate = None
         await until(lambda: any("quiet work" in run for run in FakeHarness.runs))
