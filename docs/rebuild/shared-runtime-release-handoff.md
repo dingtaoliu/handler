@@ -170,16 +170,20 @@ unchanged (`offset`, `max_chars`, "Call read_file with offset=…"), from the ca
 text. Scan detection and page images are unchanged. Measured through the pool at the
 220 MB cap (amd64, v62 image's dependencies, branch `src` mounted): 2-, 30-, 100- and
 400-page PDFs all read at a 164 MB reader peak, 0.5–1.0 s in a fresh reader; none
-refused (the old path refused even 2 pages at about 223 MB). Table and the remaining
-limit (a reader that loads both PyMuPDF and MarkItDown, e.g. a PDF then a docx, goes
-over 220 MB and that call is refused once) in
+refused (the old path refused even 2 pages at about 223 MB). A reader holding both
+PyMuPDF and MarkItDown would be over 220 MB on the imports alone, so the pool keeps one
+heavy library family per reader: a call needing the other family gets a fresh reader,
+the old one stopped first (about 0.5 s extra for a PDF, 0.9–1.3 s for a docx, on a
+switch only), and a reader left above 75 % of the cap after a call is recycled.
+Mixed sequences (PDF then docx, docx then PDF, PDF then xlsx then PDF) read with no
+refusals. Tables in
 [multi-instance.md](multi-instance.md#memory-budget-measured-november-17-amd64-linux-python-312-release-image).
 
 **Before release 2:**
 
 1. **Follow-up: done** (see above). The owner decides the memory budget (defaults: 1
-   reader, 220 MB). PDF text moved to PyMuPDF (done, above); decide whether to fix the
-   PyMuPDF + MarkItDown reader limit before release.
+   reader, 220 MB). PDF text moved to PyMuPDF, and readers keep one library family
+   (both done, above).
 2. **Merge into the integration branch.** Merge `feat/shared-runtime-readers` into
    `feat/shared-runtime`. Then run the full suite, and the pool tests in a Linux container.
 3. **Measure on amd64 Linux.** Run in a Docker container built from the release image

@@ -151,7 +151,7 @@ paragraphs) 152 MB; PDF text through MarkItDown (pdfminer) 244 MB for 2 pages, 3
 for 10, 597 MB for 30, 1.57 GB for 100. PyMuPDF's own text extraction of the same
 100- and 400-page PDFs added nothing measurable to its 155 MB import (0.3 s and 1.1 s).
 A reader that has imported PyMuPDF alone is about 145 MB; with MarkItDown, about 200 MB
-(226–257 MB with both, measured later; see below).
+(226–257 MB with both, so the pool keeps them apart; see below).
 
 - **512 MB Basic dyno:** 1 reader with a 220 MB cap keeps main (about 155 idle, more in
   runs) + fork server 45 + tracker 26 + reader 220 near 450 MB. PDF text comes from
@@ -177,13 +177,35 @@ A reader that has imported PyMuPDF alone is about 145 MB; with MarkItDown, about
   of each call is a fresh reader's start. In a reused reader the same reads take 8 ms
   (2 pages) to 0.57 s (400 pages), and a continuation 25–33 ms from the cache. In fresh
   readers an xlsx (5,000 rows) peaked at 74 MB and a docx (300 paragraphs) at 148 MB.
-- **Known limit: PyMuPDF and MarkItDown in one reader exceed 220 MB.** A reader that
-  has read a PDF and then reads a docx (or the reverse: docx, then PDF) peaks at
-  226–257 MB on the imports alone, and that second read is refused "too large to
-  read"; the reader is replaced and the next call succeeds. Before this change the
-  PDF read itself failed, so the sequence didn't arise. xlsx then docx (150 MB) is fine.
-  Options: recycle a reader after a call that leaves it above about half the cap, or
-  keep separate readers for PDF and MarkItDown formats.
+- **One heavy library family per reader.** A reader holding both PyMuPDF and
+  MarkItDown is over 220 MB on the imports alone (226–257 MB measured: a PDF then a
+  docx, or the reverse, had the second read refused). The pool now predicts each
+  call's family in the main process (`documents/families.py`: `pymupdf` for PDF reads,
+  page images and PDF uploads; `markitdown` for docx/pptx/HTML/EPUB/.msg, ZIP, JSON/XML,
+  HTML-disguised .xls and every text preview; none for xlsx/xls/CSV, plain-text reads,
+  images, email parsing and downscaling), and readers report what they actually loaded
+  after each call. A call never gets an idle reader holding the other family: with 1
+  reader, that reader is stopped **before** the call and the call gets a fresh one, so
+  there is never more than one reader process. Same family or a family-free call
+  reuses the reader. Backstop: a reader whose RSS after a call is above 75 % of
+  `HANDLER_READER_MAX_RSS_MB` (165 MB at 220) is recycled. Not half the cap, as first
+  planned: a reader that just read a PDF holds about 160 MB and one that read a docx
+  about 150 MB, so half would recycle after every PDF and docx read. Logged per read:
+  `family`, `reader_replaced` ("family") and `reader_recycled` ("tasks" or "rss").
+  Measured (amd64, 1 reader, cap 220, defaults), none refused:
+
+  | Sequence | Reader peaks (MB) | What happened |
+  | --- | --- | --- |
+  | PDF (30 p), docx | 164, 148 | docx: reader replaced (family), 1.32 s |
+  | docx, PDF, xlsx | 148, 164, 184 | PDF: replaced (family), 0.55 s; xlsx reused the PDF reader, which was then recycled (rss, 184 > 165) |
+  | PDF, xlsx, PDF | 164, 184, 164 | xlsx reused the reader, then recycled (rss); the second PDF started a fresh reader, 0.51 s |
+  | PDF, PDF, docx, docx, PDF | 164, 160, 148, 148, 164 | warm PDF 26 ms; switch to docx 1.33 s; warm docx 1 ms; switch back to PDF 0.51 s |
+  | xlsx, docx | 73, 150 | same reader throughout (xlsx is family-free) |
+
+  A switch costs one fresh reader's start and import: about 0.5 s for PyMuPDF and
+  0.9–1.3 s for MarkItDown, against 26 ms / 1 ms warm. An xlsx read in a reader that
+  already holds PyMuPDF adds openpyxl on top (184 MB for 5,000 rows), so a very large
+  workbook read right after a PDF has less headroom than in a fresh reader.
 - **1 GB dyno:** 2 readers at 300 MB (measured busy tree 584 RSS / 516 PSS), or 3 at
   220 MB, stay under about 900 MB with room for the main process.
 - A read still waiting for a slot, or still running, after 5 seconds is logged every
