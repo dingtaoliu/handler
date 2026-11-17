@@ -16,10 +16,11 @@ tenant, carries on.
   options), never file bytes, and gets the parsed result back. A result over
   `max_result_mb` is refused in the child.
 - Memory: the thread waiting on a child samples its RSS every 200 ms and
-  kills it over `max_rss_mb` ("too large to read"). RLIMIT_AS (Linux only;
-  macOS doesn't enforce it) stays as a loose backstop at `memory_mb`; hitting
-  it raises MemoryError in the child or kills it. Either way the call fails
-  and the child is replaced.
+  kills it over `max_rss_mb` ("too large to read"); the child is replaced.
+  RLIMIT_AS (`memory_mb`, Linux only; macOS doesn't enforce it) is off by
+  default: a reader that has loaded PyMuPDF and MarkItDown reserves well over
+  1 GB of address space, so a limit tight enough to matter crashes ordinary
+  reads. Set it only as a loose backstop.
 - A child is recycled after `max_tasks` calls and stopped after
   `idle_seconds` unused, so a heap a large parse left behind is given back.
 - Fairness is applied only at admission; a running read is never stopped for
@@ -78,10 +79,10 @@ class ReaderFailed(ReadError):
 
 @dataclass(frozen=True)
 class PoolSettings:
-    size: int = 2
+    size: int = 1
     timeout_seconds: float = 120.0
-    max_rss_mb: int = 300  # a child over this RSS is killed; 0 turns it off
-    memory_mb: int = 2048  # RLIMIT_AS per child, Linux only, a backstop; 0 turns it off
+    max_rss_mb: int = 220  # a child over this RSS is killed; 0 turns it off
+    memory_mb: int = 0  # RLIMIT_AS per child (Linux only), off: see multi-instance.md
     max_tasks: int = 50
     max_result_mb: int = 64
     idle_seconds: float = 60.0

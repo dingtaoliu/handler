@@ -7,9 +7,10 @@ slot, or still running, is logged every SLOW_READ_SECONDS; each finished read
 logs its child's memory.
 
 Settings (environment, read by the host at startup):
-- HANDLER_DOC_READ_MAX_CONCURRENT: reader processes (default 2)
+- HANDLER_DOC_READ_MAX_CONCURRENT: reader processes (default 1, for a 512 MB dyno)
 - HANDLER_READER_TIMEOUT_SECONDS: a call running longer is killed (default 120)
-- HANDLER_READER_MEMORY_MB: RLIMIT_AS per child, Linux only, 0 = off (default 1536)
+- HANDLER_READER_MAX_RSS_MB: a reader over this RSS is killed (default 220, 0 = off)
+- HANDLER_READER_MEMORY_MB: RLIMIT_AS per child, Linux only (default 0 = off)
 - HANDLER_READER_MAX_TASKS: calls before a child is replaced (default 50)
 - HANDLER_READER_MAX_RESULT_MB: the largest result a child returns (default 64)
 - HANDLER_READER_IDLE_SECONDS: an unused child stops after this (default 60)
@@ -36,7 +37,7 @@ logger = logging.getLogger("handler.runtime.documents")
 
 T = TypeVar("T")
 READ_LIMIT_ENV = "HANDLER_DOC_READ_MAX_CONCURRENT"
-DEFAULT_READ_LIMIT = 2
+DEFAULT_READ_LIMIT = 1  # the 512 MB dyno's memory budget; see multi-instance.md
 SLOW_READ_SECONDS = 5.0  # log a read still waiting for a slot, or still running, after this
 _SETTINGS_ENV = {
     "timeout_seconds": ("HANDLER_READER_TIMEOUT_SECONDS", float),

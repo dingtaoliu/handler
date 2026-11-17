@@ -117,32 +117,53 @@ count. Also mark steps 0 and 1 as released in `role-split-design.md`.
 
 ### Release 2: the reader pool (step 4)
 
-**Not ready at handover.** Review found three problems, and a follow-up was in progress
-on `feat/shared-runtime-readers`:
+**Follow-up done (November 17) on `feat/shared-runtime-readers`; release needs the
+owner's call on the memory budget below.** The three review problems:
 
-1. **Idle memory.** The fork server preloads the parsing libraries and holds about 190 MB
-   with no reads, on a 512 MB dyno that already has R14 errors. Fix: no preload, or start
-   it lazily and stop it when idle, so the idle cost is near zero.
-2. **Fair sharing kills running reads.** It frees a slot for a waiting tenant by killing
-   another tenant's running read, so a long PDF could be killed repeatedly. Fix: fairness
-   at admission only; running reads finish.
-3. **The memory cap doesn't cap.** `RLIMIT_AS` at 1,536 MB limits address space, which
-   starts near 800 MB per child, so it cannot keep a child below the dyno's memory. Fix:
-   an RSS watchdog that kills a child over `HANDLER_READER_MAX_RSS_MB` (default 300).
+1. **Idle memory: fixed.** The fork server preloads only the reader modules, and it and
+   the resource tracker stop with the last idle reader. Measured 60 s after the last
+   read: 157 MB for the whole tree (the main process alone), against 395 MB before.
+2. **Fair sharing no longer kills reads.** Fairness applies at admission only: fewest
+   slots held, oldest call first; while another tenant waits, a tenant at
+   ceil(slots / active tenants) can't start another read.
+3. **Memory cap: an RSS watchdog.** The thread waiting on each reader samples its RSS
+   every 200 ms and kills it over `HANDLER_READER_MAX_RSS_MB`; the call fails with
+   "… is too large to read" and the reader is replaced. `RLIMIT_AS` is now **off** by
+   default (`HANDLER_READER_MEMORY_MB=0`): at 2,048 MB it already crashed an ordinary
+   large-PDF read, because PyMuPDF and MarkItDown reserve so much address space.
 
-**A memory budget for the whole process tree.** A per-child cap alone is not enough:
-on a 512 MB dyno, the main process (about 140 MB idle, more during runs) plus two readers
-at 300 MB each cannot fit. Choose reader count and cap so that the main process's peak
-plus every reader at its cap plus the fork server stays under about 450 MB. On the Basic
-dyno that probably means 1 reader, or a cap near 150 MB, or a larger dyno. That choice is
-the owner's; bring the measurements.
+**Measured whole-tree memory** (amd64 container from the release image, Python 3.12,
+SQLite, fake model key; RSS in MB; details in
+[multi-instance.md](multi-instance.md#memory-budget-measured-november-17-amd64-linux-python-312-release-image)):
+
+| | Before (preload, 2 readers, no RSS cap) | Now, defaults (1 reader, cap 220) |
+| --- | --- | --- |
+| Idle, before any read | 154 | 154 |
+| 60 s after the last read | 395 | 157 |
+| Every reader busy (400-page PDF + 60,000-row xlsx) | 779 RSS / 503 PSS; PDF reader crashed | 440 RSS / 400 PSS; PDF refused "too large to read", xlsx read |
+| First read, cold: PDF / xlsx | 2.7 s / about 2.3 s | about 1.2 s / 1.1 s |
+
+**The main finding:** PDF text conversion through MarkItDown (pdfminer) is what uses
+memory. With no cap, one reader reached 244 MB for a 2-page PDF, 597 MB for 30 pages,
+1.57 GB for 100 and **6 GB** for 400 pages; before this pool that ran inside the main
+process, which fits the R14 errors. PyMuPDF's text extraction of the same files added
+nothing measurable (0.3 s for 100 pages). xlsx peaked at 73 MB, HTML at 152 MB.
+
+**Recommendation and defaults:** on the 512 MB Basic dyno, 1 reader with a 220 MB cap
+(`HANDLER_DOC_READ_MAX_CONCURRENT=1`, `HANDLER_READER_MAX_RSS_MB=220`, now the
+defaults): main (about 155 idle) + fork server 45 + tracker 26 + reader 220 is about
+450 MB. With that cap, PDF **text** previews (downloads, email attachments, bounded
+tasks) fail "too large to read" even for small PDFs; chat `read_file` on a PDF uploads
+the file and parses nothing, so it is unaffected. Next step, for the owner to approve:
+extract PDF text with PyMuPDF instead of MarkItDown (a small change in
+`documents/pdf.py`; the output format changes from MarkItDown's to page text). On a
+1 GB dyno, 2 readers at 300 MB (busy tree measured 584 RSS / 516 PSS) or 3 at 220 MB
+fit.
 
 **Before release 2:**
 
-1. **Finish the follow-up.** Check `git status` and
-   `git log --oneline c9cae4e..feat/shared-runtime-readers` in the reader worktree. Only
-   `documents/pool.py` had uncommitted edits at handover. Once the owner says who finishes
-   it, complete all three points and commit.
+1. **Follow-up: done** (see above). The owner decides the memory budget (defaults: 1
+   reader, 220 MB) and whether PDF text moves to PyMuPDF before release.
 2. **Merge into the integration branch.** Merge `feat/shared-runtime-readers` into
    `feat/shared-runtime`. Then run the full suite, and the pool tests in a Linux container.
 3. **Measure on amd64 Linux.** Run in a Docker container built from the release image
@@ -157,10 +178,13 @@ the owner's; bring the measurements.
 
    Compare idle RSS with v62's (about 140 MB at idle locally). Stop and report to the
    owner if the idle cost is materially higher.
+   *Done November 17* (numbers above) with the branch's `src` mounted over the v62
+   image's dependencies, and an in-process read rather than a chat run; repeat the idle
+   and busy checks on the real release build.
 4. **Merge to `main`, then release** as in Release 1 (backup, clean worktree, amd64
    build). All new env vars are optional, with defaults listed in
-   [multi-instance.md](multi-instance.md); `HANDLER_DOC_READ_MAX_CONCURRENT` is unchanged
-   at 2.
+   [multi-instance.md](multi-instance.md). `HANDLER_DOC_READ_MAX_CONCURRENT` now
+   defaults to **1** (was 2), and `HANDLER_READER_MAX_RSS_MB` to 220.
 5. **Verify.** Run Release 1's checks again. Then read a real PDF through one tenant's
    chat. Look for `run memory` logs with `run_peak_rss_mb` and `reader_peak_rss_mb`.
    Watch `heroku logs` for R14 over the following days, and compare with the period
