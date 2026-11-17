@@ -18,8 +18,9 @@ CONVERTED_SUFFIXES = {".docx", ".pptx", ".html", ".htm", ".xhtml", ".epub",
                       ".msg", ".ipynb", ".rss", ".atom"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif", ".bmp",
                   ".tif", ".tiff"}
-MARKITDOWN_SUFFIXES = CONVERTED_SUFFIXES | text.CONVERTED_TEXT_SUFFIXES | {".pdf", ".zip"}
-DOCUMENT_SUFFIXES = SPREADSHEET_SUFFIXES | MARKITDOWN_SUFFIXES | {".txt", ".md"}
+# PDFs are read with PyMuPDF (pdf.py), never MarkItDown.
+MARKITDOWN_SUFFIXES = CONVERTED_SUFFIXES | text.CONVERTED_TEXT_SUFFIXES | {".zip"}
+DOCUMENT_SUFFIXES = SPREADSHEET_SUFFIXES | MARKITDOWN_SUFFIXES | {".pdf", ".txt", ".md"}
 UNSUPPORTED = {".doc": "legacy Word .doc", ".ppt": "legacy PowerPoint .ppt"}
 
 
