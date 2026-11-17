@@ -52,6 +52,9 @@ class FakeStore:
             )
         return True
 
+    async def event_by_idempotency_key(self, key):
+        return next((e for e, _ in self.events.values() if e.idempotency_key == key), None)
+
     async def list_threads(self, owner_user_id=None, limit=100, types=None,
                            exclude_types=None):
         return [t for t in self.threads.values()
@@ -140,6 +143,16 @@ async def test_chat_defaults_and_duplicate(client):
                "client_message_id": "same"}
     assert (await client.post("/api/chat", json=payload)).json()["duplicate"] is False
     assert (await client.post("/api/chat", json=payload)).json()["duplicate"] is True
+
+
+async def test_a_duplicate_without_a_conversation_reports_the_original_thread(client, store):
+    first = (await client.post("/api/chat", json={"text": "a", "client_message_id": "m"})).json()
+    again = (await client.post("/api/chat", json={"text": "a", "client_message_id": "m"})).json()
+    assert again["duplicate"] is True
+    assert {k: again[k] for k in ("event_id", "thread_key", "conversation_id")} == {
+        k: first[k] for k in ("event_id", "thread_key", "conversation_id")}
+    assert first["thread_key"] == f"chat:u1:{first['conversation_id']}"
+    assert len(store.threads) == 1  # no thread was made for the resend
 
 
 async def test_listing_endpoints(client, store):

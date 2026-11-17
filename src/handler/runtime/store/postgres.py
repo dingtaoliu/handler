@@ -570,6 +570,11 @@ class PostgresCore(PostgresUsage):
                 "ORDER BY received_at DESC, seq DESC LIMIT %s", (*params, limit))
             return [(_record(Event, row), row["status"]) for row in await cursor.fetchall()]
 
+    async def event_by_idempotency_key(self, key: str) -> Event | None:
+        found = await self._list(
+            Event, f"SELECT {_columns(Event)} FROM events WHERE idempotency_key = %s", (key,))
+        return found[0] if found else None
+
     async def pending_events(self, thread_key: str) -> list[Event]:
         return await self._list(
             Event, f"SELECT {_columns(Event)} FROM events WHERE thread_key = %s "

@@ -292,6 +292,10 @@ class SQLiteCore(SQLiteUsage):
         await self._fenced(lease, write)
         return renewed
 
+    async def event_by_idempotency_key(self, key: str) -> Event | None:
+        found = await self._list(Event, "SELECT * FROM events WHERE idempotency_key = ?", (key,))
+        return found[0] if found else None
+
     async def pending_events(self, thread_key: str) -> list[Event]:
         return await self._list(
             Event, "SELECT * FROM events WHERE thread_key = ? AND status = 'routed' "

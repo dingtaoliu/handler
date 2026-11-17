@@ -71,6 +71,10 @@ class EventQueue(Protocol):
         """Routed events on the thread not yet consumed by a run, oldest first."""
         ...
 
+    async def event_by_idempotency_key(self, key: str) -> Event | None:
+        """The stored event with this idempotency key, whatever its status."""
+        ...
+
     async def complete(self, lease: Lease, run_id: str, event_ids: list[str]) -> bool:
         """Mark events consumed by run_id and release the lease.
 
