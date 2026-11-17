@@ -65,7 +65,7 @@ sender → contact@crontal.ai → Cloudflare Email Worker ─┬─ message.forw
   - `message.eml` (the raw bytes);
   - `body.txt`;
   - `attachments/<name>`;
-  - `extracted/<name>.md`, a markitdown text version of PDFs and Office files (the
+  - `extracted/<name>.md`, a text version of PDFs (PyMuPDF page text) and Office files (MarkItDown; the
     converter `crontal_api` uses for downloads). Extraction is capped at 15 MB per
     file, 20 s each and 60 s per email.
 

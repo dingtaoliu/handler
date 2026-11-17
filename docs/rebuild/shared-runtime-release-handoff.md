@@ -152,18 +152,34 @@ nothing measurable (0.3 s for 100 pages). xlsx peaked at 73 MB, HTML at 152 MB.
 **Recommendation and defaults:** on the 512 MB Basic dyno, 1 reader with a 220 MB cap
 (`HANDLER_DOC_READ_MAX_CONCURRENT=1`, `HANDLER_READER_MAX_RSS_MB=220`, now the
 defaults): main (about 155 idle) + fork server 45 + tracker 26 + reader 220 is about
-450 MB. With that cap, PDF **text** previews (downloads, email attachments, bounded
-tasks) fail "too large to read" even for small PDFs; chat `read_file` on a PDF uploads
-the file and parses nothing, so it is unaffected. Next step, for the owner to approve:
-extract PDF text with PyMuPDF instead of MarkItDown (a small change in
-`documents/pdf.py`; the output format changes from MarkItDown's to page text). On a
+450 MB. With MarkItDown, PDF **text** previews (downloads, email attachments, bounded
+tasks) failed "too large to read" at that cap even for small PDFs; chat `read_file` on
+a PDF uploads the file and parses nothing, so it was unaffected. Fixed: PDF text now
+comes from PyMuPDF (see below). On a
 1 GB dyno, 2 readers at 300 MB (busy tree measured 584 RSS / 516 PSS) or 3 at 220 MB
 fit.
+
+**PDF text moved to PyMuPDF (owner approved; done November 17 on
+`feat/shared-runtime`).** `documents/pdf.py` extracts whole-document PDF text
+(`read_file`/`handler-read` without `pages`, download and attachment previews, bounded
+tasks) with PyMuPDF, page by page; MarkItDown is no longer used or imported for PDFs
+(other formats keep it). **The output changed:** from MarkItDown's text (lines
+separated by blank lines, no page markers) to PyMuPDF page text, one
+`--- page N of M ---` block per page, the format `pages=` reads already used. Paging is
+unchanged (`offset`, `max_chars`, "Call read_file with offset=…"), from the cached page
+text. Scan detection and page images are unchanged. Measured through the pool at the
+220 MB cap (amd64, v62 image's dependencies, branch `src` mounted): 2-, 30-, 100- and
+400-page PDFs all read at a 164 MB reader peak, 0.5–1.0 s in a fresh reader; none
+refused (the old path refused even 2 pages at about 223 MB). Table and the remaining
+limit (a reader that loads both PyMuPDF and MarkItDown, e.g. a PDF then a docx, goes
+over 220 MB and that call is refused once) in
+[multi-instance.md](multi-instance.md#memory-budget-measured-november-17-amd64-linux-python-312-release-image).
 
 **Before release 2:**
 
 1. **Follow-up: done** (see above). The owner decides the memory budget (defaults: 1
-   reader, 220 MB) and whether PDF text moves to PyMuPDF before release.
+   reader, 220 MB). PDF text moved to PyMuPDF (done, above); decide whether to fix the
+   PyMuPDF + MarkItDown reader limit before release.
 2. **Merge into the integration branch.** Merge `feat/shared-runtime-readers` into
    `feat/shared-runtime`. Then run the full suite, and the pool tests in a Linux container.
 3. **Measure on amd64 Linux.** Run in a Docker container built from the release image

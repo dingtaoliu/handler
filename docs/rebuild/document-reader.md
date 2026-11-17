@@ -15,7 +15,7 @@ The native tool continues to enforce workspace confinement before calling it.
 | `text.py` | Plain/source text decoding; existing JSON/JSONL/XML conversion |
 | `converted.py` | Word, PowerPoint, HTML, EPUB, Outlook messages, notebooks, feeds |
 | `spreadsheets.py` | Excel/CSV/TSV, content detection, sheets and A1-range tables |
-| `pdf.py` | Text extraction, page selection, scan detection and visual-page strategy |
+| `pdf.py` | PyMuPDF text extraction (page blocks, also for whole documents; never MarkItDown), page selection, scan detection and visual-page strategy |
 | `images.py` | Vision input, format conversion, orientation and resizing |
 | `archives.py` | Existing ZIP member conversion through MarkItDown |
 

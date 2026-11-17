@@ -150,15 +150,40 @@ minutes. Reader peaks per file with no cap: xlsx (60,000 rows) 73 MB; HTML (5,00
 paragraphs) 152 MB; PDF text through MarkItDown (pdfminer) 244 MB for 2 pages, 311 MB
 for 10, 597 MB for 30, 1.57 GB for 100. PyMuPDF's own text extraction of the same
 100- and 400-page PDFs added nothing measurable to its 155 MB import (0.3 s and 1.1 s).
-A reader that has imported PyMuPDF alone is about 145 MB; with MarkItDown, about 200 MB.
+A reader that has imported PyMuPDF alone is about 145 MB; with MarkItDown, about 200 MB
+(226–257 MB with both, measured later; see below).
 
 - **512 MB Basic dyno:** 1 reader with a 220 MB cap keeps main (about 155 idle, more in
-  runs) + fork server 45 + tracker 26 + reader 220 near 450 MB. The cost: PDF text
-  conversion through MarkItDown needs more than 220 MB even for a 2-page PDF, so PDF
-  text previews (downloads, email attachments, bounded tasks) fail with
-  "too large to read" until PDF text extraction moves to PyMuPDF. `read_file` on a PDF
-  uploads the file to the model and parses nothing, so chat reading of PDFs is
-  unaffected; xlsx, CSV, Word, HTML and images fit.
+  runs) + fork server 45 + tracker 26 + reader 220 near 450 MB. PDF text comes from
+  PyMuPDF (below), so it fits; xlsx, CSV, Word, HTML and images fit too.
+- **PDF text is PyMuPDF, not MarkItDown (since November 17).** MarkItDown's PDF
+  conversion (pdfminer) needed more than 220 MB even for a 2-page PDF (measured again
+  under the cap: every 2- and 30-page read refused at about 223 MB). `documents/pdf.py`
+  now extracts all PDF text with PyMuPDF, page by page, as `--- page N of M ---` blocks
+  (the format `pages=` reads already used); MarkItDown is never imported for a PDF.
+  Whole-document reads cache the page text (`cache.py`) and page it by `offset` as
+  before; previews and bounded tasks stop extracting at `max_chars`. Measured through
+  the pool at the 220 MB cap, a fresh reader per call (`HANDLER_READER_MAX_TASKS=1`),
+  generated text PDFs of about 3,400 characters a page:
+
+  | PDF | Reader peak | `read_file` (offset 0) | Next page (`offset=`) | Preview (`to_text`, 2M chars) | Bounded task (50,001 chars) |
+  | --- | --- | --- | --- | --- | --- |
+  | 2 pages | 164 MB | 0.95 s (cold pool) | — | 0.48 s | 0.47 s |
+  | 30 pages | 164 MB | 0.53 s | 0.50 s | 0.53 s | 0.51 s |
+  | 100 pages | 164 MB | 0.63 s | 0.50 s | 0.64 s | 0.51 s |
+  | 400 pages (1.36 M chars) | 164 MB | 1.02 s | 0.50 s | 1.03 s | 0.52 s |
+
+  None was refused. The peak is PyMuPDF's import, flat with document size; about 0.5 s
+  of each call is a fresh reader's start. In a reused reader the same reads take 8 ms
+  (2 pages) to 0.57 s (400 pages), and a continuation 25–33 ms from the cache. In fresh
+  readers an xlsx (5,000 rows) peaked at 74 MB and a docx (300 paragraphs) at 148 MB.
+- **Known limit: PyMuPDF and MarkItDown in one reader exceed 220 MB.** A reader that
+  has read a PDF and then reads a docx (or the reverse: docx, then PDF) peaks at
+  226–257 MB on the imports alone, and that second read is refused "too large to
+  read"; the reader is replaced and the next call succeeds. Before this change the
+  PDF read itself failed, so the sequence didn't arise. xlsx then docx (150 MB) is fine.
+  Options: recycle a reader after a call that leaves it above about half the cap, or
+  keep separate readers for PDF and MarkItDown formats.
 - **1 GB dyno:** 2 readers at 300 MB (measured busy tree 584 RSS / 516 PSS), or 3 at
   220 MB, stay under about 900 MB with room for the main process.
 - A read still waiting for a slot, or still running, after 5 seconds is logged every
