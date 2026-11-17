@@ -20,10 +20,12 @@ this code.
 | `HANDLER_TENANT_BOOT_GRACE_SECONDS` | 120 | When the second boot sweep runs |
 | `HANDLER_GLOBAL_MAX_RUNS` | 6 | Runs at once, whole process |
 | `HANDLER_PLAN_RUN_CAPS` | `free:1,paid:3` | Runs at once per tenant, by plan. An unknown plan gets the lowest |
-| `HANDLER_RUN_MAX_WAIT_SECONDS` | 60 | After this a waiting free tenant ranks with paid ones |
+| `HANDLER_RUN_MAX_WAIT_SECONDS` | 60 | After this a waiting free tenant ranks with paid ones, and waiting background work goes ahead of chats (once; its wait then restarts) |
 | `HANDLER_ALLOWED_HARNESSES` | all | Harnesses the host may run, comma-separated; production sets `openai_agents`. Never in a tenant's environment. A tenant whose `HANDLER_DEFAULT_HARNESS` is outside it is refused (see HANDOFF §3) |
 
-A tenant's `limits.max_runs` overrides its plan cap. Each tenant's own
+When slots are contended, the gate admits interactive work (chat) before background
+work (automations, email, Crontal events) across all tenants; then paid before free;
+then the tenant with fewer runs; then the longest wait. A tenant's `limits.max_runs` overrides its plan cap. Each tenant's own
 `HANDLER_MAX_CONCURRENT` and lane capacities still apply beneath these. The three
 run-gate settings apply with the registry off too: env-defined instances share the same
 host gate, each counted as `paid` with no `max_runs` override.

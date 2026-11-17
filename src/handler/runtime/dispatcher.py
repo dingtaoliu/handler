@@ -44,7 +44,7 @@ class Dispatcher:
         self.idle_poll_seconds = idle_poll_seconds
         self.gate = gate
         self.gate_tenant = gate_tenant
-        self._queued_at_gate = False
+        self._queued_at_gate: set[Lane] = set()
         self.owner = owner or f"{socket.gethostname()}:{os.getpid()}:{new_id('w')}"
         self._active: dict[Lane, set[asyncio.Task[None]]] = {lane: set() for lane in self.capacity}
         self._slot_freed = asyncio.Event()
@@ -59,7 +59,7 @@ class Dispatcher:
         # store must still wake the next wait, or the work waits for the idle poll.
         self._slot_freed.clear()
         started = 0
-        self._queued_at_gate = False
+        self._queued_at_gate = set()
         for lane, cap in self.capacity.items():
             free = cap - len(self._active[lane])
             if self.max_concurrent is not None:
@@ -83,18 +83,23 @@ class Dispatcher:
                 self._active[lane].add(task)
                 task.add_done_callback(lambda t, lane=lane: self._on_done(lane, t))
                 started += 1
-        if self.gate is not None and not self._queued_at_gate:
-            self.gate.dequeue(self.gate_tenant)  # no lane is waiting any more
+        if self.gate is not None:
+            for lane in self.capacity:
+                if lane not in self._queued_at_gate:
+                    self.gate.dequeue(self.gate_tenant, lane)  # this lane isn't waiting any more
         return started
 
     async def _reserve(self, lane: Lane, want: int) -> int:
-        """Slots from the process-wide gate; if none, queue for one when work is waiting."""
-        granted = self.gate.reserve(self.gate_tenant, want)
+        """Slots from the process-wide gate; if none, queue for one when work is waiting.
+
+        The lane goes to the gate, which ranks interactive work before background
+        work across every tenant."""
+        granted = self.gate.reserve(self.gate_tenant, want, lane)
         if granted or not await self.store.has_claimable(lane):
             return granted
-        self._queued_at_gate = True
-        self.gate.enqueue(self.gate_tenant, self._slot_freed)
-        return self.gate.reserve(self.gate_tenant, want)  # a slot may have freed meanwhile
+        self._queued_at_gate.add(lane)
+        self.gate.enqueue(self.gate_tenant, self._slot_freed, lane)
+        return self.gate.reserve(self.gate_tenant, want, lane)  # a slot may have freed meanwhile
 
     async def _execute(self, lease) -> None:
         try:
