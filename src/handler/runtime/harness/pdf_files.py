@@ -16,6 +16,38 @@ from ..documents.pdf import prepare_upload
 
 logger = logging.getLogger(__name__)
 
+# File types the Responses API accepts as an input file, matched on the name's
+# extension, which it compares case-sensitively: "Bill.PDF" is refused with a 400
+# ("Expected context stuffing file type to be a supported format") on the model
+# call that carries the file, failing the whole run.
+INPUT_FILE_SUFFIXES = frozenset({
+    ".art", ".bat", ".brf", ".c", ".cls", ".css", ".csv", ".diff", ".doc", ".docx",
+    ".dot", ".eml", ".es", ".h", ".hs", ".htm", ".html", ".hwp", ".hwpx", ".ics",
+    ".ifb", ".java", ".js", ".json", ".keynote", ".ksh", ".ltx", ".mail", ".markdown",
+    ".md", ".mht", ".mhtml", ".mjs", ".nws", ".odt", ".pages", ".patch", ".pdf", ".pl",
+    ".pm", ".pot", ".ppa", ".pps", ".ppt", ".pptx", ".pwz", ".py", ".rst", ".rtf",
+    ".scala", ".sh", ".shtml", ".srt", ".sty", ".svg", ".svgz", ".tex", ".text", ".tsv",
+    ".txt", ".vcf", ".vtt", ".wiz", ".xla", ".xlb", ".xlc", ".xlm", ".xls", ".xlsx",
+    ".xlt", ".xlw", ".xml", ".yaml", ".yml",
+})
+
+
+def input_file_name(name: str, *, pdf: bool = False) -> str | None:
+    """The name to upload a file under: its extension lowercased.
+
+    `pdf`: the bytes are a PDF, so the name always ends in ".pdf" (a selected-pages
+    copy, or a PDF saved without the extension). None when the type is not one
+    the API accepts as an input file; the caller must not send it as one.
+    """
+    stem, dot, suffix = name.rpartition(".")
+    if not dot or not stem.strip():
+        stem, suffix = name, ""
+    stem = stem.strip() or "document"
+    ext = "." + suffix.lower() if suffix else ""
+    if pdf:
+        return stem + ".pdf" if ext in ("", ".pdf") else f"{stem}{ext}.pdf"
+    return stem + ext if ext in INPUT_FILE_SUFFIXES else None
+
 
 class PDFFiles:
     def __init__(self, client: openai.AsyncOpenAI, home: Path | None = None):
@@ -39,15 +71,20 @@ class PDFFiles:
         # here the bytes are hashed in chunks and loaded only to upload them.
         pdf = await capped_read("pdf_upload", prepare_upload, path, display=display,
                                 pages=pages, scratch=reader_pool().scratch_dir())
+        name = input_file_name(path.name, pdf=True)
+        assert name is not None  # always, for a PDF
         try:
             scope = f"{self.client.base_url}|{self.client.api_key}|{self.client.organization}|{self.client.project}"
-            key = await asyncio.to_thread(_digest, scope, pdf.path)
+            # The upload name is part of the key: a file stored before names were
+            # normalised (e.g. "Bill.PDF", which the API refuses as input) is not
+            # reused; the PDF is simply uploaded again under its accepted name.
+            key = await asyncio.to_thread(_digest, scope, pdf.path, name)
             async with self.lock:
                 file_id = self.references.get(key)
                 if not file_id:
                     data = await asyncio.to_thread(pdf.path.read_bytes)
                     uploaded = await self.client.files.create(
-                        file=(path.name, data, "application/pdf"), purpose="user_data")
+                        file=(name, data, "application/pdf"), purpose="user_data")
                     del data
                     file_id = uploaded.id
                     self.references[key] = file_id
@@ -70,9 +107,9 @@ class PDFFiles:
             logger.warning("Could not save PDF file-reference cache", exc_info=True)
 
 
-def _digest(scope: str, path: Path) -> str:
-    """sha256(scope, NUL, file bytes), read in chunks."""
-    digest = hashlib.sha256(scope.encode() + b"\0")
+def _digest(scope: str, path: Path, name: str) -> str:
+    """sha256(scope, NUL, upload name, NUL, file bytes), read in chunks."""
+    digest = hashlib.sha256(scope.encode() + b"\0" + name.encode() + b"\0")
     with path.open("rb") as f:
         while chunk := f.read(1024 * 1024):
             digest.update(chunk)

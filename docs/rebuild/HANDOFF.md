@@ -1,5 +1,25 @@
 # Handoff: handler rebuild
 
+## 2026-11-21 production run failures (Release 1 line, `feat/shared-runtime-r1`)
+
+- **Uppercase `.PDF` attachments killed runs.** Native `read_file` uploaded a PDF under its
+  own name (`Bill Of Lading - SHAJ81315.PDF`); the Responses API matches input-file types
+  on the lowercase extension and refused the next model call with a non-retryable 400
+  ("Expected context stuffing file type to be a supported format"): 9+ BSS mail threads.
+  Fixed in `harness/pdf_files.py`: uploads are named `<stem>.pdf` (`input_file_name`), and
+  the upload name is in the cache key, so references cached under an old name are
+  re-uploaded. That is the only place Handler sends an input file; chat `{"type": "file"}`
+  blocks are transcript-only (the model reads attachments from the workspace). Threads
+  that already failed need a replay to run again.
+- **Transient provider errors were final.** A plain `openai.APIError` ("Our servers are
+  currently overloaded. Please try again later.", status-less, from a stream) killed two mail
+  threads on their first attempt. `harness/openai_agents.py` `_error` now also retries
+  429/408/409/5xx status errors, status-less errors whose code or message says
+  overload/unavailable, the 400 "Another process is currently operating on this
+  conversation" (waits at least `CONVERSATION_BUSY_RETRY_SECONDS` = 30 s, via the new
+  `HarnessError.retry_after`), and `ModelBehaviorError` "did not produce a final response"
+  (at most 2 attempts, via `HarnessError.max_attempts`). Other 400s stay final.
+
 ## 2026-11-14 prompt-cache release (Handler v62)
 
 - **Handler v62** (`7c7fde2`, image `2d47da22e2c1`, 2,151,625,279 bytes), on top of the

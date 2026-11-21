@@ -12,6 +12,7 @@ from agents import ItemHelpers
 from agents.tool_context import ToolContext
 
 from handler.runtime.harness.openai_agents import workspace_tools
+from handler.runtime.harness.pdf_files import input_file_name
 
 
 def client():
@@ -113,3 +114,68 @@ async def test_upload_failure_can_retry_without_image_fallback(tmp_path):
     api.files.create.side_effect = None
     result = await read(tools, path="quote.pdf")
     assert ItemHelpers._convert_tool_output(result)[1]["type"] == "input_file"
+
+
+@pytest.mark.parametrize("name", ["Bill Of Lading - SHAJ81315.PDF", "Bill Of Lading - SHAJ81315.Pdf",
+                                  "Bill Of Lading - SHAJ81315.pdf"])
+async def test_uppercase_pdf_extension_is_uploaded_as_lowercase_pdf(tmp_path, name):
+    folder = tmp_path / "mail" / "attachments"
+    folder.mkdir(parents=True)
+    pdf(folder / name, count=3)
+    api = client()
+    tools = workspace_tools(tmp_path, client=api)
+    result = await read(tools, path=f"mail/attachments/{name}")
+    assert ItemHelpers._convert_tool_output(result)[1]["type"] == "input_file"
+    assert api.files.create.call_args.kwargs["file"][0] == "Bill Of Lading - SHAJ81315.pdf"
+    # The model is still told the file's real workspace path.
+    assert f"mail/attachments/{name}" in result[0].text
+
+
+async def test_selected_pages_copy_gets_a_lowercase_pdf_name(tmp_path):
+    pdf(tmp_path / "Quote.PDF")
+    api = client()
+    await read(workspace_tools(tmp_path, client=api), path="Quote.PDF", pages="2-3")
+    assert api.files.create.call_args.kwargs["file"][0] == "Quote.pdf"
+
+
+async def test_cached_upload_under_an_old_name_is_uploaded_again(tmp_path):
+    """References cached before names were normalised (keyed on the bytes only)
+    are not reused, so a file stored as "X.PDF" is replaced by an "X.pdf" upload."""
+    import hashlib
+
+    path = tmp_path / "X.PDF"
+    pdf(path, count=1)
+    api = client()
+    home = tmp_path / "home"
+    home.mkdir()
+    scope = f"{api.base_url}|{api.api_key}|{api.organization}|{api.project}"
+    old_key = hashlib.sha256(scope.encode() + b"\0" + path.read_bytes()).hexdigest()
+    (home / "openai-pdf-files.json").write_text(json.dumps({old_key: "file-old"}))
+    result = await read(workspace_tools(tmp_path, client=api, home=home), path="X.PDF")
+    assert ItemHelpers._convert_tool_output(result)[1]["file_id"] == "file-test"
+    assert api.files.create.call_args.kwargs["file"][0] == "X.pdf"
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("a.PDF", "a.pdf"), ("a.pdf", "a.pdf"), ("noext", "noext.pdf"), ("a.bin", "a.bin.pdf"),
+    ("x.y.Pdf", "x.y.pdf")])
+def test_pdf_upload_names(name, expected):
+    assert input_file_name(name, pdf=True) == expected
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("Notes.TXT", "Notes.txt"), ("sheet.XLSX", "sheet.xlsx"), ("data.Csv", "data.csv"),
+    ("tool.exe", None), ("archive.ZIP", None), ("noext", None)])
+def test_other_input_file_names_lowercase_or_refuse(name, expected):
+    assert input_file_name(name) == expected
+
+
+async def test_unsupported_extension_is_read_locally_never_uploaded(tmp_path):
+    (tmp_path / "notes.LOG").write_text("pump order 42 confirmed")
+    (tmp_path / "blob.XYZ").write_bytes(b"\x00\x01\x02")
+    api = client()
+    tools = workspace_tools(tmp_path, client=api)
+    assert "pump order 42" in await read(tools, path="notes.LOG")
+    result = await read(tools, path="blob.XYZ")
+    assert isinstance(result, str)  # text or a tool error, never a failed run
+    api.files.create.assert_not_awaited()

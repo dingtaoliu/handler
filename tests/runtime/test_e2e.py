@@ -199,6 +199,32 @@ async def test_retryable_failure_backs_off_then_is_accepted(env):
     assert (await store.list_runs("chat:u1:c1"))[0].status is RunStatus.COMPLETED
 
 
+async def test_retry_waits_at_least_the_errors_retry_after(env):
+    from datetime import timedelta
+
+    from handler.runtime.types import utcnow
+
+    store, _, harness, dispatcher = env  # configured backoff is 0s
+    harness.fail_with = HarnessError("conversation busy", retryable=True, retry_after=30.0)
+    await store.put(*chat("hi"))
+    before = utcnow()
+    await drain(dispatcher)
+    thread = await store.get_thread("chat:u1:c1")
+    assert thread.attempts == 1 and len(await store.pending_events("chat:u1:c1")) == 1
+    assert thread.available_at is not None
+    assert thread.available_at >= before + timedelta(seconds=29)
+
+
+async def test_an_errors_attempt_limit_caps_the_runs(env):
+    store, _, harness, dispatcher = env  # the run allows 2 attempts
+    harness.fail_with = HarnessError("no final response", retryable=True, max_attempts=1)
+    await store.put(*chat("hi"))
+    await drain(dispatcher)
+    thread = await store.get_thread("chat:u1:c1")
+    assert thread.attempts == 0 and "no final response" in thread.last_error
+    assert await store.pending_events("chat:u1:c1") == []  # accepted, not retried
+
+
 async def test_unknown_harness_fails_without_retry(env):
     store, _, _, dispatcher = env
     ev, spec = chat("hi")

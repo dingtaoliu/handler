@@ -247,6 +247,54 @@ async def test_rate_limits_are_retryable(tmp_path, runner):
     assert events[-1].kind is RunEventKind.ERROR and events[-1].data["retryable"] is True
 
 
+def _plain_api_error(message: str, body: object | None = None) -> openai.APIError:
+    """A status-less APIError, as the SDK raises for an error event in a stream."""
+    return openai.APIError(message, httpx.Request("POST", "https://api.openai.com"), body=body)
+
+
+_BUSY = ("Another process is currently operating on this conversation. "
+         "Please retry in a few seconds.")
+
+
+@pytest.mark.parametrize("exc,retry_after,max_attempts", [
+    (_plain_api_error("Our servers are currently overloaded. Please try again later."),
+     None, None),
+    (_plain_api_error("An error occurred", body={"code": "server_error"}), None, None),
+    (_api_error(openai.APIStatusError, "Service Unavailable", 503), None, None),
+    (_api_error(openai.APIStatusError, "Too many requests", 429), None, None),
+    (_api_error(openai.InternalServerError, "boom", 500), None, None),
+    (_api_error(openai.BadRequestError, _BUSY, 400), oa.CONVERSATION_BUSY_RETRY_SECONDS, None),
+    (oa.ModelBehaviorError("Model did not produce a final response!"), None, 2),
+])
+def test_transient_provider_errors_are_retryable(exc, retry_after, max_attempts):
+    error = oa._error(exc, None)
+    assert error.retryable
+    assert error.retry_after == retry_after and error.max_attempts == max_attempts
+
+
+@pytest.mark.parametrize("exc", [
+    _api_error(openai.BadRequestError, "Invalid input: Expected context stuffing file type "
+               "to be a supported format: .art, .bat", 400),
+    # A bad-input 400 stays final even if its text happens to say "try again later".
+    _api_error(openai.BadRequestError, "Invalid value; fix the request and try again later", 400),
+    _api_error(openai.AuthenticationError, "Incorrect API key", 401),
+    _api_error(openai.PermissionDeniedError, "Country not supported", 403),
+    _plain_api_error("Invalid tool schema"),
+    oa.ModelBehaviorError("Tool not_a_tool not found in agent"),
+])
+def test_genuine_errors_stay_final(exc):
+    assert not oa._error(exc, None).retryable
+
+
+async def test_streamed_overload_fails_the_run_as_retryable(tmp_path, runner):
+    runner.state["next"] = FakeStream([], error=_plain_api_error(
+        "Our servers are currently overloaded. Please try again later."))
+    harness = oa.OpenAIAgentsHarness("k", client=FakeClient())
+    with pytest.raises(HarnessError) as info:
+        await _collect(harness, _req(tmp_path))
+    assert info.value.retryable
+
+
 async def test_missing_conversation_triggers_session_recovery(tmp_path, runner):
     runner.state["next"] = FakeStream(
         [], error=_api_error(openai.NotFoundError, "Conversation with id conv_9 not found", 404))
