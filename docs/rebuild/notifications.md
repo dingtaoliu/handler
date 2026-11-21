@@ -40,8 +40,9 @@ Automatic slow retries of dead rows are future work (role-split-design.md).
 ## Failed runs
 
 Owner decision (November 21): a failure never blocks a thread, and users and
-tenant admins get no failure notices. A person can send the message again; an
-automation runs on its next trigger. Failure signals go to the site owner only.
+tenant admins get no failure notices. A person can retry their failed chat
+message once (see "User retry" below) or send it again; an automation runs on its
+next trigger. Failure signals go to the site owner only.
 
 A run that fails with no retry left, or with an error that is never retried (a
 harness this host does not allow, an unknown harness), is **accepted**:
@@ -62,7 +63,8 @@ harness this host does not allow, an unknown harness), is **accepted**:
   `run failed, will retry` instead.
 - Chat shows the error inline as before: the stream's `run_finished` event has
   `status: failed` and the error, and Handler's conversation view shows
-  "Run failed (send your message again to retry): …".
+  "Run failed (send your message again to retry): …". Crontal's chat panel
+  shows a red failure icon with Retry instead (below).
 
 Operator tools (admin only):
 
@@ -75,6 +77,65 @@ Operator tools (admin only):
 - CLI: `handler-rt run failed [--limit N]`, `handler-rt run replay <run_id>`.
   `handler-rt thread revive <key>` still clears a thread's attempts and backoff.
 - Web UI: a Failed runs table with Replay on Activity, for admins.
+
+### User retry
+
+`POST /api/runs/{run_id}/retry` (no body) re-runs a failed chat message for the
+person chatting. It does what replay does, so it is not a new message: the same
+events run again, the user message is not saved twice, and nothing is counted
+against the plan's monthly inputs (inputs are counted only when `put` stores a
+new event, `_charge_input` in `store/postgres.py`; replay and retry only clear
+`consumed_by_run` on events already stored). Replay and retry share one flag
+(`run_failures.replayed_at`; a retry records `replayed_by = "retry:<user>"`), so
+a failed run is re-run at most once, by either.
+
+Allowed for a principal acting as user U (a user token, or the admin key with
+`X-Handler-User: U`) when all hold:
+
+- the run has a `run_failures` row not yet replayed or retried;
+- its thread is a `chat` thread owned by U (`chat:<U>:…`);
+- it is the thread's latest run, and nothing else is queued or running on the
+  thread (checked in the same transaction as the re-queue, so a retry can't run
+  out of order with a newer message).
+
+Responses:
+
+| Status | When | Body |
+|---|---|---|
+| 202 | Re-queued | `{"run_id", "thread_key", "status": "queued"}` |
+| 400 | Admin key without `X-Handler-User` | `detail` |
+| 404 | Unknown run, or a chat thread that isn't U's (an admin user too) | `{"detail": "run not found"}` |
+| 409 | Not a terminal failure | `{"detail": "run is not a terminal failure"}` |
+| 409 | Already retried or replayed | `{"detail": "run was already replayed or retried"}` |
+| 409 | Not the latest run, or newer work queued or running | `{"detail": "run is not the latest on its thread"}` |
+| 409 | Not a chat thread | `{"detail": "only chat runs can be retried"}` |
+
+Shared (non-chat) threads get 409, not 404: every member can already see them
+and their runs, so the answer confirms nothing; the operator re-runs those with
+replay. On success the thread's stream gets `event_queued` (as a new chat
+message does) with `data: {"event_id", "event_ids", "retry_of": <run_id>}`, then
+`thread_updated`; then the usual `run_started` … `run_finished` of the new run.
+Admin replay publishes the same two events.
+
+What the client reads to show and enable Retry:
+
+- **Live**, `run_finished` on the thread's stream: `run_id`, `data.status ==
+  "failed"`, `data.error`, `data.retryable` (true only for an accepted failure on
+  a chat thread with nothing else queued; false while `data.retry_in` is set,
+  because the runtime retries by itself) and `data.event_ids` (the events the
+  run took).
+- **On load**, `GET /api/threads/{key}/runs` (newest first): every run has
+  `retryable`; at most one is true, the latest, when it is `status: "failed"`,
+  has an unused failure and nothing else is queued. `trigger_event_ids` are its
+  events.
+- **Which message**: in `GET /api/threads/{key}/messages`, the failed run's user
+  message is the `role: "user"` message whose `raw.event_id` is in the run's
+  `trigger_event_ids` (`data.event_ids` on the stream). Match on the event id,
+  not `run_id`: after an automatic retry the message is saved under the first
+  attempt's run.
+- Show the icon and Retry on that message when `retryable` is true; on 202, or
+  on any `event_queued` or `run_started` for the thread, hide Retry and show
+  progress. A 409 means the run can't be retried any more: reload the runs.
 
 Threads parked by releases before this one (`threads.dead`) are swept at each
 runtime start, before any work is claimed: `dead` is cleared, their queued

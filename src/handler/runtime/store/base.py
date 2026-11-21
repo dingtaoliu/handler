@@ -179,9 +179,12 @@ class Store(EventQueue, Protocol):
 
     async def get_run_failure(self, run_id: str) -> dict | None: ...
 
-    async def replay_failed_run(self, run_id: str, *, by: str | None = None) -> dict | None:
+    async def replay_failed_run(self, run_id: str, *, by: str | None = None,
+                                latest_only: bool = False) -> dict | None:
         """Make a terminal failure's events pending again, once. None if unknown;
-        `replayed` is False when it was already replayed."""
+        `replayed` is False when it did not, with `reason` "already_replayed",
+        or "not_latest" when `latest_only` and the run is not its thread's newest
+        or other work is queued or running there (checked in the same transaction)."""
         ...
 
     async def get_run(self, run_id: str) -> Run | None: ...

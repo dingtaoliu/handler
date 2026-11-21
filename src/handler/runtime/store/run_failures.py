@@ -5,7 +5,8 @@ accepted: its events are marked consumed by the failed run, so they never run
 again by themselves, and the thread stays claimable for new work. One
 `run_failures` row records it: the error, the attempts it got and the events it
 took. `replay_failed_run` (in each store's core) makes those events pending
-again, once. Nothing here notifies anyone; the operator's signal is the
+again, once: the operator's replay and the chat owner's retry share the one
+`replayed_at` flag (`replayed_by` says who; a retry records "retry:<user>"). Nothing here notifies anyone; the operator's signal is the
 `run failed` ERROR log line (run.py `log_run_failed`).
 
 Threads parked by older releases (`threads.dead`) are swept at startup
@@ -22,6 +23,11 @@ from typing import Any
 FAILED_BEFORE_UPGRADE = "failed-before-upgrade"
 # events.consumed_by_run for a terminal failure recorded without a run id.
 FAILED_MARKER = "failed"
+# replay_failed_run's `reason` when it did not replay: the failure was replayed
+# (or retried) before; or, with latest_only, the run is not the thread's newest
+# or the thread has other work queued or running.
+ALREADY_REPLAYED = "already_replayed"
+NOT_LATEST = "not_latest"
 
 
 def _date(value: Any) -> datetime | None:
