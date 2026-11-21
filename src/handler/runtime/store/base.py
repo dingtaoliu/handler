@@ -77,13 +77,19 @@ class EventQueue(Protocol):
         ...
 
     async def fail(
-        self, lease: Lease, error: str, retry_in_seconds: float | None
+        self, lease: Lease, error: str, retry_in_seconds: float | None, *,
+        run_id: str = "", event_ids: Sequence[str] | None = None,
     ) -> bool:
-        """Release the lease after a failed run.
+        """Release the lease after a failed run. Fenced on lease.version.
 
-        attempts += 1, last_error = error. If retry_in_seconds is None the
-        thread is marked dead; otherwise available_at = now + retry_in_seconds.
-        Events stay unconsumed. Fenced on lease.version.
+        With retry_in_seconds: attempts += 1, last_error = error, available_at =
+        now + retry_in_seconds, and the events stay unconsumed for the retry.
+        With None (no retry left, or never retryable) the failure is accepted:
+        `event_ids` (default: every unconsumed event) are marked consumed by
+        `run_id`, so they never run again by themselves; attempts and backoff
+        reset, last_error is kept, and the thread stays claimable (pending only
+        if other events are queued). A run_id also records a run_failures row
+        (failed_runs / replay_failed_run). Never marks the thread dead.
         """
         ...
 
@@ -161,12 +167,21 @@ class Store(EventQueue, Protocol):
         """
         ...
 
-    async def parked_threads(self, *, limit: int = 100) -> list[dict]:
-        """Parked (dead) threads with error, attempts and queued event count."""
+    async def sweep_dead_threads(self) -> list[dict]:
+        """Clear `dead` on threads an older release parked; their queued events
+        are consumed by FAILED_BEFORE_UPGRADE and recorded for replay. Idempotent."""
         ...
 
-    async def take_park_notice(self, thread_key: str) -> bool:
-        """True once per parking when new work arrives on a parked thread."""
+    async def failed_runs(self, *, limit: int = 50,
+                          before: tuple[datetime, str] | None = None) -> list[dict]:
+        """Terminal failures (run_failures rows), newest first."""
+        ...
+
+    async def get_run_failure(self, run_id: str) -> dict | None: ...
+
+    async def replay_failed_run(self, run_id: str, *, by: str | None = None) -> dict | None:
+        """Make a terminal failure's events pending again, once. None if unknown;
+        `replayed` is False when it was already replayed."""
         ...
 
     async def get_run(self, run_id: str) -> Run | None: ...

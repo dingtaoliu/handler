@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from .usage import SQLiteUsage
-from .tasks import announce_parked, announce_routed
+from .run_failures import FAILED_BEFORE_UPGRADE, FAILED_MARKER, RunFailures, failure_row
+from .tasks import announce_routed
 from ..types import (
     ABANDONED_ERROR,
     Event,
@@ -113,7 +114,6 @@ ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("memory_topics", "updated_thread_key", "TEXT"),
     ("threads", "context_links", "TEXT"),
     ("threads", "context_hash", "TEXT"),
-    ("threads", "park_noticed", "INTEGER NOT NULL DEFAULT 0"),
 ]
 # Indexes on added columns, created once the columns exist.
 ADDED_INDEXES = [
@@ -214,19 +214,15 @@ class SQLiteCore(SQLiteUsage):
                     return False
                 if thread is not None:
                     now = _timestamp(self._clock())
-                    # A new chat message revives a dead thread: the person is asking again.
-                    revive = event.type == "chat.message"
                     db.execute(
                         "INSERT INTO threads "
                         "(key, type, lane, owner_user_id, harness, model, priority, "
                         "created_at, pending_since) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                         "ON CONFLICT(key) DO UPDATE SET "
-                        "pending_since = COALESCE(threads.pending_since, excluded.pending_since), "
-                        "dead = CASE WHEN ? THEN 0 ELSE threads.dead END, "
-                        "attempts = CASE WHEN ? THEN 0 ELSE threads.attempts END",
+                        "pending_since = COALESCE(threads.pending_since, excluded.pending_since)",
                         (thread.key, thread.type.value, thread.lane.value,
                          thread.owner_user_id, thread.harness, thread.model,
-                         thread.priority, now, now, revive, revive),
+                         thread.priority, now, now),
                     )
                 return True
 
@@ -234,7 +230,6 @@ class SQLiteCore(SQLiteUsage):
         if inserted:
             self._wake.set()
             announce_routed(self, event, thread)
-            await announce_parked(self, event, thread)
         return inserted
 
     async def claim(
@@ -311,19 +306,17 @@ class SQLiteCore(SQLiteUsage):
         return completed
 
     async def fail(
-        self, lease: Lease, error: str, retry_in_seconds: float | None
+        self, lease: Lease, error: str, retry_in_seconds: float | None, *,
+        run_id: str = "", event_ids: Sequence[str] | None = None,
     ) -> bool:
         def write(db: sqlite3.Connection) -> bool:
-            available_at = (
-                _timestamp(self._clock() + timedelta(seconds=retry_in_seconds))
-                if retry_in_seconds is not None else None
-            )
+            if retry_in_seconds is None:
+                self._fail_terminal(db, lease.thread_key, error, run_id, event_ids)
+                return True
             db.execute(
                 "UPDATE threads SET attempts = attempts + 1, last_error = ?, "
-                "dead = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, "
-                "park_noticed = CASE WHEN ? THEN 0 ELSE park_noticed END "
-                "WHERE key = ?",
-                (error, retry_in_seconds is None, available_at, retry_in_seconds is None,
+                "available_at = ?, lease_owner = NULL, lease_until = NULL WHERE key = ?",
+                (error, _timestamp(self._clock() + timedelta(seconds=retry_in_seconds)),
                  lease.thread_key),
             )
             return True
@@ -332,6 +325,113 @@ class SQLiteCore(SQLiteUsage):
         if failed:
             self._wake.set()
         return failed
+
+    def _fail_terminal(self, db: sqlite3.Connection, key: str, error: str, run_id: str,
+                       event_ids: Sequence[str] | None) -> None:
+        """Accept the failure: consume its events, record it, leave the thread claimable."""
+        thread = db.execute("SELECT type, attempts FROM threads WHERE key = ?", (key,)).fetchone()
+        marker = run_id or FAILED_MARKER
+        scope, params = "", ()
+        if event_ids is not None:
+            scope = f"AND id IN ({','.join('?' for _ in event_ids) or 'NULL'}) "
+            params = tuple(event_ids)
+        taken = {row["id"] for row in db.execute(
+            "UPDATE events SET consumed_by_run = ? WHERE thread_key = ? AND status = 'routed' "
+            f"AND consumed_by_run IS NULL {scope}RETURNING id", (marker, key, *params))}
+        pending = db.execute(
+            "SELECT 1 FROM events WHERE thread_key = ? AND status = 'routed' "
+            "AND consumed_by_run IS NULL LIMIT 1", (key,)).fetchone()
+        # attempts and backoff reset; last_error stays for debugging until a run succeeds.
+        db.execute(
+            "UPDATE threads SET pending_since = CASE WHEN ? THEN pending_since ELSE NULL END, "
+            "attempts = 0, last_error = ?, dead = 0, available_at = NULL, "
+            "lease_owner = NULL, lease_until = NULL WHERE key = ?", (bool(pending), error, key))
+        if run_id:
+            ordered = [i for i in (event_ids or []) if i in taken] + sorted(
+                taken - set(event_ids or []))
+            db.execute(
+                "INSERT INTO run_failures (run_id, thread_key, thread_type, error, attempts, "
+                "event_ids, consumed_by, failed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (run_id) DO NOTHING",
+                (run_id, key, thread["type"], error[:2000], thread["attempts"] + 1,
+                 json.dumps(ordered), marker, _timestamp(self._clock())))
+
+    async def sweep_dead_threads(self) -> list[dict]:
+        """Clear `dead` on threads an older release parked; idempotent.
+
+        See PostgresCore.sweep_dead_threads.
+        """
+        def write(db: sqlite3.Connection) -> list[dict]:
+            swept: list[dict] = []
+            with _transaction(db):
+                for thread in db.execute(
+                        "SELECT key, type, attempts, last_error FROM threads WHERE dead "
+                        "ORDER BY key").fetchall():
+                    key = thread["key"]
+                    event_ids = [r["id"] for r in db.execute(
+                        "SELECT id FROM events WHERE thread_key = ? AND status = 'routed' "
+                        "AND consumed_by_run IS NULL ORDER BY received_at, rowid", (key,))]
+                    db.execute(
+                        "UPDATE events SET consumed_by_run = ? WHERE thread_key = ? "
+                        "AND status = 'routed' AND consumed_by_run IS NULL",
+                        (FAILED_BEFORE_UPGRADE, key))
+                    run = db.execute(
+                        "SELECT id, finished_at FROM runs WHERE thread_key = ? "
+                        "ORDER BY started_at DESC, rowid DESC LIMIT 1", (key,)).fetchone()
+                    db.execute(
+                        "UPDATE threads SET dead = 0, attempts = 0, available_at = NULL, "
+                        "pending_since = NULL WHERE key = ?", (key,))
+                    failed_at = (run and run["finished_at"]) or _timestamp(self._clock())
+                    row = {"run_id": run["id"] if run else f"{FAILED_BEFORE_UPGRADE}:{key}",
+                           "thread_key": key, "thread_type": thread["type"],
+                           "error": thread["last_error"], "attempts": thread["attempts"],
+                           "event_ids": event_ids, "consumed_by": FAILED_BEFORE_UPGRADE,
+                           "failed_at": datetime.fromisoformat(failed_at)}
+                    db.execute(
+                        "INSERT INTO run_failures (run_id, thread_key, thread_type, error, "
+                        "attempts, event_ids, consumed_by, failed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (run_id) DO NOTHING",
+                        (row["run_id"], key, row["thread_type"], (row["error"] or "")[:2000],
+                         row["attempts"], json.dumps(event_ids), FAILED_BEFORE_UPGRADE,
+                         failed_at))
+                    swept.append(row)
+            return swept
+
+        return await self._call(write)
+
+    async def replay_failed_run(self, run_id: str, *, by: str | None = None) -> dict | None:
+        """Make a terminal failure's events pending again on its thread, once.
+
+        See PostgresCore.replay_failed_run.
+        """
+        def write(db: sqlite3.Connection) -> dict | None:
+            with _transaction(db):
+                row = db.execute(
+                    "UPDATE run_failures SET replayed_at = ?, replayed_by = ? "
+                    "WHERE run_id = ? AND replayed_at IS NULL RETURNING *",
+                    (_timestamp(self._clock()), by, run_id)).fetchone()
+                if row is None:
+                    existing = db.execute("SELECT * FROM run_failures WHERE run_id = ?",
+                                          (run_id,)).fetchone()
+                    return None if existing is None else {**failure_row(existing),
+                                                          "replayed": False, "requeued": 0}
+                row = failure_row(row)
+                ids = row["event_ids"]
+                requeued = len(db.execute(
+                    "UPDATE events SET consumed_by_run = NULL WHERE thread_key = ? "
+                    f"AND id IN ({','.join('?' for _ in ids) or 'NULL'}) "
+                    "AND consumed_by_run = ? RETURNING id",
+                    (row["thread_key"], *ids, row["consumed_by"])).fetchall())
+                if requeued:
+                    db.execute(
+                        "UPDATE threads SET pending_since = COALESCE(pending_since, ?), "
+                        "dead = 0 WHERE key = ?", (_timestamp(self._clock()), row["thread_key"]))
+                return {**row, "replayed": True, "requeued": requeued}
+
+        result = await self._call(write)
+        if result and result["requeued"]:
+            self._wake.set()
+        return result
 
     async def wait_for_work(self, timeout: float) -> None:
         if self._wake.is_set():
@@ -583,7 +683,7 @@ from .thread_metadata import SQLiteThreadMetadata  # noqa: E402
 
 
 class SQLiteStore(
-    TaskOutcomeStore, TaskQueries, SQLiteThreadMetadata, SQLiteDeliveries, ScheduleMixin, ApprovalMixin,
+    TaskOutcomeStore, TaskQueries, RunFailures, SQLiteThreadMetadata, SQLiteDeliveries, ScheduleMixin, ApprovalMixin,
     QuestionMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, SQLiteCore,

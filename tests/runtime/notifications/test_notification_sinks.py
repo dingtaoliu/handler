@@ -1,5 +1,5 @@
-"""Notifications → domain events → outbox → sinks (Crontal push), and
-automatic notifications for background runs that die."""
+"""Notifications → domain events → outbox → sinks (Crontal push); failed runs and
+dead deliveries notify nobody, only the operator's log alert."""
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +19,7 @@ from handler.runtime.integrations.crontal.sink import (
     CrontalNotificationSink,
     crontal_sink_from_config,
 )
-from handler.runtime.notifications import FailureNotifier, Notifier
+from handler.runtime.notifications import Notifier
 from handler.runtime.observability.pricing import PriceTable
 from handler.runtime.run import RunConfig, RunExecutor
 from handler.runtime.sinks import (
@@ -32,7 +32,7 @@ from handler.runtime.sinks import (
 from handler.runtime.store.deliveries import DEAD, DELIVERED, PENDING
 from handler.runtime.store.sqlite import SQLiteStore
 from handler.runtime.store.sqlite_users import User
-from handler.runtime.types import Event, Lane, ThreadSpec, ThreadType
+from handler.runtime.types import Event, Lane, RunStatus, ThreadSpec, ThreadType
 from handler.runtime.web.ingest import verify
 
 
@@ -190,10 +190,15 @@ class FailingHarness:
 
     def __init__(self, retryable: bool = False) -> None:
         self.retryable = retryable
+        self.fail = True
+        self.prompts: list[str] = []
 
     async def run(self, req):
+        self.prompts.append(req.prompt)
         yield RunEvent(RunEventKind.SESSION, {"session_id": "s"})
-        raise HarnessError("model exploded", retryable=self.retryable)
+        if self.fail:
+            raise HarnessError("model exploded", retryable=self.retryable)
+        yield RunEvent(RunEventKind.FINAL, {"text": "done"})
 
     async def interrupt(self, run_id):
         pass
@@ -218,28 +223,27 @@ class FailingSink:
         self.payloads.append(payload)
 
 
-async def _failure_env(store, tmp_path: Path, *, retryable=False, cooldown=3600.0):
+async def _failure_env(store, tmp_path: Path, *, retryable=False):
     await store.create_user(User("owner", "Owner"))
     await store.create_user(User("boss", "Boss", role="admin"))
-    await store.create_user(User("gone", "Gone", role="admin", disabled=True))
-    await store.create_user(User("member", "Member"))
     bus, sink = RunEventBus(), FakeSink()
     notifier = Notifier(store, bus, outbox=Outbox(store, [sink]), users_provider=lambda: [])
     prices = tmp_path / "prices.yaml"
     prices.write_text("prices: []\n")
+    harness = FailingHarness(retryable)
     executor = RunExecutor(
-        store, {"fake": FailingHarness(retryable)}, bus,
+        store, {"fake": harness}, bus,
         RunConfig(data_dir=tmp_path / "data", heartbeat_seconds=0.05, lease_seconds=5,
                   retry_backoff_seconds=(0.0,), max_attempts=2),
-        PriceTable.from_yaml(prices),
-        failure_notifier=FailureNotifier(notifier, cooldown_seconds=cooldown))
-    return Dispatcher(store, executor, lease_seconds=5), notifier, sink
+        PriceTable.from_yaml(prices))
+    return Dispatcher(store, executor, lease_seconds=5), notifier, harness
 
 
-async def _put(store, key, thread_type, idem):
+async def _put(store, key, thread_type, idem, event_type="automation.fired"):
     lane = Lane.INTERACTIVE if thread_type is ThreadType.CHAT else Lane.BACKGROUND
+    payload = {"text": idem} if event_type == "chat.message" else {"name": "Daily digest"}
     await store.put(
-        Event(type="automation.fired", source="test", payload={"name": "Daily digest"},
+        Event(type=event_type, source="test", payload=payload,
               idempotency_key=idem, thread_key=key, user_id="owner"),
         ThreadSpec(key=key, type=thread_type, lane=lane, owner_user_id="owner", harness="fake"))
 
@@ -250,114 +254,89 @@ async def _drain(dispatcher):
         await asyncio.sleep(0.01)
 
 
-async def test_dead_background_run_notifies_owner_and_admins_once(store, tmp_path):
-    dispatcher, notifier, sink = await _failure_env(store, tmp_path)
-    await _put(store, "automation:daily", ThreadType.AUTOMATION, "e1")
-    await _drain(dispatcher)
-    assert [n.user_id for n in await store.list_notifications("owner")] == ["owner"]
-    (boss,) = await store.list_notifications("boss")
-    assert not await store.list_notifications("gone")
-    assert not await store.list_notifications("member")
-    assert "automation:daily" in boss.message and "model exploded" in boss.message
-    assert "Daily digest" in boss.message and boss.message.startswith("Automation thread parked")
-    await notifier.outbox.deliver_once()
-    (payload,) = sink.payloads
-    assert payload["data"]["recipients"] == ["owner", "boss"]
-    assert payload["data"]["thread_type"] == "automation"
-    # Another event on the same thread dies too: deduped within the cooldown.
-    await _put(store, "automation:daily", ThreadType.AUTOMATION, "e2")
-    await _drain(dispatcher)
-    assert len(await store.list_notifications("boss")) == 1
+async def _no_notices(store):
+    for user in ("owner", "boss"):
+        assert not await store.list_notifications(user)
+    assert await store.list_deliveries() == []
 
 
-async def test_retries_do_not_notify_until_dead(store, tmp_path):
-    dispatcher, _, _ = await _failure_env(store, tmp_path, retryable=True, cooldown=0)
-    await _put(store, "crontal:rfq:1", ThreadType.CRONTAL, "e1")
-    await _drain(dispatcher)  # attempt 1 of 2: retry scheduled
-    assert not await store.list_notifications("boss")
-    await _drain(dispatcher)  # attempt 2: dead
-    assert len(await store.list_notifications("boss")) == 1
-
-
-async def test_parked_chat_sends_no_notice(store, tmp_path):
+@pytest.mark.parametrize("key,thread_type", [("automation:daily", ThreadType.AUTOMATION),
+                                             ("chat:owner:c1", ThreadType.CHAT)])
+async def test_terminal_failure_notifies_nobody_and_logs_one_alert(store, tmp_path, caplog,
+                                                                   key, thread_type):
     dispatcher, _, _ = await _failure_env(store, tmp_path)
-    await _put(store, "chat:owner:c1", ThreadType.CHAT, "e1")
-    await _drain(dispatcher)
-    assert (await store.get_thread("chat:owner:c1")).dead
-    # The speaker sees the error in the chat and retries by writing again.
-    assert not await store.list_notifications("boss")
-    assert not await store.list_notifications("owner")
-
-
-async def test_parking_emits_one_operator_alert(store, tmp_path, caplog):
-    dispatcher, _, _ = await _failure_env(store, tmp_path)
-    await _put(store, "automation:daily", ThreadType.AUTOMATION, "e1")
-    with caplog.at_level("ERROR", logger="handler.runtime.run"):
+    await _put(store, key, thread_type, "e1")
+    with caplog.at_level("WARNING", logger="handler.runtime.run"):
         await _drain(dispatcher)
-    (alert,) = [r for r in caplog.records if r.message == "thread parked"]
-    assert alert.levelname == "ERROR" and alert.thread_key == "automation:daily"
-    assert alert.tenant == "main" and alert.thread_type == "automation"
-    assert "model exploded" in alert.error and alert.attempts == 1
+    await _no_notices(store)
+    (alert,) = [r for r in caplog.records if r.message == "run failed"]
+    (run,) = await store.list_runs(key)
+    (event,) = [e for e, _ in await store.list_events()]
+    assert alert.levelname == "ERROR" and alert.tenant == "main"
+    assert alert.thread_key == key and alert.thread_type == str(thread_type)
+    assert alert.run_id == run.id and alert.attempts == 1
+    assert "model exploded" in alert.error and alert.event_ids == [event.id]
+    thread = await store.get_thread(key)
+    assert not thread.dead and thread.pending_since is None and thread.attempts == 0
+    assert "model exploded" in thread.last_error  # kept for debugging
 
 
-async def test_new_event_on_parked_thread_is_queued_with_one_notice(store, tmp_path, caplog):
-    dispatcher, notifier, _ = await _failure_env(store, tmp_path)
-    store.on_parked_event = dispatcher.executor.failure_notifier.event_on_parked
-    await _put(store, "automation:daily", ThreadType.AUTOMATION, "e1")
+async def test_retries_log_a_warning_then_one_alert(store, tmp_path, caplog):
+    dispatcher, _, _ = await _failure_env(store, tmp_path, retryable=True)
+    await _put(store, "crontal:rfq:1", ThreadType.CRONTAL, "e1")
+    with caplog.at_level("WARNING", logger="handler.runtime.run"):
+        await _drain(dispatcher)  # attempt 1 of 2: retry scheduled
+        assert [r.message for r in caplog.records if r.levelname == "ERROR"] == []
+        assert any(r.message == "run failed, will retry" for r in caplog.records)
+        assert (await store.get_thread("crontal:rfq:1")).pending_since is not None
+        await _drain(dispatcher)  # attempt 2: accepted
+    (alert,) = [r for r in caplog.records if r.message == "run failed"]
+    assert alert.attempts == 2
+    await _no_notices(store)
+
+
+async def test_a_failure_never_blocks_the_thread(store, tmp_path):
+    dispatcher, _, harness = await _failure_env(store, tmp_path)
+    await _put(store, "chat:owner:c1", ThreadType.CHAT, "hello", "chat.message")
+    await _put(store, "automation:daily", ThreadType.AUTOMATION, "fire1")
     await _drain(dispatcher)
-    assert len(await store.list_notifications("boss")) == 1  # the park notice
-    for idem in ("e2", "e3", "e4"):  # a burst
-        await _put(store, "automation:daily", ThreadType.AUTOMATION, idem)
     await _drain(dispatcher)
-    pending = await store.pending_events("automation:daily")
-    assert [e.idempotency_key for e in pending] == ["e1", "e2", "e3", "e4"]  # kept, not run
-    notices = await store.list_notifications("boss")
-    assert len(notices) == 2
-    assert sum("waiting on parked thread" in n.message for n in notices) == 1
-    assert len(await store.list_notifications("owner")) == 2
-    (row,) = await store.parked_threads()
-    assert row["thread_key"] == "automation:daily" and row["pending_events"] == 4
-    assert "model exploded" in row["last_error"] and row["attempts"] == 1
-    # Retried and parked again: the next new event gets a notice again.
-    await store.revive_thread("automation:daily")
+    harness.fail = False
+    # The person writes again, and the automation fires again: both run normally,
+    # and only the new event runs (the failed one stays consumed).
+    harness.prompts.clear()
+    await _put(store, "chat:owner:c1", ThreadType.CHAT, "again", "chat.message")
+    await _put(store, "automation:daily", ThreadType.AUTOMATION, "fire2")
     await _drain(dispatcher)
-    assert (await store.get_thread("automation:daily")).dead
-    await _put(store, "automation:daily", ThreadType.AUTOMATION, "e5")
-    assert sum("waiting on parked" in n.message
-               for n in await store.list_notifications("boss")) == 2
-
-
-async def test_chat_message_still_revives_a_parked_thread(store, tmp_path):
-    dispatcher, _, _ = await _failure_env(store, tmp_path)
-    store.on_parked_event = dispatcher.executor.failure_notifier.event_on_parked
-    await _put(store, "chat:owner:c1", ThreadType.CHAT, "e1")
     await _drain(dispatcher)
-    await store.put(Event(type="chat.message", source="test", payload={"text": "again"},
-                          idempotency_key="e2", thread_key="chat:owner:c1", user_id="owner"),
-                    ThreadSpec(key="chat:owner:c1", type=ThreadType.CHAT, lane=Lane.INTERACTIVE,
-                               owner_user_id="owner", harness="fake"))
-    thread = await store.get_thread("chat:owner:c1")
-    assert not thread.dead and thread.attempts == 0
-    assert all("waiting on parked" not in n.message
-               for n in await store.list_notifications("boss"))
+    for key in ("chat:owner:c1", "automation:daily"):
+        latest, failed = await store.list_runs(key)
+        assert latest.status is RunStatus.COMPLETED and failed.status is RunStatus.FAILED
+        (trigger,) = latest.trigger_event_ids
+        assert trigger not in failed.trigger_event_ids
+        thread = await store.get_thread(key)
+        assert thread.last_error is None and thread.pending_since is None
+    assert len(harness.prompts) == 2 and not any("hello" in p for p in harness.prompts)
+    # The failed chat message is still in the conversation record.
+    texts = [b.get("text", "") for m in await store.list_messages("chat:owner:c1")
+             for b in m.blocks]
+    assert any("hello" in t for t in texts) and any("again" in t for t in texts)
+    await _no_notices(store)
 
 
-async def test_dead_delivery_alerts_and_tells_admins_locally_once(store, caplog):
+async def test_dead_delivery_alerts_and_notifies_nobody(store, caplog):
     await store.create_user(User("boss", "Boss", role="admin"))
     sink = FailingSink()
     outbox = Outbox(store, [sink], tenant="bss")
-    local = Notifier(store, RunEventBus(), outbox=outbox, users_provider=lambda: [])
-    outbox.on_dead = FailureNotifier(local).delivery_dead
     for key in ("k1", "k2"):
         await store.enqueue_delivery(sink.name, key, {"n": key})
     with caplog.at_level("ERROR", logger="handler.runtime.sinks"):
         await outbox.deliver_once()
     alerts = [r for r in caplog.records if r.message == "delivery dead"]
     assert len(alerts) == 2 and alerts[0].tenant == "bss" and alerts[0].sink == sink.name
-    (notice,) = await store.list_notifications("boss")  # one per sink per cooldown
-    assert sink.name in notice.message and "redeliver" in notice.message.lower()
-    # Kept in Handler: nothing new queued for the failing sink.
-    assert {d.key for d in await store.list_deliveries()} == {"k1", "k2"}
+    assert not await store.list_notifications("boss")
+    assert {(d.key, d.status) for d in await store.list_deliveries()} == {
+        ("k1", "dead"), ("k2", "dead")}
 
 
 async def test_redeliver_requeues_dead_rows_and_they_deliver(store):

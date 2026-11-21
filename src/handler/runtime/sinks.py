@@ -17,7 +17,6 @@ import contextlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from .types import utcnow
@@ -88,8 +87,6 @@ class Outbox:
                  tenant: str = "") -> None:
         self.store = store
         self.tenant = tenant or "main"
-        # Told (sink, key, error) when a row dead-letters; see FailureNotifier.
-        self.on_dead: Callable[[str, str, str], Awaitable[Any]] | None = None
         self.sinks: dict[str, Sink] = {}
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
@@ -136,14 +133,9 @@ class Outbox:
                 await self.store.delivery_failed(row.sink, row.key, error, retry_in)
                 extra = {"sink": row.sink, "key": row.key, "attempts": attempts, "error": error[:500]}
                 if retry_in is None:
-                    # The stable message is the operator's log-based alert.
+                    # The stable message is the operator's log-based alert; the row
+                    # is kept for redeliver. Nobody else is notified.
                     logger.error("delivery dead", extra={**extra, "tenant": self.tenant})
-                    if self.on_dead is not None:
-                        try:
-                            await self.on_dead(row.sink, row.key, error)
-                        except Exception:
-                            logger.exception("dead delivery notice failed",
-                                             extra={"sink": row.sink, "key": row.key})
                 else:
                     logger.warning("delivery failed, retrying", extra={**extra, "retry_in": retry_in})
                 continue

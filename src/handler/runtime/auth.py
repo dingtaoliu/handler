@@ -162,7 +162,7 @@ def add_cli_commands(subparsers: argparse._SubParsersAction) -> None:
     thread = subparsers.add_parser("thread", help="repair threads")
     actions = thread.add_subparsers(dest="action", required=True)
     revive = actions.add_parser(
-        "revive", help="make a dead thread claimable again (clears dead and attempts)")
+        "revive", help="clear a thread's attempts and backoff so it runs now")
     revive.add_argument("thread_key")
     revive.add_argument("--reset-session", action="store_true",
                         help="drop the harness session: the next turn starts a fresh one "
@@ -170,8 +170,16 @@ def add_cli_commands(subparsers: argparse._SubParsersAction) -> None:
     revive.add_argument("--discard-pending", action="store_true",
                         help="drop the unanswered events instead of running them again")
     storage(revive)
-    parked = actions.add_parser("parked", help="list parked threads (no retry left)")
-    storage(parked)
+
+    run = subparsers.add_parser("run", help="inspect and replay failed runs")
+    actions = run.add_subparsers(dest="action", required=True)
+    failed = actions.add_parser("failed", help="list runs that failed for good, newest first")
+    failed.add_argument("--limit", type=int, default=50)
+    storage(failed)
+    replay = actions.add_parser(
+        "replay", help="run a failed run's events once more on its thread")
+    replay.add_argument("run_id")
+    storage(replay)
 
     delivery = subparsers.add_parser("delivery", help="repair outbox deliveries")
     actions = delivery.add_subparsers(dest="action", required=True)
@@ -199,11 +207,8 @@ def open_store(args: argparse.Namespace):
 async def _run_cli(args: argparse.Namespace, store=None) -> int:
     store = store or open_store(args)
     try:
-        if args.command == "thread" and args.action == "parked":
-            for row in await store.parked_threads(limit=500):
-                print(f"{row['thread_key']}\tattempts={row['attempts']}\t"
-                      f"pending={row['pending_events']}\t{row['last_error'] or ''}")
-            return 0
+        if args.command == "run":
+            return await _run_command(store, args)
         if args.command == "thread":
             return await _revive_thread(store, args)
         if args.command == "delivery":
@@ -248,6 +253,28 @@ async def _revive_thread(store, args: argparse.Namespace) -> int:
           f"attempts {before.attempts} -> {after.attempts}, "
           f"session {before.session_id or '-'} -> {after.session_id or '-'}, "
           f"pending events {pending}, runs marked abandoned {len(swept)}")
+    return 0
+
+
+async def _run_command(store, args: argparse.Namespace) -> int:
+    if args.action == "failed":
+        for row in await store.failed_runs(limit=max(1, min(args.limit, 500))):
+            replayed = f"replayed {row['replayed_at'].isoformat()}" if row["replayed_at"] else "-"
+            print(f"{row['run_id']}\t{row['thread_key']}\t{row['thread_type']}\t"
+                  f"{row['failed_at'].isoformat()}\tattempts={row['attempts']}\t"
+                  f"events={','.join(row['event_ids'])}\t{replayed}\t"
+                  f"{' '.join((row['error'] or '').split())[:200]}")
+        return 0
+    result = await store.replay_failed_run(args.run_id, by="cli")
+    if result is None:
+        print(f"error: {args.run_id} is not a run that failed for good", file=sys.stderr)
+        return 1
+    if not result["replayed"]:
+        print(f"error: {args.run_id} was already replayed at "
+              f"{result['replayed_at'].isoformat()}", file=sys.stderr)
+        return 1
+    print(f"replayed {args.run_id}: {result['requeued']} event(s) pending again on "
+          f"{result['thread_key']}")
     return 0
 
 

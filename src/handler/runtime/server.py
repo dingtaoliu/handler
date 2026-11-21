@@ -55,10 +55,10 @@ from .integrations.registry import (
     route_keys,
 )
 from .memory import MemoryTools
-from .notifications import FailureNotifier, Notifier
+from .notifications import Notifier
 from .observability.logging import configure_json_logging
 from .observability.pricing import PriceTable
-from .run import RunConfig, RunExecutor, thread_slug
+from .run import RunConfig, RunExecutor, log_run_failed, thread_slug
 from .scheduler import Scheduler
 from .settings import (
     ALLOWED_HARNESSES_ENV,
@@ -725,6 +725,12 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         if swept:
             logger.warning("marked runs abandoned at startup",
                            extra={"instance": instance_name or "main", "runs": swept})
+        # Threads an older release parked (threads.dead): open them again, with
+        # their queued work set aside for the operator to replay, not run.
+        for row in await store.sweep_dead_threads():
+            log_run_failed(instance_name, row["thread_key"], row["thread_type"], row["run_id"],
+                           row["attempts"], row["error"], row["event_ids"],
+                           failed_before_upgrade=True)
         bus = RunEventBus()
 
         settings = SettingsService(
@@ -850,14 +856,11 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
 
         settings.harness_defaults = harness_defaults
         workspace_sync = WorkspaceSync(file_store, data_dir)
-        failure_notifier = FailureNotifier(notifier)
-        store.on_parked_event = failure_notifier.event_on_parked
-        outbox.on_dead = failure_notifier.delivery_dead
         executor = RunExecutor(
             store, harnesses, bus, config, PriceTable.from_yaml(),
             tokens=tokens, mcp_url=f"http://{local_host}:{args.port}{base_path}/mcp/",
             settings=settings, memory_tools=memory_tools,
-            workspace_sync=workspace_sync, failure_notifier=failure_notifier,
+            workspace_sync=workspace_sync,
             crontal_identity=crontal_id, crontal_catalog=crontal_catalog,
         )
         dispatcher = Dispatcher(

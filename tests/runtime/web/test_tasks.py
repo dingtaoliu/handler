@@ -156,7 +156,7 @@ async def test_lists_non_chat_tasks_with_derived_status_and_summaries(seeded, cl
     assert "steps" not in email
     assert by_run[seeded["retry"].id]["status"] == "failed"
     assert by_run[seeded["retry"].id]["trigger_summary"] == "Daily digest"
-    assert by_run[seeded["dead"].id]["status"] == "dead"
+    assert by_run[seeded["dead"].id]["status"] == "failed"  # never "dead" any more
     waiting = by_run[seeded["approval"].id]
     assert waiting["status"] == "waiting_approval" and len(waiting["pending_approval_ids"]) == 1
     running = by_run[seeded["running"].id]
