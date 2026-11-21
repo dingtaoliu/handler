@@ -20,10 +20,8 @@ core emits domain events, and integrations plug in sinks that deliver them.
    hourly) and after the last attempt marks the row `dead`. A
    `DeliveryError(retryable=False)` dead-letters at once. Each dead row logs
    one ERROR line, `delivery dead` (fields `tenant`, `sink`, `key`, `attempts`,
-   `error`), for a log-based operator alert, and the instance's admins get a
-   notice in Handler (at most one per sink per hour). That notice is
-   `local_only`: it is never handed to a sink, since the failing sink would
-   only dead-letter it in turn.
+   `error`), for a log-based operator alert. Nobody else is notified: the
+   row is kept for redeliver (below).
 
 A sink implements `name`, `retry`, `accepts(event)` and `async deliver(payload)`.
 The outbox is sink-agnostic; other events (e.g. `task.status_changed`) only
@@ -39,26 +37,55 @@ Dead deliveries (admin only):
 
 Automatic slow retries of dead rows are future work (role-split-design.md).
 
-## Parked threads
+## Failed runs
 
-A thread whose run fails with no retry left is **parked** (`threads.dead`):
+Owner decision (November 21): a failure never blocks a thread, and users and
+tenant admins get no failure notices. A person can send the message again; an
+automation runs on its next trigger. Failure signals go to the site owner only.
 
-- Nothing runs on it until someone retries it. New events are still stored and
-  queued on it; a `chat.message` revives it at once (the person is asking again).
-- When it parks: one ERROR log line `thread parked` (fields `tenant`,
-  `thread_key`, `thread_type`, `run_id`, `attempts`, `error`) for the operator
-  alert. For background threads, a notice to the tenant's admins and the acting
-  user. Chat sends no notice: the speaker sees the error in the chat, and their
-  next message retries it. At most one park notice per thread per hour.
-- The first non-chat event that arrives while it is parked sends one more
-  notice ("waiting on parked thread") to the admins and the thread's owner; a
-  burst sends one (`threads.park_noticed`, cleared when the thread parks again).
-- `GET /api/threads/parked`: error, attempts, queued event count and when it
-  parked, filtered by thread visibility. `POST /api/threads/{key}/retry` (admin)
-  revives it with everything queued. The web UI shows a "parked" badge on the
-  thread and task, a Parked threads table on Activity, and Retry for admins.
-- CLI: `handler-rt thread parked`, `handler-rt thread revive <key>`.
-- No automatic retries yet (owner decision 6).
+A run that fails with no retry left, or with an error that is never retried (a
+harness this host does not allow, an unknown harness), is **accepted**:
+
+- The run stays `failed` with its error, and the user's input messages stay in
+  the conversation record.
+- The events it took are marked consumed by it (`events.consumed_by_run` = the
+  run id), so they never run again by themselves.
+- The thread is not blocked: attempts and backoff reset, `last_error` stays for
+  debugging until a run succeeds, and the thread stays claimable. Events that
+  arrived during the run, and any new one, run normally. `threads.dead` is
+  never set.
+- One `run_failures` row records it (thread, type, error, attempts, event ids,
+  failed time).
+- One ERROR log line `run failed` (fields `tenant`, `thread_key`,
+  `thread_type`, `run_id`, `attempts`, `error`, `event_ids`) for the operator's
+  log-based alert. A failure that will be retried logs the WARNING
+  `run failed, will retry` instead.
+- Chat shows the error inline as before: the stream's `run_finished` event has
+  `status: failed` and the error, and Handler's conversation view shows
+  "Run failed (send your message again to retry): …".
+
+Operator tools (admin only):
+
+- `GET /api/runs/failed?limit=&before=`: terminal failures, newest first, with
+  run id, thread key, type and title, error, attempts, failed time, event ids
+  and whether it was replayed; `next_cursor` pages back.
+- `POST /api/runs/{run_id}/replay`: makes that run's events pending again on
+  its thread, so they run once more. 409 if already replayed or if the run is
+  not a terminal failure; 404 for an unknown run.
+- CLI: `handler-rt run failed [--limit N]`, `handler-rt run replay <run_id>`.
+  `handler-rt thread revive <key>` still clears a thread's attempts and backoff.
+- Web UI: a Failed runs table with Replay on Activity, for admins.
+
+Threads parked by releases before this one (`threads.dead`) are swept at each
+runtime start, before any work is claimed: `dead` is cleared, their queued
+events are consumed by `failed-before-upgrade` so stale work does not suddenly
+run, each gets a `run_failures` row (under the thread's latest run) to replay,
+and each logs one `run failed` line with `failed_before_upgrade: true`. The
+sweep only touches dead threads, so it is idempotent.
+
+Email is never lost to a failure: the events and stored mail stay in the
+database and can be replayed, and the shared host's email spool deletes a
+spooled message only once intake accepted it, never because a run failed.
 
 ## Crontal sink
 
@@ -80,15 +107,6 @@ Crontal-connected: `CRONTAL_URL`, `CRONTAL_AGENT_TOKEN` and
 - Crontal resolves `"all"` to all active users of the instance's merchant and
   drops recipients outside that merchant. It is idempotent on
   (instance, notification id) and never forwards these notifications back.
-
-## Automatic failure notifications
-
-When a background (non-chat) run fails with no retry left (the thread goes
-dead), `FailureNotifier` notifies the thread's acting user plus the instance's
-enabled `admin` users, for example:
-`Automation run failed and will not retry: Daily digest (automation:daily). HarnessError: …`.
-Retries that are still scheduled notify nobody, and each thread notifies at
-most once per hour (in memory; a restart resets the window).
 
 ## Crontal events coming in (`/ingest/crontal`)
 

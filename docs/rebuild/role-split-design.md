@@ -1,6 +1,6 @@
 # Shared host resources: inbox, runner and outbox
 
-Status: **owner decisions settled November 15, 2026; steps 0 and 1 built on
+Status: **owner decisions settled November 15, 2026 (decision 6 revised November 21); steps 0 and 1 built on
 `feat/shared-runtime`** (not deployed; see Build order). First written
 November 14, 2026 as a split into separate processes. Rewritten November 15, 2026 after
 review with the owner, who narrowed the goal to a single host. Follows
@@ -29,16 +29,18 @@ Owner decisions from the November 15 review:
 5. **The three existing instances move to this runtime:** `main`, `bss` and `yeup` run on
    the shared runtime and are imported into the tenant registry, which is switched on
    after build step 3.
-6. **Parked work waits for a person for now.** A parked thread is shown with its error and
-   a Retry action and the operator is alerted. For background threads the tenant's
-   admins are told too; chat sends no notice, since the speaker sees the error and
-   retries by writing again. Automatic
-   retries of parked threads are future work, with exponential backoff.
+6. **A failure never blocks a thread** (revised November 21; first decided November 15
+   as parking). Parking was mainly for the site owner to debug. For users it is fine
+   to accept a failure: a person can send the message again, and an automation runs on
+   its next trigger as usual. A run that fails for good is recorded and its events
+   consumed; the thread keeps working. Users and tenant admins get no failure notices;
+   the site owner gets the `run failed` alert and can list and replay failed runs
+   (notifications.md, "Failed runs").
 7. **A side effect with an unknown outcome is never resent automatically.** The call is
    parked and a person is asked, as with an approval.
 8. **Fairness:** interactive before background across all tenants; paid before free, with
    aging; reader-pool shares mirror the run caps.
-9. **Retention:** parked events, dead deliveries and records of dropped over-limit inputs
+9. **Retention:** failed runs' events, dead deliveries and records of dropped over-limit inputs
    are kept 90 days, then removed by the tenant's normal cleanup.
 
 ## Current state
@@ -172,7 +174,7 @@ instead registers one strategy:
 | Lane | Interactive | Background | Background | Background |
 | Prompt sections | Chat | Checkpoint guidance | Mail handling | Crontal events |
 | Default subscribers | Live connection, push when nobody is connected | Notification, automation dashboard | Notification | Crontal sink |
-| A new event on a parked thread | Retry now | Queue and notify | Queue and notify | Queue and notify |
+| A new event after a failed run | Runs normally | Runs normally (fresh session) | Runs normally | Runs normally |
 
 Integrations register strategies for the thread types they add.
 
@@ -231,19 +233,18 @@ tenant context fails at the store.
 
 ## Durability
 
-Rule: **every unit of work ends either completed or parked**, with a reason, a notice to
-someone and a way to retry. Nothing is deleted except inputs over a free plan's limit,
-which are recorded and never run (multi-tenant owner decision 3).
+Rule: **every unit of work ends completed, or failed and recorded for the operator,
+replayable; a failure never blocks a thread.** Nothing is deleted except inputs over a
+free plan's limit, which are recorded and never run (multi-tenant owner decision 3).
 
 | Stage | Today | Change |
 | --- | --- | --- |
 | Before the inbox commits | Not stored; the sender must resend. Email, mailbox and Crontal events have stable idempotency keys | The Crontal frontend sends a `client_message_id` per chat message, so a resend is not stored twice |
 | Waiting for the runner | Stored, pending until claimed | Unchanged |
 | During a run | A crash lets the lease expire; the thread is claimed again. Retryable errors get 3 attempts with backoff | Unchanged |
-| After the last attempt | The thread is marked `dead`. Its events and inputs are kept, and a failure notice is sent. Only a new chat message or `handler-rt revive` brings it back; new non-chat events queue silently | **Parked**, visible in the UI and admin console with the error and a Retry action. The operator is alerted, and for background threads the tenant's admins are told. The thread strategy decides what a new event does. Automatic retries with exponential backoff are future work |
-| A poison event | One event failing every attempt parks the whole thread | On the last attempt, retry the events one at a time and park only the one that fails |
+| After the last attempt | The thread is marked `dead`. Its events and inputs are kept, and a failure notice is sent. Only a new chat message or `handler-rt revive` brings it back; new non-chat events queue silently | **Accepted.** The run stays failed with its error, its events are consumed by it, and the thread stays claimable, so new events run normally. A `run_failures` row and one `run failed` ERROR line go to the operator, who can replay the run (`POST /api/runs/{run_id}/replay`). Nobody else is notified. Threads left `dead` by older releases are swept at startup |
 | Tool side effects | A retried run repeats calls that changed something outside Handler | Before a tool marked as writing outside Handler runs, store the call under a key from the thread, input events and the call's position. A retry gets the stored result back. A call whose outcome is unknown is parked for a person, never resent |
-| Delivery | 10 attempts over several hours, then `dead` with no way to redeliver | A redeliver action for one row or all, an alert, and a slow final retry before parking |
+| Delivery | 10 attempts over several hours, then `dead` with no way to redeliver | A redeliver action for one row or all, an alert, and a slow final retry before it is marked `dead` |
 | Workspace files | Uploaded every 300 s and at shutdown; a crash loses up to 5 minutes | Flushed when each run ends |
 | Live feed | Replayed from stored steps on reconnect | Unchanged |
 
@@ -283,7 +284,7 @@ or `NOTIFY` is a contained change.
 | Reader child killed or timed out | That tool call returns an error; the run continues or fails on its own terms; other runs are unaffected |
 | Main process crashes or runs out of memory | Everything restarts. Leases expire, runs retry, deliveries resume. Browsers reconnect and replay |
 | A tenant's webhook is down | Its deliveries back off; the pool keeps serving other tenants |
-| A run fails every attempt | The thread is parked and its people are told; a person retries it |
+| A run fails every attempt | The run is recorded as failed and its events consumed; the thread keeps working. The operator is alerted and can replay it |
 | Database unreachable | Ingest returns 503; nothing runs |
 
 ## Build order
@@ -295,7 +296,7 @@ the same database; rollback is flipping it.
 | Step | Work | Done when |
 | --- | --- | --- |
 | 0 | Native-only host setting and registry check. Workspace flush when a run ends. `client_message_id` from the Crontal frontend | Codex cannot be enabled on production; a restart loses no finished run's files |
-| 1 | Parked threads with the Retry action; redeliver for dead deliveries; notices and alerts on both | No work stops without a notice and a way to retry |
+| 1 | Failed runs recorded and replayable, threads never blocked; redeliver for dead deliveries; operator alerts on both | No failure blocks a thread, and every failure reaches the operator with a way to replay |
 | 2 | One timer over `handler_control.due_work`; one housekeeping pass; one bus for the host; cancel as a stored flag | No per-tenant scheduler, housekeeping or poller tasks remain |
 | 3 | One claim loop across tenants; tenant context cache; one routed app and one MCP route; the new integration contract; `TenantHost` lifecycle removed. Then switch on the registry and import `main`, `bss` and `yeup` | With 50 idle tenants, the process issues no tenant-scoped queries; a busy tenant cannot delay another's chat; the three tenants run unchanged from the registry |
 | 4 | Reader pool as child processes, with email parsing and image downscaling moved in; size caps in the main process; memory logged per run | A synthetic oversized PDF kills only its child, and the tool call reports an error |
@@ -307,14 +308,16 @@ Progress (branch `feat/shared-runtime`, November 15, 2026):
 
 - **Step 0, Handler parts: built.** `HANDLER_ALLOWED_HARNESSES` (HANDOFF §3) and the
   workspace upload when each run ends. The Crontal `client_message_id` is not done.
-- **Step 1: built.** Parked threads with notices, the `thread parked` alert and Retry;
-  `delivery dead` alert, admin notice and redeliver (notifications.md). The poison-event
-  split and the slow final delivery retry are not done.
+- **Step 1: built.** Failed runs accepted and recorded (`run_failures`), the `run failed`
+  alert, `GET /api/runs/failed` and replay; the startup sweep of old dead threads;
+  `delivery dead` alert and redeliver (notifications.md). No user or admin failure
+  notices (owner decision 6, revised November 21). The slow final delivery retry is not
+  done.
 
 The tenant registry (multi-tenant stage 2) is switched on only at the end of step 3, so
 production never runs the activation lifecycle this design removes.
 
-Future work: automatic retries of parked threads and deliveries, with exponential backoff.
+Future work: automatic slow retries of dead deliveries, with exponential backoff.
 
 ## Technical choices
 
@@ -332,7 +335,7 @@ Agreed with the owner on November 15, 2026 unless marked as a default.
 | Workspace flush | When each run ends |
 | Personal instance and SQLite | The same code path, as a host with one tenant |
 | Migration and rollback | `HANDLER_SHARED_RUNTIME` chooses the old `TenantHost` or the new runtime over the same database |
-| Metrics per tenant | Queue wait, run time, reader-slot wait, memory per run and parked counts |
+| Metrics per tenant | Queue wait, run time, reader-slot wait, memory per run and failed-run counts |
 | Proof before release | A load test with about 50 synthetic tenants covering the step 3, 4 and 6 checks |
 | Dyno size | The 512 MB Basic dyno until step 4's measurements show otherwise |
 | Push channel for the chat fallback | A Crontal notification until a push client exists |
