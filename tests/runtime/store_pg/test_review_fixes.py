@@ -16,6 +16,7 @@ from handler.runtime.types import Event, Lane, ThreadSpec, ThreadType
 from .test_plan_limits import held, input_event, spec_for, used
 from .test_tenant_registry import (  # noqa: F401  (fixtures)
     PLATFORM,
+    FakeHarness,
     activate,
     admin,
     base_env,
@@ -57,23 +58,60 @@ async def test_a_failed_claim_gives_its_gate_slots_back():
     assert gate.reserve("t", 1) == 1  # a free tenant at cap 1 can still run
 
 
-async def test_with_the_registry_off_no_dispatcher_has_a_gate(tmp_path, monkeypatch):
+async def test_with_the_registry_off_every_dispatcher_shares_one_gate(tmp_path, monkeypatch):
+    """Changed on purpose (Codex review finding 2): env-defined instances used to get no
+    gate, so each instance's HANDLER_MAX_CONCURRENT added up across the dyno. They now
+    share one host gate, configured paid as the registry would import them."""
     from tests.runtime.test_multi_instance import config
 
-    gates = []
+    dispatchers = []
     real = server.Dispatcher
 
     def spy_dispatcher(*args, **kwargs):
-        gates.append(kwargs.get("gate"))
+        dispatchers.append(kwargs)
         return real(*args, **kwargs)
 
     monkeypatch.setattr(server, "Dispatcher", spy_dispatcher)
     monkeypatch.setattr(server, "codex_binary", lambda: (_ for _ in ()).throw(FileNotFoundError()))
-    env = config(tmp_path)
+    env = {**config(tmp_path), "HANDLER_GLOBAL_MAX_RUNS": "4", "HANDLER_MAX_CONCURRENT": "20"}
     host = server.create_host(server._parse_args(["serve"], env), env)
     async with host.router.lifespan_context(host):
         pass
-    assert gates == [None, None]
+    gate = host.state.run_gate
+    assert [d["gate"] for d in dispatchers] == [gate, gate]
+    assert [d["gate_tenant"] for d in dispatchers] == ["main", "bss"]
+    assert [d["max_concurrent"] for d in dispatchers] == [20, 20]  # still applies beneath
+    assert gate.max_runs == 4 and gate._cap("main") == gate._cap("bss") == 3  # paid
+
+
+async def test_env_instances_together_stay_under_the_host_cap(tmp_path, monkeypatch):
+    from tests.runtime.test_multi_instance import config
+
+    monkeypatch.setattr(server, "codex_binary", lambda: (_ for _ in ()).throw(FileNotFoundError()))
+    FakeHarness.gate = asyncio.Event()
+    env = {**config(tmp_path), "HANDLER_GLOBAL_MAX_RUNS": "2", "HANDLER_MAX_CONCURRENT": "20"}
+    host = server.create_host(server._parse_args(["serve"], env), env)
+    async with host.router.lifespan_context(host):
+        gate = host.state.run_gate
+        apps = {name: next(r.app for r in host.routes if getattr(r, "path", "") == f"/i/{name}")
+                for name in ("main", "bss")}
+        for name, app in apps.items():
+            store = app.state.lifecycle.store
+            for n in range(3):
+                spec = ThreadSpec(f"chat:u:{n}", ThreadType.CHAT, Lane.INTERACTIVE,
+                                  owner_user_id="u", harness="openai_agents")
+                await store.put(Event(type="chat.message", source="test",
+                                      payload={"text": f"{name} {n}"},
+                                      idempotency_key=f"{name}-{n}", thread_key=spec.key,
+                                      user_id="u"), spec)
+        await until(lambda: len(FakeHarness.runs) == 2)
+        await asyncio.sleep(0.3)
+        assert len(FakeHarness.runs) == 2 and gate.total == 2  # not 2 per instance
+        assert sum(app.state.lifecycle.dispatcher.active_count for app in apps.values()) == 2
+        FakeHarness.gate.set()
+        await until(lambda: len(FakeHarness.runs) == 6)
+        await until(lambda: gate.total == 0)
+    FakeHarness.gate = None
 
 
 # --- 2: max_runs is validated ------------------------------------------------------
@@ -223,31 +261,13 @@ async def tenant(pg_dsn, clock):
 def test_the_read_cap_can_be_raised():
     try:
         assert limiter.configure_read_limit("6") == 6
-        assert limiter._pool()._max_workers == 6
+        assert limiter.reader_pool().settings.size == 6
     finally:
         limiter.configure_read_limit(None)
-    assert limiter.DEFAULT_READ_LIMIT == 2
+    assert limiter.DEFAULT_READ_LIMIT == 1
 
 
-async def test_a_read_waiting_for_a_slot_is_logged(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(limiter, "SLOW_READ_SECONDS", 0.05)
-    limiter.configure_read_limit("1")
-    release = threading.Event()
-    file = tmp_path / "a.pdf"
-    file.write_text("x")
-    try:
-        with caplog.at_level(logging.WARNING, logger="handler.runtime.documents"):
-            first = asyncio.create_task(limiter.capped_read("a", lambda p: release.wait(5), file))
-            second = asyncio.create_task(limiter.capped_read("b", lambda p: "ok", file))
-            await asyncio.sleep(0.2)
-            release.set()
-            await first
-            assert await second == "ok"
-    finally:
-        limiter.configure_read_limit(None)
-    messages = {r.getMessage() for r in caplog.records}
-    assert "document read waiting for a slot" in messages
-    assert "document read still running" in messages
+# The waiting-for-a-slot log is covered with the reader pool in test_document_read_cap.py.
 
 
 # --- 7: storage checks don't walk the tree on every write ---------------------------

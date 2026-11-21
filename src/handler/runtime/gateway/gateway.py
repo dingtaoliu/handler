@@ -10,7 +10,8 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from ..context import RunContext
+from .. import main_limits
+from ..context import RunContext, reset_current_run, set_current_run
 from ..task_outcomes import capture_receipt
 from ..types import (
     Approval,
@@ -116,8 +117,14 @@ class Gateway:
     def specs(self) -> list[ToolSpec]:
         return list(self._tools.values())
 
+    def excluded(self, spec: ToolSpec) -> str | None:
+        """Why the current plan leaves `spec` out (see GrantPolicy.excluded), else None."""
+        check = getattr(self._policy, "excluded", None)
+        return check(spec) if check is not None else None
+
     async def specs_for(self, ctx: RunContext) -> list[ToolSpec]:
-        """Effective tool inventory; invocation still enforces credentials/grants."""
+        """Effective tool inventory for a run, from the live plan and connector
+        capabilities; invocation still enforces credentials, grants and the plan."""
         resolved: dict[Callable, set[str]] = {}
         for check in self._capabilities.values():
             if check not in resolved:
@@ -126,8 +133,9 @@ class Gateway:
                 except Exception:
                     log.exception("Could not resolve connector capabilities")
                     resolved[check] = set()
-        return [spec for spec in self.specs() if spec.name not in self._capabilities
-                or spec.name in resolved[self._capabilities[spec.name]]]
+        return [spec for spec in self.specs() if not self.excluded(spec)
+                and (spec.name not in self._capabilities
+                     or spec.name in resolved[self._capabilities[spec.name]])]
 
     # ---- calls -------------------------------------------------------
 
@@ -203,6 +211,7 @@ class Gateway:
     ) -> ToolResult:
         started = asyncio.get_running_loop().time()
         error: str | None = None
+        token = set_current_run(ctx)  # logs and the reader pool see the calling run
         try:
             result = await asyncio.wait_for(spec.handler(ctx, args), self._timeout)
             if not isinstance(result, ToolResult):
@@ -216,6 +225,14 @@ class Gateway:
             log.exception("tool %s failed", spec.name)
             error = f"{type(exc).__name__}: {exc}"
             result = ToolResult(f"Tool {spec.name} failed: {error}", is_error=True)
+        finally:
+            reset_current_run(token)
+        text = result_text(result)
+        if len(text) > main_limits.max_tool_result_chars:
+            # A backstop in the main process: tools budget their own output.
+            log.warning("tool result truncated", extra={"tool": spec.name, "chars": len(text)})
+            result = ToolResult(main_limits.cap_text(text), is_error=result.is_error,
+                                receipt_id=result.receipt_id)
         duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
         await self._audit(
             ctx, spec, args, decision, "error" if error else "ok",
@@ -289,6 +306,10 @@ class Gateway:
         )
         if spec is None:
             result = ToolResult(f"Unknown tool: {approval.tool}", is_error=True)
+        elif why := self.excluded(spec):  # the plan changed since the request
+            await self._audit(ctx, spec, approval.args, Decision.DENY, "denied", error=why,
+                              approval_id=approval_id)
+            result = ToolResult(f"Denied: {why}", is_error=True)
         else:
             result = await self._execute(ctx, spec, approval.args, Decision.ASK, approval.id)
         final = ApprovalStatus.FAILED if result.is_error else ApprovalStatus.EXECUTED

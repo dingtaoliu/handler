@@ -174,10 +174,90 @@ def test_pdf_text_and_page_selection(tmp_path):
                                         f"page three {words}"])
     full = documents.read(path)
     assert "page one" in full.text and "page three" in full.text and not full.images
+    assert "--- page 1 of 3 ---" in full.text and "--- page 3 of 3 ---" in full.text
     two = documents.read(path, pages="2-3").text
     assert "--- page 2 of 3 ---" in two and "page three" in two and "page one" not in two
     with pytest.raises(ReadError, match="outside the document"):
         documents.read(path, pages="9")
+
+
+def test_whole_pdf_is_page_text_from_pymupdf(tmp_path, monkeypatch):
+    path = _pdf(tmp_path / "quote.pdf", ["Quotation Q-7781 flat bar 316L 6x40mm 3,450 USD/t",
+                                         "Delivery 30 days FOB Shanghai, payment 30% advance"])
+    from handler.runtime.documents import conversion
+
+    def no_markitdown(*_args, **_kwargs):
+        raise AssertionError("PDFs must not go through MarkItDown")
+
+    monkeypatch.setattr(conversion, "_markdown_converter", no_markitdown)
+    text = documents.read(path, display="downloads/quote.pdf").text
+    assert text == ("--- page 1 of 2 ---\nQuotation Q-7781 flat bar 316L 6x40mm 3,450 USD/t\n\n"
+                    "--- page 2 of 2 ---\nDelivery 30 days FOB Shanghai, payment 30% advance\n")
+    assert documents.to_text(path) == text
+    assert documents.read(path, pages="1-2").text == text  # same blocks as a page read
+
+
+def _long_pdf(path: Path, pages: int) -> Path:
+    doc = fitz.open()
+    for n in range(pages):
+        page = doc.new_page()
+        for line in range(30):
+            page.insert_text((40, 40 + 22 * line), f"p{n + 1} row {line} 316L flat bar 6x40mm")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_long_pdf_pages_by_offset_across_the_char_limit(tmp_path):
+    path = _long_pdf(tmp_path / "catalogue.pdf", pages=12)
+    whole = documents.to_text(path)
+    assert whole.count("--- page ") == 12 and len(whole) > 10_000
+    seen, offset = [], 0
+    for _ in range(20):
+        text = documents.read(path, display="downloads/catalogue.pdf", offset=offset,
+                              max_chars=4000).text
+        body, _, note = text.rpartition("\n\n[downloads/catalogue.pdf: characters ")
+        assert note.startswith(f"{offset:,}–") and f"of {len(whole):,}." in note
+        seen.append(body)
+        if "Call read_file with offset=" not in note:
+            break
+        nxt = int(note.split("offset=")[1].split(" ")[0])
+        assert body.endswith("\n") and whole[nxt - 1] == "\n"  # cut on a line break
+        offset = nxt
+    assert "".join(seen) == whole  # every character exactly once, in order
+    assert len(seen) > 2
+    assert "past the end" in documents.read(path, offset=len(whole) + 5).text
+
+
+def test_pdf_preview_stops_at_max_chars(tmp_path, monkeypatch):
+    path = _long_pdf(tmp_path / "catalogue.pdf", pages=40)
+    from handler.runtime.documents import pdf
+
+    loaded: list[int] = []
+    block = pdf._page_block
+    monkeypatch.setattr(pdf, "_page_block", lambda doc, i: loaded.append(i) or block(doc, i))
+    text = documents.to_text(path, max_chars=3000)
+    assert len(text) == 3000 and text.startswith("--- page 1 of 40 ---")
+    assert len(loaded) < 5  # stopped early, didn't extract all 40 pages
+
+
+def test_whole_pdf_text_is_cached_for_continuations(tmp_path, monkeypatch):
+    path = _long_pdf(tmp_path / "cached.pdf", pages=6)
+    from handler.runtime.documents import pdf
+
+    calls: list[Path] = []
+    real = pdf.pdf_page_text
+
+    def counted(p, limit=None):
+        calls.append(p)
+        return real(p, limit)
+
+    counted.__qualname__ = real.__qualname__
+    monkeypatch.setattr(pdf, "pdf_page_text", counted)
+    first = documents.read(path, max_chars=2000).text
+    nxt = int(first.split("offset=")[1].split(" ")[0])
+    documents.read(path, offset=nxt, max_chars=2000)
+    assert len(calls) == 1  # the second page of output came from the cache
 
 
 def test_scanned_pdf_comes_back_as_page_images(tmp_path):
@@ -187,7 +267,7 @@ def test_scanned_pdf_comes_back_as_page_images(tmp_path):
     assert len(reading.images) == documents.MAX_PAGE_IMAGES
     assert all(i.mime == "image/png" for i in reading.images)
     assert "no text layer" in reading.text and "pages 1-4 of 6" in reading.text
-    assert "pages='5-6'" in reading.text
+    assert "pages='5-6'" in reading.text and "--- page" not in reading.text
     rest = documents.read(path, pages="5-6")
     assert len(rest.images) == 2 and "pages 5-6 of 6" in rest.text
     assert documents.to_text(path) is None

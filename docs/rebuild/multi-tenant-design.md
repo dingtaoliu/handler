@@ -1,10 +1,9 @@
 # Multi-tenant Handler and free-tier migration: design
 
-Status: **in implementation on branch `feat/multi-tenant`; nothing deployed**. The
-owner reviewed this direction in conversation on November 8, 2026, asked for this
-document, then asked for it to be implemented on a branch and settled the three
-[open decisions](#decisions). A production release still needs the owner's approval.
-Production follows `main`; the `rebuild` branch has been merged and deleted.
+Status: **stage 1 deployed November 14, 2026 (Handler v61); the tenant registry and
+Crontal platform API are built but switched off.** The runtime model here (tenants started
+and stopped by `TenantHost`) is being replaced by [role-split-design.md](role-split-design.md);
+the registry is switched on at the end of its step 3.
 
 Spans two repositories: this one (Handler) and `../hephaestus` (Crontal).
 

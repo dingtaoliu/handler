@@ -22,6 +22,7 @@ from email import policy
 from email.message import EmailMessage, Message
 from email.parser import BytesParser
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
+from pathlib import Path
 
 from ..uploads import sanitize_filename
 
@@ -371,6 +372,11 @@ def _walk(msg: EmailMessage, collector: _Collector, origin: str, depth: int) -> 
         if not isinstance(data, bytes):
             continue
         collector.add(filename or _default_name(part, index), ctype, data, origin)
+
+
+def parse_email_file(path: Path) -> ParsedEmail:
+    """`parse_email` of a file: the form the reader pool runs (no bytes over the pipe)."""
+    return parse_email(Path(path).read_bytes())
 
 
 def parse_email(raw: bytes) -> ParsedEmail:

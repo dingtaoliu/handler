@@ -359,3 +359,5 @@ async def test_each_run_logs_process_memory_at_start_and_end(env, caplog):
     records = [r for r in caplog.records if r.getMessage() == "run memory"]
     assert [r.phase for r in records] == ["start", "end"]
     assert all(r.active_runs == 1 and r.peak_rss_mb > 0 and r.instance == "main" for r in records)
+    # The end line adds the run's own peak (None without /proc) and its reads' peak.
+    assert hasattr(records[1], "run_peak_rss_mb") and records[1].reader_peak_rss_mb is None

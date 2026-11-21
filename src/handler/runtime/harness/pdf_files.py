@@ -11,8 +11,8 @@ from pathlib import Path
 import openai
 from agents import ToolOutputFileContent, ToolOutputText
 
-from ..documents.limiter import capped_read
-from ..documents.pdf import prepare_input
+from ..documents.limiter import capped_read, reader_pool
+from ..documents.pdf import prepare_upload
 
 logger = logging.getLogger(__name__)
 
@@ -67,23 +67,31 @@ class PDFFiles:
 
     async def read(self, path: Path, *, display: str, pages: str | None = None
                    ) -> list[ToolOutputText | ToolOutputFileContent]:
-        pdf = await capped_read("pdf_upload", prepare_input, path, display=display, pages=pages)
-        scope = f"{self.client.base_url}|{self.client.api_key}|{self.client.organization}|{self.client.project}"
+        # The reader process checks the PDF and copies selected pages to a file;
+        # here the bytes are hashed in chunks and loaded only to upload them.
+        pdf = await capped_read("pdf_upload", prepare_upload, path, display=display,
+                                pages=pages, scratch=reader_pool().scratch_dir())
         name = input_file_name(path.name, pdf=True)
         assert name is not None  # always, for a PDF
-        # The upload name is part of the key: a file stored before names were
-        # normalised (e.g. "Bill.PDF", which the API refuses as input) is not
-        # reused; the PDF is simply uploaded again under its accepted name.
-        key = hashlib.sha256(scope.encode() + b"\0" + name.encode() + b"\0"
-                             + pdf.data).hexdigest()
-        async with self.lock:
-            file_id = self.references.get(key)
-            if not file_id:
-                uploaded = await self.client.files.create(
-                    file=(name, pdf.data, "application/pdf"), purpose="user_data")
-                file_id = uploaded.id
-                self.references[key] = file_id
-                self._save()
+        try:
+            scope = f"{self.client.base_url}|{self.client.api_key}|{self.client.organization}|{self.client.project}"
+            # The upload name is part of the key: a file stored before names were
+            # normalised (e.g. "Bill.PDF", which the API refuses as input) is not
+            # reused; the PDF is simply uploaded again under its accepted name.
+            key = await asyncio.to_thread(_digest, scope, pdf.path, name)
+            async with self.lock:
+                file_id = self.references.get(key)
+                if not file_id:
+                    data = await asyncio.to_thread(pdf.path.read_bytes)
+                    uploaded = await self.client.files.create(
+                        file=(name, data, "application/pdf"), purpose="user_data")
+                    del data
+                    file_id = uploaded.id
+                    self.references[key] = file_id
+                    self._save()
+        finally:
+            if pdf.copy:
+                pdf.path.unlink(missing_ok=True)
         return [ToolOutputText(text=pdf.description), ToolOutputFileContent(file_id=file_id)]
 
     def _save(self) -> None:
@@ -97,3 +105,12 @@ class PDFFiles:
         except OSError:
             # The uploaded file remains usable even when persistence is unavailable.
             logger.warning("Could not save PDF file-reference cache", exc_info=True)
+
+
+def _digest(scope: str, path: Path, name: str) -> str:
+    """sha256(scope, NUL, upload name, NUL, file bytes), read in chunks."""
+    digest = hashlib.sha256(scope.encode() + b"\0" + name.encode() + b"\0")
+    with path.open("rb") as f:
+        while chunk := f.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()

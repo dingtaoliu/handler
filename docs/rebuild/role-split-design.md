@@ -1,6 +1,6 @@
 # Shared host resources: inbox, runner and outbox
 
-Status: **owner decisions settled November 15, 2026 (decision 6 revised November 21); steps 0 and 1 built on
+Status: **owner decisions settled November 15, 2026 (decision 6 revised November 21); steps 0, 1 and 4 built on
 `feat/shared-runtime`** (not deployed; see Build order). First written
 November 14, 2026 as a split into separate processes. Rewritten November 15, 2026 after
 review with the owner, who narrowed the goal to a single host. Follows
@@ -297,9 +297,9 @@ the same database; rollback is flipping it.
 | --- | --- | --- |
 | 0 | Native-only host setting and registry check. Workspace flush when a run ends. `client_message_id` from the Crontal frontend | Codex cannot be enabled on production; a restart loses no finished run's files |
 | 1 | Failed runs recorded and replayable, threads never blocked; redeliver for dead deliveries; operator alerts on both | No failure blocks a thread, and every failure reaches the operator with a way to replay |
-| 2 | One timer over `handler_control.due_work`; one housekeeping pass; one bus for the host; cancel as a stored flag | No per-tenant scheduler, housekeeping or poller tasks remain |
-| 3 | One claim loop across tenants; tenant context cache; one routed app and one MCP route; the new integration contract; `TenantHost` lifecycle removed. Then switch on the registry and import `main`, `bss` and `yeup` | With 50 idle tenants, the process issues no tenant-scoped queries; a busy tenant cannot delay another's chat; the three tenants run unchanged from the registry |
-| 4 | Reader pool as child processes, with email parsing and image downscaling moved in; size caps in the main process; memory logged per run | A synthetic oversized PDF kills only its child, and the tool call reports an error |
+| 2 | One timer over `handler_control.due_work`; one housekeeping pass, including the 90-day retention cleanup (owner decision 9; not built yet); one bus for the host; cancel as a stored flag | No per-tenant scheduler, housekeeping or poller tasks remain |
+| 3 | One claim loop across tenants; one host `RunGate` for every tenant, env-defined ones included, ranking interactive before background across tenants (**done**); tenant context cache; a tool view built per run from live entitlements, so a plan change takes effect on the next run (**done**); one routed app and one MCP route; the new integration contract; `TenantHost` lifecycle removed. Then switch on the registry and import `main`, `bss` and `yeup`. **Partly done** on `feat/shared-runtime-gating` (see Progress) | With 50 idle tenants, the process issues no tenant-scoped queries; a busy tenant cannot delay another's chat; the three tenants run unchanged from the registry |
+| 4 | Reader pool as child processes, with email parsing and image downscaling moved in; size caps in the main process; memory logged per run | A synthetic oversized PDF kills only its child, and the tool call reports an error. **Built** on `feat/shared-runtime-readers` (not deployed), with the review follow-up: no idle reader processes, fairness at admission only, an RSS cap per reader. Defaults 1 reader at 220 MB for the 512 MB dyno; measurements in [multi-instance.md](multi-instance.md#memory-budget-measured-november-17-amd64-linux-python-312-release-image). PDF text now comes from PyMuPDF (page blocks) instead of MarkItDown, which needed more than 220 MB even for 2 pages; 2- to 400-page PDFs read at a 164 MB reader peak (on `feat/shared-runtime`). Not behind `HANDLER_SHARED_RUNTIME` |
 | 5 | Idempotent tool side effects | A run retried after a crash does not repeat a sent email or a Crontal write |
 | 6 | Outbox subscriptions and one delivery pool with per-tenant limits | A failing sink for one tenant does not delay another tenant's deliveries |
 | 7 | Thread strategies registered per type; the automation special case moved into its strategy | `run.py` has no checks on thread type |
@@ -313,6 +313,17 @@ Progress (branch `feat/shared-runtime`, November 15, 2026):
   `delivery dead` alert and redeliver (notifications.md). No user or admin failure
   notices (owner decision 6, revised November 21). The slow final delivery retry is not
   done.
+- **Step 3: partly built** on `feat/shared-runtime-gating` (November 17, 2026, not
+  deployed). Done: one host `RunGate` for env-defined instances too (each counted as
+  `paid`, as the registry imports them); the gate ranks interactive before background
+  across tenants, then paid before free, with aging for both (`HANDLER_RUN_MAX_WAIT_SECONDS`);
+  each run's tool view is built from the live plan (`GrantPolicy.excluded`), and the
+  gateway refuses calls and approvals the current plan excludes, so a plan change needs
+  no restart. Not done: one claim loop, the tenant context cache, one routed app and MCP
+  route, the integration contract and removing the `TenantHost` lifecycle. Changes to a
+  tenant's integrations or secrets still need its runtime to restart (integration tools,
+  routes and sinks are wired at start), and so does gaining Codex on an upgrade (the
+  harness is built at start; production allows only the native harness anyway).
 
 The tenant registry (multi-tenant stage 2) is switched on only at the end of step 3, so
 production never runs the activation lifecycle this design removes.
@@ -331,7 +342,7 @@ Agreed with the owner on November 15, 2026 unless marked as a default.
 | Due work | A `handler_control.due_work` table (tenant, kind, reference, due time), written in the same transaction as the work it describes |
 | Context cache invalidation | `NOTIFY handler_tenant_changed`, even in one process |
 | Reader children (default) | `forkserver`; pass file paths, not bytes; a memory limit per child (`RLIMIT_AS`); a timeout and kill; recycle after N tasks |
-| Idempotency key for tool calls | Thread, input events and the call's position in the run; applies to tools that write outside Handler (`Risk.WRITE_*`) |
+| Idempotency key for tool calls | Thread, input event ids, tool name and a hash of the canonical arguments; applies to tools that write outside Handler (`Risk.WRITE_*`). The call's position is not enough: a retried run can make different calls in a different order. An intent row is written before the call runs and completed after; a retry that finds a completed row gets its result, and one that finds an intent without a result has an unknown outcome and parks for a person |
 | Workspace flush | When each run ends |
 | Personal instance and SQLite | The same code path, as a host with one tenant |
 | Migration and rollback | `HANDLER_SHARED_RUNTIME` chooses the old `TenantHost` or the new runtime over the same database |

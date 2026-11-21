@@ -86,26 +86,141 @@ per tenant and no DDL. To force a re-apply, delete that tenant's row. The contro
 schema is created automatically and needs no migration.
 
 Notifications use one channel, `handler_work_shared`, with the schema name as the
-payload. Run concurrency is **per instance**, so add it across instances when sizing
-the dyno.
+payload.
+
+Run concurrency has one cap for the **whole host**: every instance's dispatcher shares
+one run gate, as on the registry host (see the settings in
+[tenant-registry.md](tenant-registry.md#settings)). Env-defined instances count as
+`paid`, the plan the registry gives them on import, so by default the host runs at
+most 6 at once (`HANDLER_GLOBAL_MAX_RUNS`) and each instance at most 3
+(`HANDLER_PLAN_RUN_CAPS`). An instance's own `HANDLER_MAX_CONCURRENT` and lane
+capacities still apply beneath those; they no longer add up across instances.
 
 ## Memory and document reads
 
-Documents are decoded inside the server process, whose memory every instance
-shares. `HANDLER_DOC_READ_MAX_CONCURRENT` (default 2) caps simultaneous reads
-across the **whole process**, not per instance; it cannot be scoped to an instance.
-A read waits for a slot, and a read whose caller timed out keeps its slot until
-the decoding actually finishes. Codex's `handler-read` runs in its own process and
-is not counted. A read still waiting for a slot, or still running, after 5 seconds is
-logged every 5 seconds (`document read waiting for a slot` or `document read still
-running`), so a stuck read is visible.
+Parsing runs in the **reader pool** (`documents/pool.py`): child processes shared by
+the whole host, for document reads (`read_file`, bounded tasks, PDF uploads,
+download previews), email parsing (`/ingest/email`, mailbox ingest and attachment
+fetches) and attachment image downscaling. Codex's `handler-read` runs in its own
+process and is not counted.
 
-Each read logs `document read` (source, file type and size, wait, duration, memory
-before and after) and each run logs `run memory` at its start and end. Fields:
-`rss_mb` (or `rss_mb_before`/`rss_mb_after`), `peak_rss_mb` (high-water mark since
-the process started) and `swap_mb`; `active_runs` and `active_reads` show what else
-was running. Use these to find what drives a dyno over its quota before changing
-anything else. Memory is per process, so several runs in flight share one figure.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `HANDLER_DOC_READ_MAX_CONCURRENT` | 1 | Reader processes, for the **whole host**, not per instance. 1 fits the 512 MB Basic dyno; see the budget below |
+| `HANDLER_READER_MAX_RSS_MB` | 220 | A reader whose RSS goes over this (sampled every 200 ms) is killed; the call fails with "… is too large to read" and the reader is replaced. 0 turns it off |
+| `HANDLER_READER_TIMEOUT_SECONDS` | 120 | A call running longer has its process killed; the tool call gets an error |
+| `HANDLER_READER_MEMORY_MB` | 0 (off) | `RLIMIT_AS` per reader, Linux only (macOS doesn't enforce it). Off by default: a reader with PyMuPDF and MarkItDown loaded reserves well over 1 GB of address space, so a limit near 2 GB already crashed an ordinary large-PDF read. Only a loose backstop |
+| `HANDLER_READER_MAX_TASKS` | 50 | Calls before a reader is replaced |
+| `HANDLER_READER_MAX_RESULT_MB` | 64 | Largest result a reader returns; larger is an error |
+| `HANDLER_READER_IDLE_SECONDS` | 60 | An unused reader stops after this |
+| `HANDLER_TOOL_RESULT_MAX_CHARS` | 200,000 | A gateway tool result over this is cut, with a marker |
+| `HANDLER_MAIN_FILE_MAX_MB` | 50 | A workspace file a tool loads whole in the main process (Crontal upload, email attachment) is refused over this |
+
+- **Failures stay in their call.** A timeout, a caller giving up (e.g. a gateway tool
+  timeout), a reader that crashes or runs out of memory: that process is killed or
+  reaped and replaced, the call raises `ReaderFailed` (a `ReadError`, so tools report
+  `error: …`; previews report `text_error` / `extract_error`), and every other read
+  carries on.
+- **Fair by tenant, at admission only.** A running read is never stopped for another
+  tenant. A free slot goes to the waiting tenant holding the fewest slots, oldest call
+  first; while another tenant is waiting, a tenant holding its share
+  (ceil(slots / active tenants)) can't start another read. A tenant alone may use
+  every slot. The tenant is the instance name, carried in a context variable that each
+  instance sets for its tasks and requests (`context.current_tenant`).
+- **Nothing runs while idle.** The fork server preloads only the reader modules; a
+  reader imports PyMuPDF, MarkItDown, openpyxl or Pillow when a call needs them. The
+  fork server and resource tracker start with the first read and stop with the last
+  idle reader, `HANDLER_READER_IDLE_SECONDS` after the last read.
+
+### Memory budget (measured November 17, amd64 Linux, Python 3.12, release image)
+
+Whole process tree: main process (the host, idle, SQLite) + fork server + resource
+tracker + readers. RSS in MB.
+
+| | Before the follow-up (preload, 2 readers, no RSS cap) | Now (1 reader, cap 220) |
+| --- | --- | --- |
+| Idle, before any read | 154 (main only) | 154 (main only) |
+| 60 s after the last read | 395 (main 157, fork server 212, tracker 26) | 157 (main only) |
+| Every reader busy on a 400-page PDF and a 60,000-row xlsx | 779 RSS / 503 PSS, and the PDF reader crashed under `RLIMIT_AS` | 440 RSS / 400 PSS (main 157, server 45, tracker 26, reader 212); the PDF read failed "too large to read", the xlsx read succeeded |
+| First read, cold (PDF / xlsx) | 2.7 s / about 2.3 s (fork server start with preload) | 1.1–1.2 s / 1.0–1.2 s |
+| Warm read (PDF / xlsx) | 48 / 12 ms | 45 / 11 ms |
+
+With no cap, the 400-page PDF's text conversion took one reader to **6 GB** over two
+minutes. Reader peaks per file with no cap: xlsx (60,000 rows) 73 MB; HTML (5,000
+paragraphs) 152 MB; PDF text through MarkItDown (pdfminer) 244 MB for 2 pages, 311 MB
+for 10, 597 MB for 30, 1.57 GB for 100. PyMuPDF's own text extraction of the same
+100- and 400-page PDFs added nothing measurable to its 155 MB import (0.3 s and 1.1 s).
+A reader that has imported PyMuPDF alone is about 145 MB; with MarkItDown, about 200 MB
+(226–257 MB with both, so the pool keeps them apart; see below).
+
+- **512 MB Basic dyno:** 1 reader with a 220 MB cap keeps main (about 155 idle, more in
+  runs) + fork server 45 + tracker 26 + reader 220 near 450 MB. PDF text comes from
+  PyMuPDF (below), so it fits; xlsx, CSV, Word, HTML and images fit too.
+- **PDF text is PyMuPDF, not MarkItDown (since November 17).** MarkItDown's PDF
+  conversion (pdfminer) needed more than 220 MB even for a 2-page PDF (measured again
+  under the cap: every 2- and 30-page read refused at about 223 MB). `documents/pdf.py`
+  now extracts all PDF text with PyMuPDF, page by page, as `--- page N of M ---` blocks
+  (the format `pages=` reads already used); MarkItDown is never imported for a PDF.
+  Whole-document reads cache the page text (`cache.py`) and page it by `offset` as
+  before; previews and bounded tasks stop extracting at `max_chars`. Measured through
+  the pool at the 220 MB cap, a fresh reader per call (`HANDLER_READER_MAX_TASKS=1`),
+  generated text PDFs of about 3,400 characters a page:
+
+  | PDF | Reader peak | `read_file` (offset 0) | Next page (`offset=`) | Preview (`to_text`, 2M chars) | Bounded task (50,001 chars) |
+  | --- | --- | --- | --- | --- | --- |
+  | 2 pages | 164 MB | 0.95 s (cold pool) | — | 0.48 s | 0.47 s |
+  | 30 pages | 164 MB | 0.53 s | 0.50 s | 0.53 s | 0.51 s |
+  | 100 pages | 164 MB | 0.63 s | 0.50 s | 0.64 s | 0.51 s |
+  | 400 pages (1.36 M chars) | 164 MB | 1.02 s | 0.50 s | 1.03 s | 0.52 s |
+
+  None was refused. The peak is PyMuPDF's import, flat with document size; about 0.5 s
+  of each call is a fresh reader's start. In a reused reader the same reads take 8 ms
+  (2 pages) to 0.57 s (400 pages), and a continuation 25–33 ms from the cache. In fresh
+  readers an xlsx (5,000 rows) peaked at 74 MB and a docx (300 paragraphs) at 148 MB.
+- **One heavy library family per reader.** A reader holding both PyMuPDF and
+  MarkItDown is over 220 MB on the imports alone (226–257 MB measured: a PDF then a
+  docx, or the reverse, had the second read refused). The pool now predicts each
+  call's family in the main process (`documents/families.py`: `pymupdf` for PDF reads,
+  page images and PDF uploads; `markitdown` for docx/pptx/HTML/EPUB/.msg, ZIP, JSON/XML,
+  HTML-disguised .xls and every text preview; none for xlsx/xls/CSV, plain-text reads,
+  images, email parsing and downscaling), and readers report what they actually loaded
+  after each call. A call never gets an idle reader holding the other family: with 1
+  reader, that reader is stopped **before** the call and the call gets a fresh one, so
+  there is never more than one reader process. Same family or a family-free call
+  reuses the reader. Backstop: a reader whose RSS after a call is above 75 % of
+  `HANDLER_READER_MAX_RSS_MB` (165 MB at 220) is recycled. Not half the cap, as first
+  planned: a reader that just read a PDF holds about 160 MB and one that read a docx
+  about 150 MB, so half would recycle after every PDF and docx read. Logged per read:
+  `family`, `reader_replaced` ("family") and `reader_recycled` ("tasks" or "rss").
+  Measured (amd64, 1 reader, cap 220, defaults), none refused:
+
+  | Sequence | Reader peaks (MB) | What happened |
+  | --- | --- | --- |
+  | PDF (30 p), docx | 164, 148 | docx: reader replaced (family), 1.32 s |
+  | docx, PDF, xlsx | 148, 164, 184 | PDF: replaced (family), 0.55 s; xlsx reused the PDF reader, which was then recycled (rss, 184 > 165) |
+  | PDF, xlsx, PDF | 164, 184, 164 | xlsx reused the reader, then recycled (rss); the second PDF started a fresh reader, 0.51 s |
+  | PDF, PDF, docx, docx, PDF | 164, 160, 148, 148, 164 | warm PDF 26 ms; switch to docx 1.33 s; warm docx 1 ms; switch back to PDF 0.51 s |
+  | xlsx, docx | 73, 150 | same reader throughout (xlsx is family-free) |
+
+  A switch costs one fresh reader's start and import: about 0.5 s for PyMuPDF and
+  0.9–1.3 s for MarkItDown, against 26 ms / 1 ms warm. An xlsx read in a reader that
+  already holds PyMuPDF adds openpyxl on top (184 MB for 5,000 rows), so a very large
+  workbook read right after a PDF has less headroom than in a fresh reader.
+- **1 GB dyno:** 2 readers at 300 MB (measured busy tree 584 RSS / 516 PSS), or 3 at
+  220 MB, stay under about 900 MB with room for the main process.
+- A read still waiting for a slot, or still running, after 5 seconds is logged every
+  5 seconds (`document read waiting for a slot` or `document read still running`,
+  with `tenant`, `active_reads`, `tenant_reads` and `limit`).
+
+Each read logs `document read` (source, tenant, file type and size, wait, duration,
+outcome, the reader's memory before and after and its peak during the call, the
+reader's pid and exit code, and `main_rss_mb`). Each run logs `run memory` at its
+start and end; the end line adds `run_peak_rss_mb` (the main process's highest RSS
+while the run was going, sampled each second; None without `/proc`) and
+`reader_peak_rss_mb` (the highest reader peak among its reads). Other fields:
+`rss_mb`, `peak_rss_mb` (high-water mark since the process started) and `swap_mb`;
+`active_runs` and `active_reads` show what else was running. Memory is per process,
+so several runs in flight share one main-process figure.
 
 ## Notifications to Crontal
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import resource
 import sys
 from pathlib import Path
@@ -27,3 +28,33 @@ def process_memory() -> dict[str, float | None]:
         peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         sample["peak_rss_mb"] = round(peak / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)
     return sample
+
+
+class RunPeak:
+    """The main process's highest RSS while one run is going, sampled each second.
+
+    The process's own peak (VmHWM) spans its whole life, so it can't say which
+    run a spike belonged to; this can, to the sampling interval. Concurrent runs
+    each see the shared process, so a spike shows in every run active then.
+    None without /proc (macOS).
+    """
+
+    INTERVAL_SECONDS = 1.0
+
+    def __init__(self) -> None:
+        self.peak: float | None = None
+        self.note()
+
+    def note(self) -> None:
+        rss = process_memory()["rss_mb"]
+        if rss is not None and (self.peak is None or rss > self.peak):
+            self.peak = rss
+
+    async def sample(self) -> None:
+        while True:
+            await asyncio.sleep(self.INTERVAL_SECONDS)
+            self.note()
+
+    def finish(self) -> float | None:
+        self.note()
+        return self.peak

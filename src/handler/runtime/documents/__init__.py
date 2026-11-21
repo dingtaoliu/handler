@@ -6,7 +6,17 @@ Start in router.py for dispatch; each reader owns its format-specific behavior.
 
 from .cli import main
 from .images import IMAGE_MAX_BYTES, IMAGE_MAX_SIDE
-from .limiter import READ_LIMIT_ENV, capped_read, configure_read_limit
+from .limiter import (
+    READ_LIMIT_ENV,
+    capped_parse,
+    capped_preview,
+    capped_read,
+    configure_read_limit,
+    configure_readers,
+    pop_reader_peak,
+    shutdown_readers,
+)
+from .pool import ReaderFailed
 from .pdf import MAX_PAGE_IMAGES
 from .router import (
     DOCUMENT_SUFFIXES,
@@ -23,5 +33,6 @@ __all__ = [
     "MAX_READ_CHARS", "MAX_TEXT_CHARS", "MAX_PAGE_IMAGES", "IMAGE_MAX_SIDE",
     "IMAGE_MAX_BYTES", "DOCUMENT_SUFFIXES", "SPREADSHEET_SUFFIXES",
     "IMAGE_SUFFIXES", "MARKITDOWN_SUFFIXES", "capped_read", "configure_read_limit",
-    "READ_LIMIT_ENV",
+    "READ_LIMIT_ENV", "capped_parse", "capped_preview", "configure_readers", "pop_reader_peak",
+    "shutdown_readers", "ReaderFailed",
 ]

@@ -170,7 +170,8 @@ async def test_host_rolls_back_startup_and_closes_concurrently(tmp_path, monkeyp
     env = config(tmp_path)
     entered, closed = [], []
     @contextlib.asynccontextmanager
-    async def runtime(args, env, *, base_path, instance_name, hub=None, allowed_harnesses=None):
+    async def runtime(args, env, *, base_path, instance_name, hub=None, gate=None,
+                      allowed_harnesses=None):
         entered.append(instance_name)
         if instance_name == 'bss':
             raise RuntimeError('startup failed')
@@ -187,7 +188,8 @@ async def test_host_rolls_back_startup_and_closes_concurrently(tmp_path, monkeyp
 
     drained = asyncio.Event()
     @contextlib.asynccontextmanager
-    async def runtime(args, env, *, base_path, instance_name, hub=None, allowed_harnesses=None):
+    async def runtime(args, env, *, base_path, instance_name, hub=None, gate=None,
+                      allowed_harnesses=None):
         try:
             yield server.FastAPI()
         finally:
@@ -371,7 +373,8 @@ async def test_host_allow_list_reaches_every_instance_and_cannot_be_widened(tmp_
            'HANDLER_I_BSS__HANDLER_ALLOWED_HARNESSES': 'codex,openai_agents'}
     seen = {}
     @contextlib.asynccontextmanager
-    async def runtime(args, env, *, base_path, instance_name, hub=None, allowed_harnesses=None):
+    async def runtime(args, env, *, base_path, instance_name, hub=None, gate=None,
+                      allowed_harnesses=None):
         seen[instance_name] = allowed_harnesses
         yield server.FastAPI()
     monkeypatch.setattr(server, 'instance_runtime', runtime)

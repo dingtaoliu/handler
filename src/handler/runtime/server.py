@@ -28,8 +28,10 @@ import uvicorn
 
 from .auth import Authenticator, Principal, add_cli_commands, run_cli
 from .bus import RunEventBus
+from . import main_limits
+from .context import TenantScope, reset_current_tenant, set_current_tenant
 from .dispatcher import Dispatcher
-from .documents import READ_LIMIT_ENV, configure_read_limit
+from .documents import configure_readers, shutdown_readers
 from .files import LocalFileStore, S3FileStore
 from .gateway.api import approvals_router, questions_router
 from .web.memory_recovery_api import memory_recovery_router
@@ -527,6 +529,13 @@ def _plan_limit(tenant: Tenant) -> int | None:
     return int(value) if value is not None else None
 
 
+def _host_run_gate(env: Mapping[str, str]) -> RunGate:
+    """The one run gate every tenant's dispatcher shares, registry on or off."""
+    return RunGate(int(env.get("HANDLER_GLOBAL_MAX_RUNS", str(DEFAULT_MAX_RUNS))),
+                   parse_plan_caps(env.get("HANDLER_PLAN_RUN_CAPS", DEFAULT_PLAN_CAPS)),
+                   max_wait=float(env.get("HANDLER_RUN_MAX_WAIT_SECONDS", "60")))
+
+
 def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs: list) -> FastAPI:
     """Host tenants from `handler_control` and start each only when it has work."""
     platform_key, sealing_key = env.get(PLATFORM_KEY_ENV), env.get(TENANT_SECRET_ENV)
@@ -536,9 +545,7 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
     size = int(env.get("HANDLER_DB_SHARED_POOL_MAX", str(DEFAULT_POOL_MAX)))
     hub = PostgresHub(args.database_url, max_size=size)
     box = SecretBox(sealing_key)
-    gate = RunGate(int(env.get("HANDLER_GLOBAL_MAX_RUNS", str(DEFAULT_MAX_RUNS))),
-                   parse_plan_caps(env.get("HANDLER_PLAN_RUN_CAPS", DEFAULT_PLAN_CAPS)),
-                   max_wait=float(env.get("HANDLER_RUN_MAX_WAIT_SECONDS", "60")))
+    gate = _host_run_gate(env)
 
     plan_table = parse_plan_table(env.get(PLAN_LIMITS_ENV))
     allowed_harnesses = parse_allowed_harnesses(env.get(ALLOWED_HARNESSES_ENV))
@@ -599,6 +606,7 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
         finally:
             await tenants.shutdown()
             await hub.close()
+            await asyncio.to_thread(shutdown_readers)
 
     host = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     host.include_router(platform_router(registry, tenants, platform_key,
@@ -611,11 +619,18 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
 def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> FastAPI:
     env = dict(os.environ if env is None else env)
     configs = instance_configs(args, env)
-    configure_read_limit(env.get(READ_LIMIT_ENV))
+    configure_readers(env)
+    main_limits.configure(env)
     if env.get(REGISTRY_ENV) == "1":
         return create_registry_host(args, env, configs)
     allowed_harnesses = parse_allowed_harnesses(env.get(ALLOWED_HARNESSES_ENV))
     hubs = _shared_hubs(configs, env)
+    # One run cap for the whole process, as on the registry host. Env-defined
+    # instances are paid with no max_runs override: the plan and limits the
+    # registry gives them when it imports them (Tenant's defaults).
+    gate = _host_run_gate(env)
+    for name, *_ in configs:
+        gate.configure(name, Tenant.plan, None)
 
     @contextlib.asynccontextmanager
     async def lifespan(host):
@@ -627,7 +642,7 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
             # same task. Separate owner tasks let them drain concurrently.
             try:
                 async with instance_runtime(cfg, scoped, base_path=base, instance_name=name,
-                                            hub=hubs.get(cfg.database_url),
+                                            hub=hubs.get(cfg.database_url), gate=gate,
                                             allowed_harnesses=allowed_harnesses) as app:
                     ready.set_result(app)
                     await stop.wait()
@@ -659,8 +674,11 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
                     logger.error("instance lifecycle failed", exc_info=result)
             for hub in hubs.values():
                 await hub.close()
+            await asyncio.to_thread(shutdown_readers)
 
-    return FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    host = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    host.state.run_gate = gate
+    return host
 
 
 async def serve(args: argparse.Namespace) -> None:
@@ -684,6 +702,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
 
     `allowed_harnesses` is the host's HANDLER_ALLOWED_HARNESSES (None: all).
     """
+    # Everything this instance runs (its tasks, and through TenantScope its
+    # requests) shares host pools such as the reader pool as this tenant.
+    tenant_token = set_current_tenant(instance_name or "main")
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     env = dict(env)
@@ -801,8 +822,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                          TaskOutcomeTools(store), NotifyTools(store, bus, notifier=notifier),
                          QuestionTools(questions)):
             gateway.register(provider)
-        if plan_limits is None or plan_limits.current.automations:
-            gateway.register(AutomationTools(store, scheduler))  # not offered on plans without
+        # Registered on every plan: each run's tool view and every call follow the
+        # live plan (GrantPolicy.excluded), so an upgrade or downgrade needs no restart.
+        gateway.register(AutomationTools(store, scheduler))
         tokens = RunTokens()
         mcp_app = create_mcp_app(gateway, tokens)
 
@@ -990,6 +1012,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         intake_observers.extend(o for _, o in contributions.email_intake_observers)
         for _, router in contributions.routers:
             app.include_router(router)
+        app.add_middleware(TenantScope, tenant=instance_name or "main")
         app.state.integrations = integrations
         app.state.gateway, app.state.outbox = gateway, outbox
         app.state.lifecycle = SimpleNamespace(dispatcher=dispatcher, store=store, outbox=outbox,
@@ -1035,6 +1058,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
     finally:
         unregister_workspace_limit(data_dir / "workspaces")
         await store.close()
+        reset_current_tenant(tenant_token)
 
 
 SHUTDOWN_BUDGET_SECONDS = 25.0

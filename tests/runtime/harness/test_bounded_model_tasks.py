@@ -95,7 +95,9 @@ async def test_workspace_source_failures_fall_back_without_model_calls(tmp_path,
              "too_many": ["one.txt"] * 6, "large": ["large.txt"],
              "total": ["one.txt", "two.txt"], "empty": [], "scan": ["scan.pdf"]}[case]
     if case == "scan":
-        monkeypatch.setattr(oa.documents, "to_text", lambda *args, **kwargs: None)
+        # Reads run in a reader process: the stand-in must be importable there.
+        from tests.runtime import reader_fakes
+        monkeypatch.setattr(oa.documents, "to_text", reader_fakes.nothing)
     tool = oa.bounded_task_tool(SimpleNamespace(responses=responses), {"classify": "cheap"}, [], workspace)
     result = await invoke(tool, source_text="", source_paths=paths)
     assert result["needs_review"] and not responses.calls

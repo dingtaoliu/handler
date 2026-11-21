@@ -1,5 +1,6 @@
 """Free tenants and host hardening (real Postgres, multi-tenant Phase 4)."""
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -576,11 +577,10 @@ async def test_at_the_cap_with_nothing_quiescent_requests_wait_and_mail_is_spool
 
 async def test_a_spooled_message_stops_retrying_but_is_never_deleted(base_env, pg_dsn, monkeypatch, caplog):
     from handler.runtime.web import email_ingest
+    from tests.runtime import reader_fakes
 
-    def unparseable(raw):
-        raise ValueError("cannot parse")
-
-    monkeypatch.setattr(email_ingest, "parse_email", unparseable)
+    # Parsing runs in a reader process, so the stand-in must be importable there.
+    monkeypatch.setattr(email_ingest, "parse_email_file", reader_fakes.unparseable)
     monkeypatch.setattr(host_module, "SPOOL_RETRY_SECONDS", 0.0)
     monkeypatch.setattr(host_module, "SPOOL_MAX_ATTEMPTS", 3)
     async with serve(base_env) as (app, client):
@@ -745,16 +745,118 @@ async def test_automations_are_refused_at_every_entry_point_on_free(base_env):
             response = await call(client, method, path, AS_PROXY)
             assert response.status_code == 403, (method, path)
             assert response.json()["feature"] == "automations"
-        offered = {spec.name for spec in slot(app).runtime.app.state.gateway.specs()}
+        gateway = slot(app).runtime.app.state.gateway
+        offered = {spec.name for spec in await gateway.specs_for(RunContext("r", SPEC.key))}
         assert not {name for name in offered if name.startswith("automation_")}
+        refused = await gateway.call(RunContext("r", SPEC.key, user_id="u"), "automation_list", {})
+        assert refused.is_error and "not included in this plan" in str(refused.content)
 
 
 async def test_paid_tenants_get_the_automation_tools(base_env):
     async with serve(base_env) as (app, client):
         await create(client)
         await activate(client)
-        offered = {spec.name for spec in slot(app).runtime.app.state.gateway.specs()}
+        gateway = slot(app).runtime.app.state.gateway
+        offered = {spec.name for spec in await gateway.specs_for(RunContext("r", SPEC.key))}
         assert "automation_create" in offered
+
+
+class ToolViewHarness(FakeHarness):
+    """Records the tool view each run gets from the gateway through its own run token,
+    and calls automation_create the way a model would."""
+
+    views: list[set[str]] = []
+    created: list[bool] = []
+    app = None
+
+    async def run(self, req):
+        lifecycle_ = slot(ToolViewHarness.app).runtime.app.state.lifecycle
+        gateway = slot(ToolViewHarness.app).runtime.app.state.gateway
+        token = req.mcp_servers[0].headers["Authorization"].partition(" ")[2]
+        ctx = lifecycle_.tokens.resolve(token)
+        ToolViewHarness.views.append({spec.name for spec in await gateway.specs_for(ctx)})
+        result = await gateway.call(ctx, "automation_create", {
+            "name": "digest", "prompt": "send the digest", "schedule": "every 1h"})
+        ToolViewHarness.created.append(not result.is_error)
+        async for event in super().run(req):
+            yield event
+
+
+@contextlib.asynccontextmanager
+async def open_stream(app):
+    """An SSE connection held open on the tenant (it blocks any restart)."""
+    started, gone = asyncio.Event(), asyncio.Event()
+
+    async def receive():
+        await gone.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        started.set()
+
+    scope = {"type": "http", "method": "GET", "path": "/i/m42/api/stream",
+             "raw_path": b"/i/m42/api/stream", "root_path": "", "scheme": "http",
+             "query_string": b"", "server": ("h", 80), "client": ("c", 1),
+             "http_version": "1.1", "headers": [(b"authorization", b"Bearer admin-42")]}
+    stream = asyncio.create_task(app.state.tenants(scope, receive, send))
+    await asyncio.wait_for(started.wait(), 5)
+    try:
+        yield
+    finally:
+        gone.set()
+        await asyncio.wait_for(stream, 5)
+
+
+@pytest.fixture
+def tool_view(monkeypatch):
+    ToolViewHarness.views, ToolViewHarness.created = [], []
+    monkeypatch.setattr(server, "OpenAIAgentsHarness", ToolViewHarness)
+    return ToolViewHarness
+
+
+async def test_an_upgrade_offers_automation_tools_on_the_next_run_without_a_restart(
+        base_env, pg_dsn, spy, tool_view):
+    """Codex review finding 1: an open SSE stream kept the runtime (and its tools) alive."""
+    async with serve(base_env) as (app, client):
+        tool_view.app = app
+        await create(client, plan="free")
+        await activate(client)
+        runtime = slot(app).runtime
+        async with open_stream(app):
+            await live_store(app).put(chat("before"), SPEC)
+            await until(lambda: tool_view.created)
+            assert "automation_create" not in tool_view.views[0] and tool_view.created == [False]
+            response = await client.put("/platform/tenants/42", headers=PLATFORM,
+                                        json={"plan": "paid"})
+            assert response.status_code == 200
+            await until(lambda: slot(app).runtime.app.state.lifecycle.limits.current.automations)
+            await live_store(app).put(chat("after"), SPEC)
+            await until(lambda: len(tool_view.created) == 2)
+            assert slot(app).runtime is runtime and spy.starts["m42"] == 1  # no restart
+            assert "automation_create" in tool_view.views[1] and tool_view.created[1] is True
+        assert rows(pg_dsn, "SELECT name FROM handler_m42.schedules") == [("digest",)]
+
+
+async def test_a_downgrade_removes_automation_tools_on_the_next_run(base_env, spy, tool_view):
+    async with serve(base_env) as (app, client):
+        tool_view.app = app
+        await create(client)
+        await activate(client)
+        gateway = slot(app).runtime.app.state.gateway
+        async with open_stream(app):
+            await live_store(app).put(chat("before"), SPEC)
+            await until(lambda: tool_view.created)
+            assert "automation_create" in tool_view.views[0] and tool_view.created == [True]
+            await client.put("/platform/tenants/42", headers=PLATFORM, json={"plan": "free"})
+            await until(lambda: not slot(app).runtime.app.state.lifecycle.limits.current.automations)
+            await live_store(app).put(chat("after"), SPEC)
+            await until(lambda: len(tool_view.created) == 2)
+            assert spy.starts["m42"] == 1
+            assert not {n for n in tool_view.views[1] if n.startswith("automation_")}
+            assert tool_view.created[1] is False  # a call from an older view is refused
+            stale = await gateway.call(RunContext("r", SPEC.key, user_id="u"), "automation_create",
+                                       {"name": "x", "prompt": "x", "schedule": "every 1h"})
+            assert stale.is_error and "automations are not included" in str(stale.content)
 
 
 async def test_a_downgraded_tenants_schedules_are_kept_paused_and_resume(base_env, pg_dsn):

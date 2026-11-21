@@ -450,3 +450,24 @@ async def test_revive_thread_can_discard_pending_events(store, spec, running):
     assert await store.revive_thread(spec.key, discard_pending=True)
     assert await store.pending_events(spec.key) == []
     assert await store.claim("worker", spec.lane, 1, 60) == []
+
+
+async def test_has_claimable_matches_what_claim_would_find(store, clock, spec, event):
+    """The run gate queues a tenant on this; env instances on SQLite share the gate too."""
+    assert not await store.has_claimable(Lane.INTERACTIVE)
+    await store.put(event("one"), spec)
+    assert await store.has_claimable(Lane.INTERACTIVE)
+    assert not await store.has_claimable(Lane.BACKGROUND)
+    await store.claim("worker", Lane.INTERACTIVE, 10, 60)
+    assert not await store.has_claimable(Lane.INTERACTIVE)  # leased
+    clock.advance(61)
+    assert await store.has_claimable(Lane.INTERACTIVE)  # the lease expired
+
+
+async def test_event_by_idempotency_key_finds_the_stored_original(store, spec, event):
+    original = event("u:m1")
+    await store.put(original, spec)
+    assert not await store.put(event("u:m1", thread_key="chat:u:other"), spec)
+    found = await store.event_by_idempotency_key("u:m1")
+    assert found.id == original.id and found.thread_key == spec.key
+    assert await store.event_by_idempotency_key("u:nope") is None
