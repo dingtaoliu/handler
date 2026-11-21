@@ -9,7 +9,18 @@ The owner has asked for the merge and deployment to be handed over. **Ask the ow
 each production release.** This handoff authorizes preparing releases, not shipping
 them. Never print secret config values or pass them as command arguments.
 
-## Where things stand
+## Status, November 21, 2026
+
+- **Release 1 shipped** as Handler **v64** (`main` `26ae390`). Backup b043. BSS backlog
+  replayed: 12 mail runs, all completed.
+- **Release 3 shipped** as Crontal **v127** (`main` `c3146ef`), together with the
+  owner-approved quotation templates (`08d2d1f`, migration `z2quote20261115`). Backup b044.
+- **Release 2 is next.** Wait until v64 has run for about a day (watch `run failed`, R14
+  and the replayed BSS threads). Then follow the Release 2 section: re-measure on the
+  built image, check gate variables, merge `feat/shared-runtime` into `main`, and release.
+- Records are in [HANDOFF.md](HANDOFF.md).
+
+## Where things stand (written before the releases)
 
 All build work is finished and committed. Nothing is pushed or deployed.
 
