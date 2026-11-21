@@ -11,6 +11,14 @@
   re-uploaded. That is the only place Handler sends an input file; chat `{"type": "file"}`
   blocks are transcript-only (the model reads attachments from the workspace). Threads
   that already failed need a replay to run again.
+- **Transient provider errors were final.** A plain `openai.APIError` ("Our servers are
+  currently overloaded. Please try again later.", status-less, from a stream) killed two mail
+  threads on their first attempt. `harness/openai_agents.py` `_error` now also retries
+  429/408/409/5xx status errors, status-less errors whose code or message says
+  overload/unavailable, the 400 "Another process is currently operating on this
+  conversation" (waits at least `CONVERSATION_BUSY_RETRY_SECONDS` = 30 s, via the new
+  `HarnessError.retry_after`), and `ModelBehaviorError` "did not produce a final response"
+  (at most 2 attempts, via `HarnessError.max_attempts`). Other 400s stay final.
 
 ## 2026-11-14 prompt-cache release (Handler v62)
 

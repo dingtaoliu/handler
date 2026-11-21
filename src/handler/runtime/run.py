@@ -1053,9 +1053,13 @@ class RunExecutor:
             logger.exception("run crashed")
         attempt = thread.attempts + 1
         retry_in: float | None = None
+        if isinstance(exc, HarnessError) and exc.max_attempts is not None:
+            max_attempts = min(max_attempts, exc.max_attempts)
         if retryable and attempt < max_attempts:
             backoff = self.config.retry_backoff_seconds
             retry_in = backoff[min(attempt - 1, len(backoff) - 1)]
+            if isinstance(exc, HarnessError) and exc.retry_after:
+                retry_in = max(retry_in, exc.retry_after)
         usage, cost = recorder.totals()
         run.status, run.usage, run.cost_usd = RunStatus.FAILED, usage, cost
         run.error, run.finished_at = f"{type(exc).__name__}: {exc}"[:2000], utcnow()
