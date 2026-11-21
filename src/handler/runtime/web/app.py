@@ -25,6 +25,7 @@ from ..images import MAX_IMAGES_PER_MESSAGE, VISION_TYPES
 from ..memory import MAX_CONTEXT_LINKS, MAX_THREAD_CONTEXT_LINKS, normalize_context_link
 from ..uploads import UploadStore
 from ..run import fill_tool_inputs
+from ..tasks import decode_cursor, encode_cursor
 from ..settings import HarnessSource, ModelName, ReasoningEffort, resolve_harness
 from ..types import Event, Lane, ThreadSpec, ThreadType
 from .auth_api import auth_router
@@ -315,18 +316,6 @@ def create_app(
         rows.sort(key=lambda t: (t.get("last_message_at") or t["created_at"], t["key"]), reverse=True)
         return rows[:100]
 
-    # Before the greedy /api/threads/{key:path} routes.
-    @router.get("/api/threads/parked")
-    async def parked_threads(principal: Principal = principal_dep) -> Any:
-        """Threads that stopped after their last attempt and wait for a person:
-        the error, attempts and how many events are queued on each."""
-        rows = [row for row in await store.parked_threads(limit=200)
-                if can_see_thread(principal, row["thread_key"])]
-        metadata = await store.thread_metadata([r["thread_key"] for r in rows],
-                                               principal.user_id)
-        return _json([{**row, "title": (metadata.get(row["thread_key"]) or {}).get("title")}
-                      for row in rows])
-
     @router.get("/api/events")
     async def list_events(source: str | None = None, status: str | None = None,
                           limit: int = 50, principal: Principal = principal_dep) -> Any:
@@ -335,6 +324,42 @@ def create_app(
                                        limit=max(1, min(limit, 200)))
         return _json([{**_json(event), "status": state} for event, state in rows
                       if not event.thread_key or can_see_thread(principal, event.thread_key)])
+
+    # Before /api/runs/{run_id}. Admin only: the operator's debugging tools.
+    @router.get("/api/runs/failed")
+    async def failed_runs(limit: int = 50, before: str | None = None,
+                          _: Principal = Depends(auth.require_admin)) -> Any:
+        """Runs that failed for good, newest first, with their thread, error,
+        attempts and events. `before` is the previous page's `next_cursor`."""
+        try:
+            cursor = decode_cursor(before) if before else None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        limit = max(1, min(limit, 200))
+        rows = await store.failed_runs(limit=limit, before=cursor)
+        metadata = await store.thread_metadata(sorted({r["thread_key"] for r in rows}), None)
+        items = [{**row, "title": (metadata.get(row["thread_key"]) or {}).get("title")}
+                 for row in rows]
+        last = rows[-1] if len(rows) == limit else None
+        return _json({"items": items, "next_cursor": encode_cursor(
+            last["failed_at"], last["run_id"]) if last else None})
+
+    @router.post("/api/runs/{run_id}/replay")
+    async def replay_run(run_id: str, principal: Principal = Depends(auth.require_admin)) -> Any:
+        """Make a failed run's events pending again on its thread, so they run once more."""
+        result = await store.replay_failed_run(run_id, by=principal.identity)
+        if result is None:
+            if await store.get_run(run_id) is None:
+                raise HTTPException(404, "run not found")
+            raise HTTPException(409, "run is not a terminal failure")
+        if not result["replayed"]:
+            raise HTTPException(409, "run was already replayed")
+        logger.info("failed run replayed", extra={
+            "run_id": run_id, "thread_key": result["thread_key"],
+            "requeued": result["requeued"], "by": principal.identity})
+        bus.publish(BusMessage(result["thread_key"], None, "thread_updated", {}))
+        return _json({"run_id": run_id, "thread_key": result["thread_key"],
+                      "requeued": result["requeued"], "replayed_at": result["replayed_at"]})
 
     @router.get("/api/runs/{run_id}")
     async def get_run(run_id: str, principal: Principal = principal_dep) -> Any:
@@ -368,21 +393,6 @@ def create_app(
             raise HTTPException(422, str(exc)) from exc
         bus.publish(BusMessage(key, None, "thread_updated", {}))
         return {**_json(thread), **_json((await store.thread_metadata([key], principal.user_id))[key])}
-
-    @router.post("/api/threads/{key:path}/retry")
-    async def retry_thread(key: str, principal: Principal = Depends(auth.require_admin)) -> Any:
-        """Run a parked thread again, with every event still queued on it."""
-        thread = await store.get_thread(key)
-        if thread is None:
-            raise HTTPException(404, "thread not found")
-        if not thread.dead:
-            raise HTTPException(409, "thread is not parked")
-        await store.revive_thread(key)
-        logger.info("parked thread retried", extra={"thread_key": key,
-                                                    "by": principal.identity})
-        bus.publish(BusMessage(key, None, "thread_updated", {}))
-        thread = await store.get_thread(key)
-        return {"thread": _json(thread), "pending_events": len(await store.pending_events(key))}
 
     @router.post("/api/threads/{key:path}/read")
     async def mark_read(key: str, body: ThreadReadRequest,

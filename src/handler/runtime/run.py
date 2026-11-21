@@ -406,6 +406,19 @@ def _has_rollout(home: Path, session_id: str) -> bool:
 CODEX_HARNESS, NATIVE_HARNESS = "codex", "openai_agents"
 
 
+def log_run_failed(tenant: str | None, thread_key: str, thread_type: Any, run_id: str,
+                   attempts: int, error: str | None, event_ids: list[str], **extra: Any) -> None:
+    """The operator's signal for a terminal failure: one ERROR line, `run failed`.
+
+    The stable message and fields are what a log-based alert matches. The run's
+    events can be run again with POST /api/runs/{run_id}/replay.
+    """
+    logger.error("run failed", extra={
+        "tenant": tenant or "main", "thread_key": thread_key, "thread_type": str(thread_type),
+        "run_id": run_id, "attempts": attempts, "error": (error or "")[:500],
+        "event_ids": list(event_ids), **extra})
+
+
 class RunExecutor:
     _active_runs = 0  # across every instance in this process, for the memory logs
 
@@ -422,7 +435,6 @@ class RunExecutor:
         settings: SettingsService | None = None,
         memory_tools: MemoryTools | None = None,
         workspace_sync: WorkspaceSync | None = None,
-        failure_notifier: Any = None,
         crontal_identity: Any = None,
         crontal_catalog: Any = None,
     ) -> None:
@@ -432,8 +444,6 @@ class RunExecutor:
         self.crontal_identity = crontal_identity
         # CrontalRouteCatalog (gateway/crontal_catalog.py): the prompt's API catalog.
         self.crontal_catalog = crontal_catalog
-        # FailureNotifier (notifications.py): told about terminal background failures.
-        self.failure_notifier = failure_notifier
         self.tokens = tokens
         self.mcp_url = mcp_url
         self.settings = settings
@@ -1070,29 +1080,25 @@ class RunExecutor:
                 await self.store.add_messages(lease, inputs)
             except Exception:  # noqa: BLE001 - must not stop the thread being failed
                 logger.exception("could not save the failed run's input messages")
-        failed = await self.store.fail(lease, run.error, retry_in)
+        # With no retry left (or an error never retried) the failure is accepted:
+        # the run's events are consumed by it (they run again only if the operator
+        # replays the run) and the thread stays open for new work. Nobody is
+        # notified; a chat shows the error inline (run_finished, last_error).
+        failed = await self.store.fail(lease, run.error, retry_in, run_id=run.id,
+                                       event_ids=run.trigger_event_ids)
         try:
             await finish_task_run(self.store, run)
         except Exception:
             logger.exception("could not record failed task outcome")
-        logger.warning("run failed", extra={"error": run.error, "retry_in": retry_in})
+        if retry_in is not None:
+            logger.warning("run failed, will retry", extra={"error": run.error,
+                                                            "retry_in": retry_in})
+        elif failed:
+            log_run_failed(self.config.instance_name, thread.key, thread.type, run.id,
+                           attempt, run.error, run.trigger_event_ids)
         self._publish(thread.key, run.id, "run_finished",
                       {"status": "failed", "error": run.error, "retry_in": retry_in})
         await self._publish_task(thread, run.id)
-        if failed and retry_in is None:
-            # Parked: nothing runs on the thread until a person retries it (or,
-            # for chat, sends another message). The stable message is the
-            # operator's log-based alert.
-            logger.error("thread parked", extra={
-                "tenant": self.config.instance_name, "thread_key": thread.key,
-                "thread_type": str(thread.type), "run_id": run.id, "attempts": attempt,
-                "error": run.error[:500]})
-            if self.failure_notifier is not None:
-                try:
-                    await self.failure_notifier.run_failed(thread, run,
-                                                           await self._acting_as(thread))
-                except Exception:
-                    logger.exception("failure notification failed")
 
     async def _publish_task(self, thread: Thread, run_id: str) -> None:
         """Live task status for background (non-chat) threads."""

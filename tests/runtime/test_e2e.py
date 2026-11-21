@@ -175,7 +175,7 @@ async def test_event_arriving_mid_run_is_picked_up_next(env):
     assert [r.prompt for r in harness.requests] == ["first", "second"]
 
 
-async def test_retryable_failure_backs_off_then_dead_letters(env):
+async def test_retryable_failure_backs_off_then_is_accepted(env):
     store, _, harness, dispatcher = env
     harness.fail_with = HarnessError("network blip", retryable=True)
     await store.put(*chat("hi"))
@@ -186,9 +186,17 @@ async def test_retryable_failure_backs_off_then_dead_letters(env):
     (run,) = await store.list_runs("chat:u1:c1")
     assert run.status is RunStatus.FAILED and "network blip" in run.error
 
-    await drain(dispatcher)  # max_attempts=2 → second failure dead-letters
+    await drain(dispatcher)  # max_attempts=2 → the second failure is accepted
     thread = await store.get_thread("chat:u1:c1")
-    assert thread.dead and thread.attempts == 2
+    assert not thread.dead and thread.attempts == 0 and "network blip" in thread.last_error
+    assert await store.pending_events("chat:u1:c1") == []  # consumed by the failed run
+    (failure,) = await store.failed_runs()
+    assert failure["attempts"] == 2 and failure["thread_key"] == "chat:u1:c1"
+    # The thread is not blocked: the next message runs normally.
+    harness.fail_with = None
+    await store.put(*chat("again"))
+    await drain(dispatcher)
+    assert (await store.list_runs("chat:u1:c1"))[0].status is RunStatus.COMPLETED
 
 
 async def test_unknown_harness_fails_without_retry(env):
@@ -197,7 +205,10 @@ async def test_unknown_harness_fails_without_retry(env):
     spec = ThreadSpec(key=spec.key, type=spec.type, lane=spec.lane, harness="nope")
     await store.put(ev, spec)
     await drain(dispatcher)
-    assert (await store.get_thread(spec.key)).dead
+    thread = await store.get_thread(spec.key)
+    assert not thread.dead and thread.pending_since is None and thread.attempts == 0
+    (run,) = await store.list_runs(spec.key)
+    assert run.status is RunStatus.FAILED and "unknown harness" in run.error
 
 
 async def test_run_forever_processes_and_stops(env):

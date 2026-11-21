@@ -230,7 +230,9 @@ async def test_fresh_session_failure_is_not_retried_again_and_session_is_cleared
     await runner.execute(await claimed(store))
     assert len(harness.requests) == 2
     thread = await store.get_thread(KEY)
-    assert thread.session_id == "" and thread.attempts == 1
+    # Not retried: the failure is accepted (attempts reset, thread left open).
+    assert thread.session_id == "" and thread.attempts == 0 and not thread.dead
+    assert "session not found" in thread.last_error
     run, = await store.list_runs(KEY)
     assert run.status is RunStatus.FAILED
     assert sum(s.kind is StepKind.RETRY for s in await store.list_steps(run.id)) == 1

@@ -164,7 +164,7 @@ async def test_complete_consumes_only_snapshot_and_keeps_pending(store, clock, s
     assert (await store.get_thread(spec.key)).pending_since is None
 
 
-async def test_fail_backoff_reset_and_dead_letter(store, clock, spec, event):
+async def test_fail_backoff_reset_and_accept_terminal_failure(store, clock, spec, event):
     queued = event("first")
     await store.put(queued, spec)
     lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
@@ -180,21 +180,28 @@ async def test_fail_backoff_reset_and_dead_letter(store, clock, spec, event):
     thread = await store.get_thread(spec.key)
     assert thread.attempts == 0
     assert thread.last_error is thread.available_at is thread.pending_since is None
-    await store.put(event("new"), spec)
+    new = event("new")
+    await store.put(new, spec)
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    await store.put(event("mid-run", type="crontal.rfq.updated"), spec)
+    assert await store.fail(lease, "fatal", None, run_id="run_x", event_ids=[new.id])
+    # Accepted: the run's event is consumed by it, the thread is never dead, and
+    # what arrived during the run (or later) runs at once.
+    thread = await store.get_thread(spec.key)
+    assert thread.dead is False and thread.attempts == 0 and thread.last_error == "fatal"
+    assert thread.available_at is None and thread.pending_since is not None
+    assert [e.idempotency_key for e in await store.pending_events(spec.key)] == ["mid-run"]
+    await store.put(event("user-again"), spec)
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    assert len(await store.pending_events(spec.key)) == 2
+    assert await store.complete(lease, "run_y", [e.id for e in
+                                                 await store.pending_events(spec.key)])
+    # Without event ids, a terminal failure consumes everything still queued.
+    await store.put(event("last"), spec)
     lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
     assert await store.fail(lease, "fatal", None)
-    thread = await store.get_thread(spec.key)
-    assert thread.dead is True and thread.attempts == 1 and thread.last_error == "fatal"
-    await store.put(event("after-dead", type="crontal.rfq.updated"), spec)
-    clock.advance(1000)
-    assert await store.claim("worker", Lane.INTERACTIVE, 1, 60) == []
-    assert len(await store.pending_events(spec.key)) == 2
-    # A new chat message revives the dead thread with its pending events.
-    await store.put(event("user-again"), spec)
-    thread = await store.get_thread(spec.key)
-    assert thread.dead is False and thread.attempts == 0
-    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
-    assert len(await store.pending_events(spec.key)) == 3
+    assert await store.pending_events(spec.key) == []
+    assert (await store.get_thread(spec.key)).pending_since is None
 
 
 @pytest.mark.parametrize("signal", ["put", "complete", "fail"])
@@ -424,11 +431,11 @@ async def test_abandon_run_marks_a_running_row(store, running):
     assert abandoned.status is RunStatus.ABANDONED and abandoned.error.startswith("abandoned")
 
 
-async def test_revive_thread_clears_dead_and_optionally_session(store, spec, running):
+async def test_revive_thread_clears_backoff_and_optionally_session(store, spec, running):
     lease, _ = running
     assert await store.set_session(lease, "conv_1")
-    assert await store.fail(lease, "fatal", None)
-    assert (await store.get_thread(spec.key)).dead
+    assert await store.fail(lease, "slow down", 3600)
+    assert await store.claim("worker", spec.lane, 1, 60) == []  # backing off
     assert await store.revive_thread(spec.key, reset_session=True)
     thread = await store.get_thread(spec.key)
     assert not thread.dead and thread.attempts == 0 and thread.last_error is None
@@ -439,7 +446,7 @@ async def test_revive_thread_clears_dead_and_optionally_session(store, spec, run
 
 async def test_revive_thread_can_discard_pending_events(store, spec, running):
     lease, _ = running
-    assert await store.fail(lease, "fatal", None)
+    assert await store.fail(lease, "slow down", 3600)
     assert await store.revive_thread(spec.key, discard_pending=True)
     assert await store.pending_events(spec.key) == []
     assert await store.claim("worker", spec.lane, 1, 60) == []

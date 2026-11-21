@@ -114,7 +114,17 @@ async def test_a_thread_on_a_disallowed_harness_is_refused_not_switched(store, t
     run, = await store.list_runs(key)
     assert run.status is RunStatus.FAILED and "not allowed on this host" in run.error
     thread = await store.get_thread(key)
-    assert thread.dead and thread.harness == "codex" and thread.attempts == 1  # no retry
+    assert thread.harness == "codex" and "not allowed on this host" in thread.last_error
+    # No retry, and the thread is not blocked: the failure is recorded once, and
+    # the next firing is claimed and runs (and fails again) as usual.
+    assert not thread.dead and thread.pending_since is None and thread.attempts == 0
+    (failure,) = await store.failed_runs()
+    assert failure["run_id"] == run.id and failure["attempts"] == 1
+    await store.put(Event("automation.fired", "test", {"prompt": "go"}, "e2", thread_key=key),
+                    ThreadSpec(key, ThreadType.AUTOMATION, Lane.BACKGROUND, harness="codex"))
+    lease, = await store.claim("w", Lane.BACKGROUND, 1, 60)
+    await executor.execute(lease)
+    assert len(await store.failed_runs()) == 2 and codex.runs == 0
 
 
 async def _wire(tmp_path, monkeypatch, store, argv, allowed):
@@ -165,3 +175,30 @@ def test_allow_list_is_host_only():
 
 async def _noop_close():
     pass
+
+
+async def test_startup_sweeps_threads_an_older_release_parked(store, tmp_path, monkeypatch,
+                                                              caplog):
+    key = "email:old"
+    spec = ThreadSpec(key, ThreadType.EMAIL, Lane.BACKGROUND, harness="openai_agents")
+    await store.put(Event("email.received", "email", {"subject": "Hi"}, "m1", thread_key=key),
+                    spec)
+    await store._thread_query("UPDATE threads SET dead = TRUE, attempts = 2, "
+                              "last_error = 'old' WHERE key = ? RETURNING key", (key,))
+    (queued,) = await store.pending_events(key)
+    with caplog.at_level("ERROR", logger="handler.runtime.run"):
+        await _wire(tmp_path, monkeypatch, store, [], NATIVE)
+    (alert,) = [r for r in caplog.records if r.message == "run failed"]
+    assert alert.thread_key == key and alert.thread_type == "email" and alert.attempts == 2
+    assert alert.event_ids == [queued.id] and alert.failed_before_upgrade is True
+    thread = await store.get_thread(key)
+    assert not thread.dead and await store.pending_events(key) == []
+    # The mail itself is kept, and replay brings it back.
+    assert [e.id for e, _ in await store.list_events(source="email")] == [queued.id]
+    (failure,) = await store.failed_runs()
+    caplog.clear()
+    with caplog.at_level("ERROR", logger="handler.runtime.run"):
+        await _wire(tmp_path, monkeypatch, store, [], NATIVE)  # idempotent
+    assert not [r for r in caplog.records if r.message == "run failed"]
+    assert (await store.replay_failed_run(failure["run_id"]))["requeued"] == 1
+    assert [e.id for e in await store.pending_events(key)] == [queued.id]

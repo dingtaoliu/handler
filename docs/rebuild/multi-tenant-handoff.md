@@ -41,7 +41,7 @@ is at the top of [HANDOFF.md](HANDOFF.md).
    3. Switch a few merchants on with `flask handler-instance cutover --on --merchant-id <id>`.
 
    See [tenant-registry.md](tenant-registry.md), [plan-limits.md](plan-limits.md) and Crontal's `docs/handler-instances.md`. Remove Crontal's old agent (`AIAgentPanel`, the agent loop) only after a week with all merchants moved.
-5. **The role split is approved (November 15):** follow its build order. Steps 0 and 1 add the native-only guard and parked threads; step 2 replaces the per-tenant scheduler, housekeeping and poller tasks with one timer for the host. Approvals were checked on November 15: they park and resume as new events, with no in-memory wait.
+5. **The role split is approved (November 15):** follow its build order. Steps 0 and 1 add the native-only guard and failed-run handling (a failure never blocks a thread; owner decision of November 21, replacing parked threads); step 2 replaces the per-tenant scheduler, housekeeping and poller tasks with one timer for the host. Approvals were checked on November 15: they park and resume as new events, with no in-memory wait.
 
 ## Known gaps and accepted risks
 

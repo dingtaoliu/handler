@@ -165,7 +165,7 @@ async def test_complete_consumes_only_snapshot_and_releases_lease(store, clock, 
     assert (await store.get_thread(spec.key)).pending_since is None
 
 
-async def test_fail_backoff_reset_and_dead_letter(store, clock, spec, event):
+async def test_fail_backoff_reset_and_accept_terminal_failure(store, clock, spec, event):
     queued = event("first")
     await store.put(queued, spec)
     lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
@@ -186,19 +186,25 @@ async def test_fail_backoff_reset_and_dead_letter(store, clock, spec, event):
     new = event("new")
     await store.put(new, spec)
     lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
-    assert await store.fail(lease, "fatal", None)
+    await store.put(event("mid-run", type="crontal.rfq.updated"), spec)
+    assert await store.fail(lease, "fatal", None, run_id="run_x", event_ids=[new.id])
+    # Accepted: the run's event is consumed by it, the thread is never dead, and
+    # what arrived during the run (or later) runs at once.
     thread = await store.get_thread(spec.key)
-    assert thread.dead is True and thread.attempts == 1 and thread.last_error == "fatal"
-    await store.put(event("after-dead", type="crontal.rfq.updated"), spec)
-    clock.advance(1000)
-    assert await store.claim("worker", Lane.INTERACTIVE, 1, 60) == []
-    assert len(await store.pending_events(spec.key)) == 2
-    # A new chat message revives the dead thread with its pending events.
+    assert thread.dead is False and thread.attempts == 0 and thread.last_error == "fatal"
+    assert thread.available_at is None and thread.pending_since is not None
+    assert [e.idempotency_key for e in await store.pending_events(spec.key)] == ["mid-run"]
     await store.put(event("user-again"), spec)
-    thread = await store.get_thread(spec.key)
-    assert thread.dead is False and thread.attempts == 0
     lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
-    assert len(await store.pending_events(spec.key)) == 3
+    assert len(await store.pending_events(spec.key)) == 2
+    assert await store.complete(lease, "run_y", [e.id for e in
+                                                 await store.pending_events(spec.key)])
+    # Without event ids, a terminal failure consumes everything still queued.
+    await store.put(event("last"), spec)
+    lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
+    assert await store.fail(lease, "fatal", None)
+    assert await store.pending_events(spec.key) == []
+    assert (await store.get_thread(spec.key)).pending_since is None
 
 
 async def test_repeated_failures_increment_attempts_and_preserve_events(store, spec, event):

@@ -271,7 +271,7 @@ Repo and code layout:
     - a harness not listed is never constructed;
     - a `HANDLER_DEFAULT_HARNESS` outside it stops startup, and the platform API and registry refuse such tenant config (422 / validation error);
     - saving or rolling back `threads` settings that name it returns 422; unset types default to an allowed harness, and the form offers only allowed ones;
-    - a thread whose stored harness is not allowed is not run and not switched: its run fails at once with no retry, and the thread parks with the reason. Startup logs an ERROR when saved `threads` settings still name one.
+    - a thread whose stored harness is not allowed is not run and not switched: its run fails at once with no retry and is recorded as a failed run with the reason (the thread stays open; see notifications.md, "Failed runs"). Startup logs an ERROR when saved `threads` settings still name one.
 
 ## 4. Crontal integration (both repos)
 
