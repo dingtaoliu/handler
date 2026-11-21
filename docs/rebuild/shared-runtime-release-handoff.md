@@ -25,23 +25,23 @@ Test results at handover:
 
 | Commit | Suite |
 | --- | --- |
-| Handler `98358db` (Release 1) | 1,578 passed / 4 skipped |
-| Handler `db00880` (Release 2) | 1,623 passed / 5 skipped. The skip is a Linux-only address-space test. The Linux pool tests passed in an arm64 container |
+| Handler `ead189b` (Release 1, branch `feat/shared-runtime-r1`) | 1,620 passed / 4 skipped; 1,587 / 4 three runs in a row before the last two fixes |
+| Handler `feat/shared-runtime` (Release 2, includes the Release 1 line) | 1,665 passed / 5 skipped, twice. The skip is a Linux-only address-space test. The Linux pool tests passed in an arm64 container |
 | Crontal `18a3018` (Release 3) | Backend 751 passed / 1 skipped. Frontend `npm run build` passes; `npx vitest run` 64/64; lint has 64 errors and 30 warnings, all already there, none in changed files |
 
 ## Plan: three releases
 
 | Release | App | What | Commit |
 | --- | --- | --- | --- |
-| 1 | `crontal-agent` | Steps 0 and 1: native-only harness guard, workspace upload at run end, parked threads, dead-delivery redeliver | Handler `98358db` |
-| 2 | `crontal-agent` | Step 4 (reader pool, PyMuPDF for PDF text) and the run-gating fixes from Codex's review | Handler `db00880` |
+| 1 | `crontal-agent` | Steps 0 and 1: native-only harness guard, workspace upload at run end, accepted failure with Failed runs and Replay, dead-delivery redeliver; plus two production bug fixes (uppercase `.PDF` uploads, retry classification) | Handler `ead189b` on `feat/shared-runtime-r1` |
+| 2 | `crontal-agent` | Step 4 (reader pool, PyMuPDF for PDF text) and the run-gating fixes from Codex's review | Head of `feat/shared-runtime` (it already contains the Release 1 line) |
 | 3 | `hephaestus-backend-test` | Chat sends `client_message_id` and a client-made `conversation_id` | Crontal `18a3018` |
 
 Releases 1 and 2 are separate because the reader pool has no on/off switch: undoing it
 means rolling back the release. Release 3 is independent of both: current Handler already
 accepts both ids. It can go out before, between or after them.
 
-### Release 1: steps 0 and 1 (Handler `98358db`)
+### Release 1: steps 0 and 1 (Handler `ead189b`, branch `feat/shared-runtime-r1`)
 
 **Contents:**
 
@@ -51,10 +51,19 @@ accepts both ids. It can go out before, between or after them.
 | `a9437e8` | A thread's workspace uploads in the background when its run ends; a failed upload falls back to the 300 s sync |
 | `625e38b` | `HANDLER_ALLOWED_HARNESSES`: only listed harnesses can be built, set as default, saved in threads settings or set through the platform API. A stored thread on a disallowed harness parks with a clear reason |
 | `9b14857` | Parked threads: an alert, an admin notice, one notice for new work while parked, and a list and Retry in the API, CLI and UI. Dead deliveries: an alert, an admin notice at most hourly per sink, and redeliver in the API and CLI. New column `threads.park_noticed` |
-| `98358db` | No park notice for chat threads (owner decision). The operator log line stays |
+| `98358db` | No park notice for chat threads (superseded by the next rows) |
+| `0241bbe` | Cherry-pick of `6cedced`: the held-email test no longer depends on timing |
+| `cd5ae17`, `69ebc3a` | **Accepted failure replaces parking** (owner decision, November 21). A run that fails for good is `FAILED`, its events are consumed by it, and the thread stays usable. No user or tenant-admin failure notices, including the pre-existing background one. Operator signals: ERROR `run failed` (tenant, thread, type, run, attempts, error, event ids), a `run_failures` table, `GET /api/runs/failed`, `POST /api/runs/{run_id}/replay` (once), CLI `handler-rt run failed` / `run replay`, and a Failed runs table with Replay on Activity. A startup sweep clears old `dead` threads, marks their queued events `failed-before-upgrade` and records them for replay. Parking (`park_noticed`, `/api/threads/parked`, `/retry`, badges) is removed |
+| `70e48a5` | PDFs are uploaded under a lowercase `.pdf` name. OpenAI refused `X.PDF` as input with a 400, which failed 9 BSS mail threads |
+| `ead189b` | Transient provider errors retry: overload, 429/408/409/5xx, and "another process is operating on this conversation" (after at least 30 s). "Model did not produce a final response" retries once. Other 400s stay final |
 
 **Checks before release:**
 
+0. **Already done, November 21 (read-only):**
+   - Threads settings name `openai_agents` everywhere. `handler_crontal` has 3 chat threads on `codex` (user 1, last used October 18); writing in them fails the run, and nothing else is affected.
+   - Dead threads: none in `handler_crontal` or `handler_yeup`. `handler_bss` has 13: 12 mail threads with 40 queued events (November 9 to 20) and 1 chat thread (November 11).
+   - The causes were the uppercase `.PDF` upload (9 threads), "overloaded" classified as final (2), "another process…" (1) and "no final response" (1). All are fixed in this release.
+   - Re-run both queries just before releasing, since new dead threads may appear.
 1. **No Codex left in production.** Setting `HANDLER_ALLOWED_HARNESSES=openai_agents` parks
    any stored thread whose harness is `codex`, and logs an ERROR at startup if saved threads
    settings name it. The owner says production uses only `openai_agents`; confirm it with
@@ -68,25 +77,25 @@ accepts both ids. It can go out before, between or after them.
 
    Run them with `heroku pg:psql -a hephaestus-backend-test` (Handler and Crontal share the
    database). If anything names `codex`, stop and ask the owner.
-2. **The intermittent test.** One full-suite run in about 10 failed once. The likely cause
+2. **The intermittent test (done: the fix is cherry-picked, and the suite passed 3 runs in a row).** One full-suite run in about 10 failed once. The likely cause
    is the held-email test in `tests/runtime/store_pg/test_review_fixes.py`, which depended
    on parse timing. It also failed when run alone at `c9cae4e`. It is fixed in `6cedced`,
    which is only on the Release 2 side. Run the suite on the Release 1 merge at least 3
    times with `-rf`. A failure in that one test is the known timing flake (rerun it, or
    cherry-pick `6cedced`, which is test-only). Investigate any other failure.
-3. **The UI in a browser.** The parked badge, the error with Retry, and the Parked threads
-   table on Activity (`web/static/app/`) were only checked with `node --check`. Run
-   Handler locally against a scratch database, park a thread (a run that fails with no
-   retries left), and check the badge, Retry and the table. Never connect a local run to
+3. **The UI in a browser.** The Failed runs table and Replay on Activity, and the
+   "Run failed (send your message again to retry)" note in a thread (`web/static/app/`),
+   were only checked with `node --check`. Run Handler locally against a scratch database,
+   make a run fail for good, and check the table, Replay and the note. Never connect a local run to
    production stores.
 
-**Merge:** merge `98358db` into `main`, not the branch head, which includes Release 2.
+**Merge:** merge `feat/shared-runtime-r1` (`ead189b`) into `main`, not `feat/shared-runtime`, which includes Release 2.
 Production follows `main`.
 
 ```sh
 git -C /Users/dannyliu/dev/repos/handler worktree add ../handler-wt-release1 main
 cd /Users/dannyliu/dev/repos/handler-wt-release1
-git merge --no-ff 98358db -m "Merge shared runtime steps 0 and 1"
+git merge --no-ff ead189b -m "Merge shared runtime steps 0 and 1"
 ```
 
 Then run the suite on the merge result. How `main` gets updated (direct merge, or a pull
@@ -114,16 +123,16 @@ v62 ignores it. Alternatively set it immediately after the release.
 
 - `/healthz`, `/i/main/healthz`, `/i/bss/healthz` and `/i/yeup/healthz` return 200; an
   unknown instance returns 404; cross-instance admin keys and no key return 401.
-- Startup logs: no harness ERROR. Check the column exists:
-  `SELECT table_schema FROM information_schema.columns WHERE table_name = 'threads' AND column_name = 'park_noticed';`
-  This should return one row per schema, after each tenant's first use.
+- Startup logs: no harness ERROR, and one `run failed` line with `failed_before_upgrade: true` per BSS dead thread swept (13 expected). Check `SELECT table_schema FROM information_schema.tables WHERE table_name = 'run_failures';` returns each schema after its first use, and that no thread has `dead = TRUE`.
 - A chat through Crontal's proxy works for one user each on `bss` and `yeup`.
-- `GET /i/<name>/api/threads/parked` returns a list (admin key).
-- Watch logs for `thread parked` and `delivery dead` for a day. The old message
+- `GET /i/bss/api/runs/failed` lists the swept threads (admin key).
+- **The BSS backlog: ask the owner** before replaying. The recommendation is to replay the 12 mail failures (`POST /i/bss/api/runs/{run_id}/replay`) and skip the November 11 chat. The agent will act on mail up to two weeks old, and replay can repeat tool side effects.
+- Watch logs for `run failed` and `delivery dead` for a day. The old message
   `delivery dead-lettered` is gone, so update any log filter that matched it.
 
-**Rollback:** `heroku rollback v62 -a crontal-agent`. The schema change only adds a column,
-so v62 runs on it unchanged. Unset `HANDLER_ALLOWED_HARNESSES` if desired; v62 ignores it.
+**Rollback:** `heroku rollback v62 -a crontal-agent`. The schema change only adds a table
+(`run_failures`), which v62 ignores. v62 would park threads again, and the next upgrade
+sweeps them. Unset `HANDLER_ALLOWED_HARNESSES` if desired; v62 ignores it.
 
 **Record** the release at the top of `HANDOFF.md`, in the style of the v62 entry: release,
 commit, image id and size, backup id, rollback target, verification evidence and suite
