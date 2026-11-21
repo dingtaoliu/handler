@@ -1,5 +1,28 @@
 # Handoff: handler rebuild
 
+## 2026-11-21 shared runtime Release 2 (Handler v65)
+
+- **Handler v65** (`main` at `133cf3f`, merging `feat/shared-runtime`; image
+  `cca5ffc258b4`, 2.15 GB). Backup **b045**. **Rollback: v64** (no schema change). Shipped
+  about 30 minutes after v64 at the owner's request; v64 had run 13 of 13 runs to completion
+  with no R14 before it.
+- **Contents:** the reader pool (document, email and image parsing in child processes, one
+  reader at a 220 MB RSS cap by default, one heavy library family per reader), PDF text
+  through PyMuPDF instead of MarkItDown, tool-result and file size caps, per-run peak memory
+  logs, one host `RunGate` (6 runs at once, 3 per tenant; no gate variables are set in
+  production), interactive before background across tenants, per-run tool views from the
+  live plan, and duplicate chat messages returning their original thread.
+- **Measured on the built image** (amd64, disposable storage, fake key): idle server 158 MB
+  with no reader processes; reader peaks 146 to 184 MB (PDFs of 30, 100 and 400 pages all
+  160 MB); every PDF/docx/xlsx sequence read with no refusals.
+- **Verified:** suite on the merge 1,676 passed / 5 skipped; `/healthz` and
+  `/i/{main,bss,yeup}/healthz` 200, unknown instance 404, no key 401; three instances
+  serving; no ERROR, R14 or traceback after start.
+- **Watch next:** R14 over the coming days against the days before; `document read` logs
+  (`family`, `reader_replaced`, `reader_recycled`) and "too large to read" refusals;
+  `run memory` logs with `run_peak_rss_mb` and `reader_peak_rss_mb`. Ordinary files hitting
+  the cap is a reason to revisit the reader count or the dyno size.
+
 ## 2026-11-21 shared runtime Release 1 (Handler v64)
 
 - **Handler v64** (`main` at `26ae390`, merging `feat/shared-runtime-r1` at `e0140e9`; image
