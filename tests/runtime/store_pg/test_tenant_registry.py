@@ -1018,3 +1018,36 @@ async def test_a_busy_tenant_cannot_starve_another(base_env, pg_dsn):
         await until(lambda: any("quiet work" in run for run in FakeHarness.runs))
         await until(lambda: gate.total == 0)
         assert sum("busy" in run for run in FakeHarness.runs) == 4
+
+
+# --- native-only host (HANDLER_ALLOWED_HARNESSES) ---------------------------
+
+
+async def test_native_only_host_rejects_a_codex_tenant(base_env, spy):
+    base_env["HANDLER_ALLOWED_HARNESSES"] = "openai_agents"
+    async with serve(base_env) as (app, client):
+        response = await client.put("/platform/tenants/42", headers=PLATFORM, json={
+            "secrets": {"HANDLER_ADMIN_KEY": "admin-42"},
+            "config": {"HANDLER_DEFAULT_HARNESS": "codex"}})
+        assert response.status_code == 422 and "not allowed" in response.text
+        response = await client.put("/platform/tenants/42", headers=PLATFORM, json={
+            "config": {"HANDLER_DEFAULT_HARNESS": "nonsense"}})
+        assert response.status_code == 422
+        assert await app.state.registry.list() == []
+        await create(client, config={"HANDLER_DEFAULT_HARNESS": "openai_agents"})
+        response = await client.put("/platform/tenants/42", headers=PLATFORM, json={
+            "config": {"HANDLER_DEFAULT_HARNESS": "codex"}})
+        assert response.status_code == 422
+        tenant, = await app.state.registry.list()
+        assert tenant.config == {"HANDLER_DEFAULT_HARNESS": "openai_agents"}
+        from dataclasses import replace
+
+        with pytest.raises(ValueError, match="not allowed"):  # e.g. a row written by hand
+            app.state.registry.validate([replace(
+                tenant, config={"HANDLER_DEFAULT_HARNESS": "codex"})])
+        # The tenant's own settings cannot choose Codex either, and it never sees the list.
+        await activate(client)
+        response = await client.put("/i/m42/api/settings/threads", headers=admin("admin-42"),
+                                    json={"chat": {"harness": "codex"}})
+        assert response.status_code == 422
+        assert "HANDLER_ALLOWED_HARNESSES" not in spy.envs["m42"]

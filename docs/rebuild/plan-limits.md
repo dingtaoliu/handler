@@ -44,7 +44,10 @@ stopped early: its answer is kept, and a run that went past the limit is logged 
 ## What counts
 
 A new input counts once, in the transaction that stores it and only after the
-idempotency check, so duplicates and retries never count.
+idempotency check, so duplicates and retries never count. Re-running a failed run
+(the user's `POST /api/runs/{run_id}/retry` or the operator's replay, see
+`notifications.md`) is not a new input either: it re-queues events already stored
+and counted.
 
 | Event | Over the limit |
 |---|---|
@@ -146,7 +149,8 @@ answer, for any caller:
 - `/healthz`, `/mcp`, `/ingest/*`
 - `/api/chat` and `/api/chat/options`
 - `/api/limits/inputs`, `/api/me`, `/api/users` and `/api/users/<id>`
-- `/api/threads…`, `/api/runs/…`, `/api/tasks…`
+- `/api/threads…`, `/api/runs/…` (including the chat panel's
+  `POST /api/runs/{run_id}/retry`), `/api/tasks…`
 - `/api/approvals…`, `/api/questions…`, `/api/notifications…`, `/api/uploads…`
 - `/api/mailboxes…` and `/api/connections/google…` (each answers 403 for its own feature)
 

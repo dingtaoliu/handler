@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections import defaultdict
 from dataclasses import replace
@@ -14,7 +15,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..auth import Authenticator, Principal, can_see_thread
 from ..artifacts import ArtifactStore
@@ -157,10 +158,19 @@ def aggregate_usage(runs: list[Run], thread_of: dict[str, str], days: int,
     }
 
 
+logger = logging.getLogger("handler.runtime.admin")
+
+
+class RedeliverRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sink: str = Field(min_length=1)
+    key: str | None = None  # None: every dead delivery of the sink
+
+
 def admin_router(
     store: Store, auth: Authenticator, *, scheduler: Scheduler, gateway: Gateway,
     uploads: UploadStore, log_file: Path | None = None,
-    artifact_store: ArtifactStore | None = None,
+    artifact_store: ArtifactStore | None = None, outbox: Any = None,
 ) -> APIRouter:
     router = APIRouter()
     user = Depends(auth.require_principal)
@@ -455,6 +465,27 @@ def admin_router(
                 continue
             out.append(entry)
         return out[-lines:]
+
+    # ---- deliveries (the outbox) -----------------------------------------
+
+    @router.get("/api/deliveries")
+    async def deliveries(status: str | None = "dead", limit: int = 100,
+                         _: Principal = admin) -> list:
+        """Outbox rows, newest first; dead ones (no retry left) by default."""
+        return jsonable_encoder(await store.list_deliveries(
+            status or None, limit=max(1, min(limit, 500))))
+
+    @router.post("/api/deliveries/redeliver")
+    async def redeliver(body: RedeliverRequest, principal: Principal = admin) -> dict:
+        """Requeue one dead delivery (sink + key), or every dead one of a sink."""
+        count = await store.redeliver(body.sink, body.key)
+        if body.key is not None and not count:
+            raise HTTPException(404, "no dead delivery with that sink and key")
+        logger.info("deliveries requeued", extra={"sink": body.sink, "key": body.key,
+                                                  "count": count, "by": principal.identity})
+        if count and outbox is not None:
+            outbox.wake()
+        return {"requeued": count}
 
     # ---- connections -----------------------------------------------------
 

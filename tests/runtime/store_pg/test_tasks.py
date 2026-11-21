@@ -62,7 +62,7 @@ async def test_task_status_derivation_and_pagination(domain_store, clock):
     page = await list_tasks(store, user_id=None)
     statuses = {i["thread_key"]: i["status"] for i in page["items"]}
     assert statuses == {"email:queued": "queued", "automation:live": "running",
-                        "crontal:rfq:1": "waiting_approval", "automation:dead": "dead",
+                        "crontal:rfq:1": "waiting_approval", "automation:dead": "failed",
                         "automation:done": "succeeded"}
     by_key = {i["thread_key"]: i for i in page["items"]}
     assert by_key["automation:done"]["summary"] == "All good"
@@ -73,7 +73,7 @@ async def test_task_status_derivation_and_pagination(domain_store, clock):
     assert by_key["crontal:rfq:1"]["pending_approval_ids"]
 
     first = await list_tasks(store, user_id=None, limit=2, statuses=["running", "waiting_approval",
-                                                                       "succeeded", "dead"])
+                                                                       "succeeded", "failed"])
     second = await list_tasks(store, user_id=None, limit=2, cursor=first["next_cursor"])
     assert [i["run_id"] for i in first["items"]] == [running.id, waiting.id]
     assert [i["run_id"] for i in second["items"]] == [dead.id, done.id]

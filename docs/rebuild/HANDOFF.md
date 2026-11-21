@@ -1,5 +1,25 @@
 # Handoff: handler rebuild
 
+## 2026-11-21 production run failures (Release 1 line, `feat/shared-runtime-r1`)
+
+- **Uppercase `.PDF` attachments killed runs.** Native `read_file` uploaded a PDF under its
+  own name (`Bill Of Lading - SHAJ81315.PDF`); the Responses API matches input-file types
+  on the lowercase extension and refused the next model call with a non-retryable 400
+  ("Expected context stuffing file type to be a supported format"): 9+ BSS mail threads.
+  Fixed in `harness/pdf_files.py`: uploads are named `<stem>.pdf` (`input_file_name`), and
+  the upload name is in the cache key, so references cached under an old name are
+  re-uploaded. That is the only place Handler sends an input file; chat `{"type": "file"}`
+  blocks are transcript-only (the model reads attachments from the workspace). Threads
+  that already failed need a replay to run again.
+- **Transient provider errors were final.** A plain `openai.APIError` ("Our servers are
+  currently overloaded. Please try again later.", status-less, from a stream) killed two mail
+  threads on their first attempt. `harness/openai_agents.py` `_error` now also retries
+  429/408/409/5xx status errors, status-less errors whose code or message says
+  overload/unavailable, the 400 "Another process is currently operating on this
+  conversation" (waits at least `CONVERSATION_BUSY_RETRY_SECONDS` = 30 s, via the new
+  `HarnessError.retry_after`), and `ModelBehaviorError` "did not produce a final response"
+  (at most 2 attempts, via `HarnessError.max_attempts`). Other 400s stay final.
+
 ## 2026-11-14 prompt-cache release (Handler v62)
 
 - **Handler v62** (`7c7fde2`, image `2d47da22e2c1`, 2,151,625,279 bytes), on top of the
@@ -248,7 +268,7 @@ Repo and code layout:
 | Gateway | `gateway/` | MCP server at `/mcp/`; per-run tokens; `GrantPolicy` (exact action → glob → risk default); approvals; audit |
 | Crontal access | `gateway/crontal_api.py` (generic REST), `gateway/crontal.py` (older curated MCP tools) | See §4 |
 | Memory, settings, prompts | `memory.py`, `settings.py`, `instructions.py`, `web/settings_api.py` | Memory kinds, links, `memory_search`, run-start memory and lost-save recovery: `memory-kinds.md`. Settings are versioned in the store. Thread-type `harness`/`model`/`reasoning_effort` are enums (dropdowns). `GET /api/settings/{s}` returns `defaults`; `GET /api/settings/prompt?thread_type=` returns the rendered prompt |
-| Workspace sync | `workspaces.py`, `files.py` | Runs only mark a thread dirty; a background flush uploads every `HANDLER_SYNC_INTERVAL_SECONDS` (300) and again on SIGTERM. Uploads skip harness caches (`.tmp/` etc.), send only files whose content hash changed, and run 16 transfers in parallel |
+| Workspace sync | `workspaces.py`, `files.py` | A run marks its thread dirty and, when it ends (completed or failed), starts a background upload of that thread (`WorkspaceSync.flush_soon`); neither the reply nor the run slot waits for it. A failed upload stays dirty for the periodic flush every `HANDLER_SYNC_INTERVAL_SECONDS` (300); the shutdown flush on SIGTERM also waits for uploads under way and covers runs cancelled at shutdown. Uploads skip harness caches (`.tmp/` etc.), send only files whose content hash changed, and run 16 transfers in parallel |
 | Web UI | `web/static/app/` (full UI), `login.html`, `timeline.html` | Tabs: chat (model/effort selects, attachments), memory, automations, activity, usage, approvals, notifications, settings (prompt preview, "Default (…)" labels), tools, files, logs, connections, users |
 | Admin APIs | `web/admin_api.py`, `uploads.py` | Memory, automations, usage, tools, uploads, logs, connections |
 | Auth | `auth.py`, `web/auth_api.py` | Admin key (+ `X-Handler-User` to act as a user), per-user tokens, `/login` |
@@ -267,6 +287,11 @@ Repo and code layout:
   - Settings → Threads picks the harness per thread type. It's read live when a thread is created, so no restart is needed; existing threads keep their harness.
   - `HANDLER_DEFAULT_HARNESS` seeds a fresh instance.
   - Codex is optional; the server starts with whichever harnesses are available.
+  - **`HANDLER_ALLOWED_HARNESSES`** (host setting, comma-separated; unset allows all, so the personal instance keeps Codex). Production sets `openai_agents` (role-split-design.md, owner decision 4). It is read once from the host's own environment and applies to every instance and registry tenant; `HANDLER_I_<NAME>__…` and tenant config cannot widen it. With it set:
+    - a harness not listed is never constructed;
+    - a `HANDLER_DEFAULT_HARNESS` outside it stops startup, and the platform API and registry refuse such tenant config (422 / validation error);
+    - saving or rolling back `threads` settings that name it returns 422; unset types default to an allowed harness, and the form offers only allowed ones;
+    - a thread whose stored harness is not allowed is not run and not switched: its run fails at once with no retry and is recorded as a failed run with the reason (the thread stays open; see notifications.md, "Failed runs"). Startup logs an ERROR when saved `threads` settings still name one.
 
 ## 4. Crontal integration (both repos)
 

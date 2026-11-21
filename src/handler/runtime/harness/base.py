@@ -94,9 +94,18 @@ class RunRequest:
 
 
 class HarnessError(Exception):
-    def __init__(self, message: str, retryable: bool = False):
+    """A failed run. `retryable`: the run is attempted again after a backoff.
+
+    `retry_after`: the least delay (seconds) before that attempt. `max_attempts`:
+    a lower attempt limit for this kind of error than the run's own.
+    """
+
+    def __init__(self, message: str, retryable: bool = False, *,
+                 retry_after: float | None = None, max_attempts: int | None = None):
         super().__init__(message)
         self.retryable = retryable
+        self.retry_after = retry_after
+        self.max_attempts = max_attempts
 
 
 class Harness(Protocol):

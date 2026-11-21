@@ -43,7 +43,7 @@ from .observability.prompt_tokens import (
 )
 from .observability.attribution import capture_attribution
 from .observability.recorder import RawSink, StepRecorder
-from .settings import EfficiencySettings, SettingsService
+from .settings import EfficiencySettings, HarnessNotAllowed, SettingsService, check_harness
 from .tasks import publish_task
 from .task_outcomes import bind_run_task, finish_task_run
 from .store.base import Store
@@ -85,6 +85,9 @@ class RunConfig:
     instance_name: str = "main"
     default_model: str | None = None
     plan_limits: Any = None  # LiveLimits for a registry tenant
+    # HANDLER_ALLOWED_HARNESSES (None: all). A thread on another harness is not
+    # run: it fails at once, with no retry, and parks with the reason.
+    allowed_harnesses: frozenset[str] | None = None
 
     @property
     def workspaces_dir(self) -> Path:
@@ -402,6 +405,20 @@ def _has_rollout(home: Path, session_id: str) -> bool:
 CODEX_HARNESS, NATIVE_HARNESS = "codex", "openai_agents"
 
 
+def log_run_failed(tenant: str | None, thread_key: str, thread_type: Any, run_id: str,
+                   attempts: int, error: str | None, event_ids: list[str], **extra: Any) -> None:
+    """The operator's signal for a terminal failure: one ERROR line, `run failed`.
+
+    The stable message and fields are what a log-based alert matches. The run's
+    events can be run again with POST /api/runs/{run_id}/replay (or, for the
+    chat owner, /retry).
+    """
+    logger.error("run failed", extra={
+        "tenant": tenant or "main", "thread_key": thread_key, "thread_type": str(thread_type),
+        "run_id": run_id, "attempts": attempts, "error": (error or "")[:500],
+        "event_ids": list(event_ids), **extra})
+
+
 class RunExecutor:
     _active_runs = 0  # across every instance in this process, for the memory logs
 
@@ -418,7 +435,6 @@ class RunExecutor:
         settings: SettingsService | None = None,
         memory_tools: MemoryTools | None = None,
         workspace_sync: WorkspaceSync | None = None,
-        failure_notifier: Any = None,
         crontal_identity: Any = None,
         crontal_catalog: Any = None,
     ) -> None:
@@ -428,8 +444,6 @@ class RunExecutor:
         self.crontal_identity = crontal_identity
         # CrontalRouteCatalog (gateway/crontal_catalog.py): the prompt's API catalog.
         self.crontal_catalog = crontal_catalog
-        # FailureNotifier (notifications.py): told about terminal background failures.
-        self.failure_notifier = failure_notifier
         self.tokens = tokens
         self.mcp_url = mcp_url
         self.settings = settings
@@ -491,6 +505,10 @@ class RunExecutor:
             self._log_run_memory("end")
             RunExecutor._active_runs -= 1
             reset_current_run(token)
+        # Completed or failed: upload what the run changed now, in the background,
+        # so a restart loses no finished run's files. A no-op when nothing is
+        # dirty (e.g. the lease was lost: a stale owner must not upload).
+        self.workspace_sync.flush_soon(thread_slug(thread.key))
 
     def _log_run_memory(self, phase: str) -> None:
         logger.info("run memory", extra={
@@ -551,7 +569,9 @@ class RunExecutor:
             await work
         except asyncio.CancelledError:
             if not lost.is_set():
-                # Shutdown or user cancellation: the run cannot finish.
+                # Shutdown or user cancellation: the run cannot finish. The lease is
+                # still ours, so the shutdown flush may upload what it wrote.
+                self.workspace_sync.mark_dirty(thread_slug(thread.key))
                 await self._abandon(thread, run, "abandoned: the runtime stopped mid-run")
                 raise
             logger.warning("lease lost mid-run, abandoning: %s", thread.key)
@@ -618,6 +638,11 @@ class RunExecutor:
         slug = thread_slug(thread.key)
         mcp_token: str | None = None
         try:
+            try:
+                check_harness(thread.harness, self.config.allowed_harnesses,
+                              f"thread {thread.key}")
+            except HarnessNotAllowed as exc:
+                raise HarnessError(str(exc), retryable=False) from exc
             if harness is None:
                 raise HarnessError(f"unknown harness {thread.harness!r}", retryable=False)
             workspace = self.config.workspaces_dir / slug
@@ -677,8 +702,8 @@ class RunExecutor:
                 self.workspace_sync.mark_dirty(slug)
                 raise
             else:
-                # Uploaded later (periodically and at shutdown), not on the
-                # reply path: a per-run sync added minutes to every message.
+                # Uploaded in the background once the run ends (execute), not on
+                # the reply path: a per-run sync added minutes to every message.
                 self.workspace_sync.mark_dirty(slug)
 
             await self._record_context(lease, thread, "" if compacted else plan.context)
@@ -1029,9 +1054,13 @@ class RunExecutor:
             logger.exception("run crashed")
         attempt = thread.attempts + 1
         retry_in: float | None = None
+        if isinstance(exc, HarnessError) and exc.max_attempts is not None:
+            max_attempts = min(max_attempts, exc.max_attempts)
         if retryable and attempt < max_attempts:
             backoff = self.config.retry_backoff_seconds
             retry_in = backoff[min(attempt - 1, len(backoff) - 1)]
+            if isinstance(exc, HarnessError) and exc.retry_after:
+                retry_in = max(retry_in, exc.retry_after)
         usage, cost = recorder.totals()
         run.status, run.usage, run.cost_usd = RunStatus.FAILED, usage, cost
         run.error, run.finished_at = f"{type(exc).__name__}: {exc}"[:2000], utcnow()
@@ -1043,20 +1072,33 @@ class RunExecutor:
                 await self.store.add_messages(lease, inputs)
             except Exception:  # noqa: BLE001 - must not stop the thread being failed
                 logger.exception("could not save the failed run's input messages")
-        failed = await self.store.fail(lease, run.error, retry_in)
+        # With no retry left (or an error never retried) the failure is accepted:
+        # the run's events are consumed by it (they run again only if the operator
+        # replays the run) and the thread stays open for new work. Nobody is
+        # notified; a chat shows the error inline (run_finished, last_error).
+        failed = await self.store.fail(lease, run.error, retry_in, run_id=run.id,
+                                       event_ids=run.trigger_event_ids)
         try:
             await finish_task_run(self.store, run)
         except Exception:
             logger.exception("could not record failed task outcome")
-        logger.warning("run failed", extra={"error": run.error, "retry_in": retry_in})
+        if retry_in is not None:
+            logger.warning("run failed, will retry", extra={"error": run.error,
+                                                            "retry_in": retry_in})
+        elif failed:
+            log_run_failed(self.config.instance_name, thread.key, thread.type, run.id,
+                           attempt, run.error, run.trigger_event_ids)
+        # retryable: the chat's owner can POST /api/runs/{run_id}/retry now (the
+        # failure was accepted and nothing else is queued on the thread); the
+        # client marks the user message whose raw.event_id is in event_ids.
+        retryable = False
+        if failed and retry_in is None and thread.type == ThreadType.CHAT:
+            current = await self.store.get_thread(thread.key)
+            retryable = current is not None and current.pending_since is None
         self._publish(thread.key, run.id, "run_finished",
-                      {"status": "failed", "error": run.error, "retry_in": retry_in})
+                      {"status": "failed", "error": run.error, "retry_in": retry_in,
+                       "retryable": retryable, "event_ids": list(run.trigger_event_ids)})
         await self._publish_task(thread, run.id)
-        if failed and retry_in is None and self.failure_notifier is not None:
-            try:
-                await self.failure_notifier.run_failed(thread, run, await self._acting_as(thread))
-            except Exception:
-                logger.exception("failure notification failed")
 
     async def _publish_task(self, thread: Thread, run_id: str) -> None:
         """Live task status for background (non-chat) threads."""

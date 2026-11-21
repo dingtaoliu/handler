@@ -1,13 +1,13 @@
 """Notifications: store per user, publish live, and emit `notification.created`.
 
-`Notifier.send` is the one entry point for the `notify` tool and for
-automatic notifications (background run failures). Delivery to integrations
+`Notifier.send` is the one entry point for the `notify` tool and for automatic
+notifications (quota and question notices). A failed run notifies nobody: its
+signal is the operator's `run failed` log line (run.py). Delivery to integrations
 (e.g. Crontal's bell) happens through the outbox's sinks, never here.
 """
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
@@ -15,7 +15,7 @@ from typing import Any
 from .bus import BusMessage, RunEventBus
 from .sinks import NOTIFICATION_CREATED, DomainEvent, Outbox
 from .store.sqlite_memory import Notification
-from .types import Run, Thread, ThreadType, new_id, utcnow
+from .types import new_id, utcnow
 
 logger = logging.getLogger("handler.runtime.notifications")
 
@@ -81,46 +81,3 @@ class Notifier:
             logger.warning("thread info unavailable for notification", exc_info=True,
                            extra={"thread_key": thread_key})
             return None, None
-
-
-class FailureNotifier:
-    """Tell the acting user and the instance admins when background work dies.
-
-    Called once per terminal failure (no retry left), never for chat threads.
-    At most one notification per thread per `cooldown_seconds`, so a thread
-    that keeps receiving events and dying does not flood anyone.
-    """
-
-    def __init__(self, notifier: Notifier, *, cooldown_seconds: float = 3600.0,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        self.notifier = notifier
-        self.cooldown_seconds = cooldown_seconds
-        self.clock = clock
-        self._last: dict[str, float] = {}
-
-    async def run_failed(self, thread: Thread, run: Run, acting_as: str | None) -> bool:
-        if thread.type == ThreadType.CHAT:
-            return False
-        now = self.clock()
-        last = self._last.get(thread.key)
-        if last is not None and now - last < self.cooldown_seconds:
-            return False
-        recipients = [acting_as] if acting_as else []
-        try:
-            users = await self.notifier.store.list_users()
-        except Exception:
-            users = []
-        recipients += [u.id for u in users if u.role == "admin" and not u.disabled]
-        recipients = list(dict.fromkeys(recipients))
-        if not recipients:
-            return False
-        self._last[thread.key] = now
-        _, title = await self.notifier._thread_info(thread.key)
-        label = title if title and title != thread.key else thread.key
-        error = " ".join((run.error or "unknown error").split())
-        if len(error) > 200:
-            error = error[:200] + "…"
-        message = (f"{str(thread.type).capitalize()} run failed and will not retry: "
-                   f"{label} ({thread.key}). {error}")
-        await self.notifier.send(thread.key, run.id, message, recipients)
-        return True

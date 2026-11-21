@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
@@ -19,14 +20,18 @@ from pydantic import BaseModel
 from ..auth import ACT_AS_HEADER, Authenticator, Principal, can_see_thread
 from ..bus import BusMessage, RunEventBus
 from ..store.base import Store
+from ..store.run_failures import NOT_LATEST
 from ..tenancy.limits import OverLimit
 from ..images import MAX_IMAGES_PER_MESSAGE, VISION_TYPES
 from ..memory import MAX_CONTEXT_LINKS, MAX_THREAD_CONTEXT_LINKS, normalize_context_link
 from ..uploads import UploadStore
 from ..run import fill_tool_inputs
+from ..tasks import decode_cursor, encode_cursor
 from ..settings import HarnessSource, ModelName, ReasoningEffort, resolve_harness
-from ..types import Event, Lane, ThreadSpec, ThreadType
+from ..types import Event, Lane, RunStatus, ThreadSpec, ThreadType
 from .auth_api import auth_router
+
+logger = logging.getLogger("handler.runtime.web")
 
 HEARTBEAT_SECONDS = 15.0
 MEMBER_SCAN_LIMIT = 1000  # threads scanned when filtering a member's list
@@ -313,6 +318,81 @@ def create_app(
         return _json([{**_json(event), "status": state} for event, state in rows
                       if not event.thread_key or can_see_thread(principal, event.thread_key)])
 
+    # Before /api/runs/{run_id}. Admin only: the operator's debugging tools.
+    @router.get("/api/runs/failed")
+    async def failed_runs(limit: int = 50, before: str | None = None,
+                          _: Principal = Depends(auth.require_admin)) -> Any:
+        """Runs that failed for good, newest first, with their thread, error,
+        attempts and events. `before` is the previous page's `next_cursor`."""
+        try:
+            cursor = decode_cursor(before) if before else None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        limit = max(1, min(limit, 200))
+        rows = await store.failed_runs(limit=limit, before=cursor)
+        metadata = await store.thread_metadata(sorted({r["thread_key"] for r in rows}), None)
+        items = [{**row, "title": (metadata.get(row["thread_key"]) or {}).get("title")}
+                 for row in rows]
+        last = rows[-1] if len(rows) == limit else None
+        return _json({"items": items, "next_cursor": encode_cursor(
+            last["failed_at"], last["run_id"]) if last else None})
+
+    async def requeue_failed_run(run_id: str, by: str, *, latest_only: bool = False) -> dict:
+        """Replay and retry: make a terminal failure's events pending again, once.
+
+        Both set the failure's one `replayed_at` flag, so a run is re-run at most
+        once whichever way. Nothing is charged against the plan's inputs: the
+        events were counted when they were ingested (`put`), and this only
+        un-consumes them. Open streams get the `event_queued` a new message gets.
+        """
+        result = await store.replay_failed_run(run_id, by=by, latest_only=latest_only)
+        if result is None:
+            if await store.get_run(run_id) is None:
+                raise HTTPException(404, "run not found")
+            raise HTTPException(409, "run is not a terminal failure")
+        if not result["replayed"]:
+            if result.get("reason") == NOT_LATEST:
+                raise HTTPException(409, "run is not the latest on its thread")
+            raise HTTPException(409, "run was already replayed or retried")
+        key = result["thread_key"]
+        logger.info("failed run requeued", extra={
+            "run_id": run_id, "thread_key": key, "requeued": result["requeued"], "by": by})
+        ids = result["event_ids"]
+        bus.publish(BusMessage(key, None, "event_queued", {
+            "event_id": ids[0] if ids else None, "event_ids": ids, "retry_of": run_id}))
+        bus.publish(BusMessage(key, None, "thread_updated", {}))
+        return result
+
+    @router.post("/api/runs/{run_id}/replay")
+    async def replay_run(run_id: str, principal: Principal = Depends(auth.require_admin)) -> Any:
+        """Make a failed run's events pending again on its thread, so they run once more."""
+        result = await requeue_failed_run(run_id, principal.identity)
+        return _json({"run_id": run_id, "thread_key": result["thread_key"],
+                      "requeued": result["requeued"], "replayed_at": result["replayed_at"]})
+
+    @router.post("/api/runs/{run_id}/retry", status_code=202)
+    async def retry_run(run_id: str, principal: Principal = principal_dep) -> Any:
+        """The chat owner's Retry: re-run their thread's latest failed run, once.
+
+        Same effect as replay (the failed message runs again; no new input, so
+        nothing is charged and history is not duplicated), limited to the
+        caller's own chat threads and to the thread's latest run.
+        """
+        user_id = principal.user_id
+        if user_id is None:
+            raise HTTPException(400, f"{ACT_AS_HEADER} is required for admin-key retry")
+        run = await store.get_run(run_id)
+        thread = await store.get_thread(run.thread_key) if run is not None else None
+        if thread is None or not can_see_thread(principal, thread.key):
+            raise HTTPException(404, "run not found")
+        if thread.type != ThreadType.CHAT:
+            # Shared threads are visible to every member, so this confirms nothing.
+            raise HTTPException(409, "only chat runs can be retried")
+        if thread.owner_user_id != user_id or not thread.key.startswith(f"chat:{user_id}:"):
+            raise HTTPException(404, "run not found")  # another user's chat, even for admins
+        await requeue_failed_run(run_id, f"retry:{user_id}", latest_only=True)
+        return {"run_id": run_id, "thread_key": thread.key, "status": "queued"}
+
     @router.get("/api/runs/{run_id}")
     async def get_run(run_id: str, principal: Principal = principal_dep) -> Any:
         run = await store.get_run(run_id)
@@ -374,8 +454,20 @@ def create_app(
 
     @router.get("/api/threads/{key:path}/runs")
     async def thread_runs(key: str, principal: Principal = principal_dep) -> Any:
+        """Runs, newest first. `retryable` is true on a chat thread's latest run
+        when it failed for good, was not replayed or retried yet, and nothing
+        else is queued: its owner can POST /api/runs/{run_id}/retry."""
         visible_thread(principal, key)
-        return _json(await store.list_runs(key))
+        runs = await store.list_runs(key)
+        retryable: str | None = None
+        if runs and runs[0].status == RunStatus.FAILED:
+            thread = await store.get_thread(key)
+            failure = await store.get_run_failure(runs[0].id)
+            if (thread is not None and thread.type == ThreadType.CHAT
+                    and thread.pending_since is None
+                    and failure is not None and failure["replayed_at"] is None):
+                retryable = runs[0].id
+        return [{**_json(run), "retryable": run.id == retryable} for run in runs]
 
     @router.get("/api/threads/{key:path}")
     async def get_thread(key: str, principal: Principal = principal_dep) -> Any:

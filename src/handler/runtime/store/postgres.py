@@ -31,6 +31,14 @@ from ..tenancy.limits import (
 )
 from .postgres_hub import CONTROL_SCHEMA, SCHEMA_LOCK, SHARED_CHANNEL, PostgresHub
 from .usage import PostgresUsage
+from .run_failures import (
+    ALREADY_REPLAYED,
+    FAILED_BEFORE_UPGRADE,
+    FAILED_MARKER,
+    NOT_LATEST,
+    RunFailures,
+    failure_row,
+)
 from .tasks import announce_routed
 from ..types import (
     ABANDONED_ERROR,
@@ -140,21 +148,39 @@ async def earliest_work_at(conn: AsyncConnection, sinks: Sequence[str] | None,
 
 async def _route(conn: AsyncConnection, thread: ThreadSpec, event_type: str, now: datetime) -> None:
     """Create the thread if needed and mark it as having work."""
-    # A new chat message revives a dead thread: the person is asking again.
-    revive = event_type == "chat.message"
     await conn.execute(
         "INSERT INTO threads (key, type, lane, owner_user_id, harness, "
         "model, priority, created_at, pending_since) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (key) DO UPDATE SET "
         "pending_since = COALESCE(threads.pending_since, "
-        "excluded.pending_since), "
-        "dead = CASE WHEN %s THEN FALSE ELSE threads.dead END, "
-        "attempts = CASE WHEN %s THEN 0 ELSE threads.attempts END",
+        "excluded.pending_since)",
         (thread.key, thread.type.value, thread.lane.value,
          thread.owner_user_id, thread.harness, thread.model,
-         thread.priority, now, now, revive, revive),
+         thread.priority, now, now),
     )
+
+
+async def _latest_on_thread(conn: AsyncConnection, key: str, run_id: str,
+                            now: datetime) -> bool:
+    """True when `run_id` is the thread's newest run and nothing else is queued or
+    running there (see run_failures.NOT_LATEST). Locks the thread row first, so a
+    claim or a new input on the thread waits for this transaction."""
+    cursor = await conn.execute(
+        "SELECT lease_owner, lease_until FROM threads WHERE key = %s FOR UPDATE", (key,))
+    thread = await cursor.fetchone()
+    if thread is None or (thread["lease_owner"] is not None and thread["lease_until"]
+                          and thread["lease_until"] > now):
+        return False
+    cursor = await conn.execute("SELECT id FROM runs WHERE thread_key = %s "
+                                "ORDER BY started_at DESC, seq DESC LIMIT 1", (key,))
+    newest = await cursor.fetchone()
+    if newest is None or newest["id"] != run_id:
+        return False
+    cursor = await conn.execute(
+        "SELECT 1 FROM events WHERE thread_key = %s AND status = 'routed' "
+        "AND consumed_by_run IS NULL LIMIT 1", (key,))
+    return await cursor.fetchone() is None
 
 
 async def _charge_input(conn: AsyncConnection, event: Event, thread: ThreadSpec,
@@ -605,19 +631,20 @@ class PostgresCore(PostgresUsage):
         return completed
 
     async def fail(
-        self, lease: Lease, error: str, retry_in_seconds: float | None
+        self, lease: Lease, error: str, retry_in_seconds: float | None, *,
+        run_id: str = "", event_ids: Sequence[str] | None = None,
     ) -> bool:
         async def write(conn: AsyncConnection) -> bool:
-            available_at = (
-                self._clock() + timedelta(seconds=retry_in_seconds)
-                if retry_in_seconds is not None else None
-            )
-            await conn.execute(
-                "UPDATE threads SET attempts = attempts + 1, last_error = %s, "
-                "dead = %s, available_at = %s, lease_owner = NULL, "
-                "lease_until = NULL WHERE key = %s",
-                (strip_nul(error), retry_in_seconds is None, available_at, lease.thread_key),
-            )
+            if retry_in_seconds is None:
+                await self._fail_terminal(conn, lease.thread_key, strip_nul(error), run_id,
+                                          event_ids)
+            else:
+                await conn.execute(
+                    "UPDATE threads SET attempts = attempts + 1, last_error = %s, "
+                    "available_at = %s, lease_owner = NULL, lease_until = NULL WHERE key = %s",
+                    (strip_nul(error), self._clock() + timedelta(seconds=retry_in_seconds),
+                     lease.thread_key),
+                )
             await self._notify(conn)
             return True
 
@@ -625,6 +652,129 @@ class PostgresCore(PostgresUsage):
         if failed:
             self._wake.set()
         return failed
+
+    async def _fail_terminal(self, conn: AsyncConnection, key: str, error: str, run_id: str,
+                             event_ids: Sequence[str] | None) -> None:
+        """Accept the failure: consume its events, record it, leave the thread claimable."""
+        cursor = await conn.execute("SELECT type, attempts FROM threads WHERE key = %s", (key,))
+        thread = await cursor.fetchone()
+        marker = run_id or FAILED_MARKER
+        scope, params = ("AND id = ANY(%s) ", (list(event_ids),)) if event_ids is not None \
+            else ("", ())
+        cursor = await conn.execute(
+            "UPDATE events SET consumed_by_run = %s WHERE thread_key = %s AND status = 'routed' "
+            f"AND consumed_by_run IS NULL {scope}RETURNING id", (marker, key, *params))
+        taken = {row["id"] for row in await cursor.fetchall()}
+        cursor = await conn.execute(
+            "SELECT 1 FROM events WHERE thread_key = %s AND status = 'routed' "
+            "AND consumed_by_run IS NULL LIMIT 1", (key,))
+        pending = await cursor.fetchone() is not None
+        # attempts and backoff reset; last_error stays for debugging until a run succeeds.
+        await conn.execute(
+            "UPDATE threads SET pending_since = CASE WHEN %s THEN pending_since ELSE NULL END, "
+            "attempts = 0, last_error = %s, dead = FALSE, available_at = NULL, "
+            "lease_owner = NULL, lease_until = NULL WHERE key = %s", (pending, error, key))
+        if run_id:
+            ordered = [i for i in (event_ids or []) if i in taken] + sorted(
+                taken - set(event_ids or []))
+            await conn.execute(
+                "INSERT INTO run_failures (run_id, thread_key, thread_type, error, attempts, "
+                "event_ids, consumed_by, failed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (run_id) DO NOTHING",
+                (run_id, key, thread["type"], error[:2000], thread["attempts"] + 1,
+                 Jsonb(ordered), marker, self._clock()))
+
+    async def sweep_dead_threads(self) -> list[dict]:
+        """Clear `dead` on threads an older release parked; idempotent.
+
+        Their queued events are consumed by FAILED_BEFORE_UPGRADE so stale work
+        does not suddenly run, and each thread gets a run_failures row (under its
+        latest run) so the operator can replay it. Returns those rows.
+        """
+        swept: list[dict] = []
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "SELECT key, type, attempts, last_error FROM threads WHERE dead "
+                "ORDER BY key FOR UPDATE SKIP LOCKED")
+            for thread in await cursor.fetchall():
+                key = thread["key"]
+                cursor = await conn.execute(
+                    "UPDATE events SET consumed_by_run = %s WHERE thread_key = %s "
+                    "AND status = 'routed' AND consumed_by_run IS NULL "
+                    "RETURNING id, seq", (FAILED_BEFORE_UPGRADE, key))
+                event_ids = [r["id"] for r in sorted(await cursor.fetchall(),
+                                                     key=lambda r: r["seq"])]
+                cursor = await conn.execute(
+                    "SELECT id, finished_at FROM runs WHERE thread_key = %s "
+                    "ORDER BY started_at DESC, seq DESC LIMIT 1", (key,))
+                run = await cursor.fetchone()
+                await conn.execute(
+                    "UPDATE threads SET dead = FALSE, attempts = 0, available_at = NULL, "
+                    "pending_since = NULL WHERE key = %s", (key,))
+                row = {"run_id": run["id"] if run else f"{FAILED_BEFORE_UPGRADE}:{key}",
+                       "thread_key": key, "thread_type": thread["type"],
+                       "error": thread["last_error"], "attempts": thread["attempts"],
+                       "event_ids": event_ids, "consumed_by": FAILED_BEFORE_UPGRADE,
+                       "failed_at": (run and run["finished_at"]) or self._clock()}
+                await conn.execute(
+                    "INSERT INTO run_failures (run_id, thread_key, thread_type, error, "
+                    "attempts, event_ids, consumed_by, failed_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (run_id) DO NOTHING",
+                    (row["run_id"], key, row["thread_type"], (row["error"] or "")[:2000],
+                     row["attempts"], Jsonb(event_ids), FAILED_BEFORE_UPGRADE,
+                     row["failed_at"]))
+                swept.append(row)
+            if swept:
+                await self._notify(conn)
+        return swept
+
+    async def replay_failed_run(self, run_id: str, *, by: str | None = None,
+                                latest_only: bool = False) -> dict | None:
+        """Make a terminal failure's events pending again on its thread, once.
+
+        None if no such failure; otherwise its row with `replayed` (False if it
+        was not replayed now), `reason` when it wasn't (ALREADY_REPLAYED, or
+        NOT_LATEST with `latest_only`: the run is not the thread's newest, or the
+        thread has other work queued or running) and `requeued` (events made
+        pending again).
+        """
+        async with self._conn() as conn:
+            if latest_only:
+                cursor = await conn.execute("SELECT * FROM run_failures WHERE run_id = %s",
+                                            (run_id,))
+                existing = await cursor.fetchone()
+                if existing is None:
+                    return None
+                if existing["replayed_at"] is None and not await _latest_on_thread(
+                        conn, existing["thread_key"], run_id, self._clock()):
+                    return {**failure_row(existing), "replayed": False, "requeued": 0,
+                            "reason": NOT_LATEST}
+            cursor = await conn.execute(
+                "UPDATE run_failures SET replayed_at = %s, replayed_by = %s "
+                "WHERE run_id = %s AND replayed_at IS NULL RETURNING *",
+                (self._clock(), by, run_id))
+            row = await cursor.fetchone()
+            if row is None:
+                cursor = await conn.execute("SELECT * FROM run_failures WHERE run_id = %s",
+                                            (run_id,))
+                existing = await cursor.fetchone()
+                return None if existing is None else {
+                    **failure_row(existing), "replayed": False, "requeued": 0,
+                    "reason": ALREADY_REPLAYED}
+            row = failure_row(row)
+            cursor = await conn.execute(
+                "UPDATE events SET consumed_by_run = NULL WHERE thread_key = %s "
+                "AND id = ANY(%s) AND consumed_by_run = %s RETURNING id",
+                (row["thread_key"], row["event_ids"], row["consumed_by"]))
+            requeued = len(await cursor.fetchall())
+            if requeued:
+                await conn.execute(
+                    "UPDATE threads SET pending_since = COALESCE(pending_since, %s), "
+                    "dead = FALSE WHERE key = %s", (self._clock(), row["thread_key"]))
+                await self._notify(conn)
+        if requeued:
+            self._wake.set()
+        return {**row, "replayed": True, "requeued": requeued}
 
     async def earliest_work(self, sinks: Sequence[str] | None = None,
                             *, schedules: bool = True) -> datetime | None:
@@ -878,7 +1028,7 @@ from .thread_metadata import PostgresThreadMetadata  # noqa: E402
 
 
 class PostgresStore(
-    TaskOutcomeStore, TaskQueries, PostgresThreadMetadata, PostgresDeliveries, ScheduleMixin, ApprovalMixin,
+    TaskOutcomeStore, TaskQueries, RunFailures, PostgresThreadMetadata, PostgresDeliveries, ScheduleMixin, ApprovalMixin,
     QuestionMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, PostgresCore,

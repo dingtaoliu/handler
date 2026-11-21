@@ -13,18 +13,17 @@ from typing import Any
 
 from ..types import Event, ThreadSpec, ThreadType
 
+# "dead" is still accepted as a filter (older clients ask for "failed,dead") but no
+# longer derived: a failed run never blocks its thread, so every failure is "failed".
 TASK_STATUSES = ("queued", "running", "waiting_approval", "waiting_answer", "succeeded",
                  "failed", "dead")
 RUN_STATUSES = TASK_STATUSES[1:]  # every status a run row can derive
 
-# Failed (or dead) first; a live lease means running; a finished run with a
-# pending approval, or else a pending question (ask_user), is waiting on a
-# human; a "running" row whose lease is gone was abandoned by its worker and
-# counts as failed.
+# Failed first; a live lease means running; a finished run with a pending
+# approval, or else a pending question (ask_user), is waiting on a human; a
+# "running" row whose lease is gone was abandoned by its worker and counts as
+# failed.
 _STATUS = """CASE
-  WHEN r.status IN ('failed','cancelled','abandoned') AND t.dead AND r.id = (
-       SELECT x.id FROM runs x WHERE x.thread_key = r.thread_key
-       ORDER BY x.started_at DESC, x.id DESC LIMIT 1) THEN 'dead'
   WHEN r.status IN ('failed','cancelled','abandoned') THEN 'failed'
   WHEN r.status = 'running' AND t.lease_version = r.lease_version
        AND t.lease_until IS NOT NULL AND t.lease_until > ? THEN 'running'

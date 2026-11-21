@@ -39,7 +39,7 @@ from agents import (
     set_tracing_disabled,
 )
 from agents.tool_context import ToolContext
-from agents.exceptions import AgentsException, MaxTurnsExceeded
+from agents.exceptions import AgentsException, MaxTurnsExceeded, ModelBehaviorError
 from agents.mcp import MCPServerStreamableHttp
 from openai.types.shared import Reasoning
 
@@ -57,6 +57,20 @@ DEFAULT_MAX_TURNS = 40
 DEFAULT_MODEL = HARNESS_DEFAULT_MODELS["openai_agents"]
 _RETRYABLE = (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError,
               openai.InternalServerError)
+# A plain APIError with no HTTP status (e.g. an error event in a stream) that
+# says the provider is temporarily unable to serve: "Our servers are currently
+# overloaded. Please try again later."
+_TRANSIENT = re.compile(r"overloaded|try again later|temporarily unavailable|"
+                        r"service unavailable|server[_ ]error", re.I)
+_TRANSIENT_CODES = {"server_error", "rate_limit_exceeded", "overloaded", "server_overloaded",
+                    "service_unavailable"}
+# Another request still holds the Conversation (typically a response from a
+# just-cancelled attempt): a 400 that clears once that request ends.
+_CONVERSATION_BUSY = re.compile(r"another process is currently operating on this conversation",
+                                re.I)
+CONVERSATION_BUSY_RETRY_SECONDS = 30.0
+# The model ended a turn with neither text nor a tool call. Usually a one-off.
+_NO_FINAL_RESPONSE = re.compile(r"did not produce a final response", re.I)
 
 _HOSTED_TOOLS = {"web_search_call", "file_search_call", "code_interpreter_call"}
 
@@ -517,13 +531,33 @@ def _error(exc: BaseException, session_id: str | None) -> HarnessError:
             and "conv" in str(exc).lower()):
         # Phrased so run.py recognises a lost session and recovers with a recap.
         return HarnessError(f"conversation not found: {exc}")
-    if isinstance(exc, _RETRYABLE):
+    if isinstance(exc, _RETRYABLE) or _transient(exc):
         return HarnessError(f"OpenAI API error: {exc}", retryable=True)
+    if isinstance(exc, openai.BadRequestError) and _CONVERSATION_BUSY.search(str(exc)):
+        return HarnessError(f"OpenAI API error: {exc}", retryable=True,
+                            retry_after=CONVERSATION_BUSY_RETRY_SECONDS)
+    if isinstance(exc, ModelBehaviorError) and _NO_FINAL_RESPONSE.search(str(exc)):
+        # One retry: a model that keeps ending turns empty is not going to recover.
+        return HarnessError(f"{type(exc).__name__}: {exc}", retryable=True, max_attempts=2)
     if isinstance(exc, MaxTurnsExceeded):
         return HarnessError(f"agent exceeded its turn limit: {exc}")
     if isinstance(exc, (openai.OpenAIError, AgentsException)):
         return HarnessError(f"{type(exc).__name__}: {exc}")
     return HarnessError(f"agent run failed: {type(exc).__name__}: {exc}")
+
+
+def _transient(exc: BaseException) -> bool:
+    """A provider error that should clear on its own: overload, 429 or 5xx.
+
+    Status errors are judged by their status alone, so a 400 (bad input) is
+    never retried; a status-less APIError by its code or message.
+    """
+    if not isinstance(exc, openai.APIError):
+        return False
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status in (408, 409, 429) or status >= 500
+    return exc.code in _TRANSIENT_CODES or bool(_TRANSIENT.search(str(exc)))
 
 
 class OpenAIAgentsHarness:

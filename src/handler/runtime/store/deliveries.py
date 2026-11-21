@@ -96,6 +96,22 @@ class _Deliveries:
         )
 
 
+    async def redeliver(self, sink: str, key: str | None = None) -> int:
+        """Requeue dead rows of `sink` (one `key`, or all of them); returns how many.
+
+        Each gets a fresh set of attempts and is due at once. Pending and
+        delivered rows are left alone. last_error stays until the next attempt.
+        """
+        now = self._ts(self._clock())
+        where, params = ("AND key = ? ", (key,)) if key is not None else ("", ())
+        rows = await self._dq(
+            "UPDATE deliveries SET status = ?, attempts = 0, next_attempt_at = ?, "
+            f"updated_at = ? WHERE sink = ? AND status = ? {where}RETURNING key",
+            (PENDING, now, now, sink, DEAD, *params),
+        )
+        return len(rows)
+
+
 class SQLiteDeliveries(_Deliveries):
     def _ts(self, value: datetime) -> str:
         return value.astimezone(timezone.utc).isoformat(timespec="microseconds")

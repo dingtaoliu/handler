@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -82,11 +83,17 @@ class WorkspaceSync:
     def __init__(self, file_store: FileStore | None, local_root: Path) -> None:
         self.file_store = file_store
         self.local_root = Path(local_root)
-        # Threads whose local files changed since their last upload. Runs only
-        # mark threads dirty; uploads happen off the request path, on a timer
-        # and at shutdown (Heroku sends SIGTERM ~30 s before killing a dyno).
+        # Threads whose local files changed since their last upload. A run marks
+        # its thread dirty and, when it ends, starts a background upload of that
+        # thread (flush_soon), off the reply path and the run slot. What that
+        # misses is uploaded on a timer and at shutdown (Heroku sends SIGTERM
+        # ~30 s before killing a dyno).
         self._dirty: set[str] = set()
         self._flush_lock = asyncio.Lock()
+        # One upload per thread at a time; counted so idle threads hold no lock.
+        self._slug_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+        self._background: dict[str, asyncio.Task[bool]] = {}
+        self._again: set[str] = set()
 
     def mark_dirty(self, thread_slug: str) -> None:
         if self.file_store is not None:
@@ -94,20 +101,86 @@ class WorkspaceSync:
 
     @property
     def dirty(self) -> frozenset[str]:
-        return frozenset(self._dirty)
+        """Threads not yet uploaded, including those whose upload is under way."""
+        return frozenset(self._dirty | set(self._background))
+
+    @contextlib.asynccontextmanager
+    async def _slug_lock(self, slug: str):
+        lock, users = self._slug_locks.get(slug) or (asyncio.Lock(), 0)
+        self._slug_locks[slug] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, users = self._slug_locks[slug]
+            if users <= 1:
+                del self._slug_locks[slug]
+            else:
+                self._slug_locks[slug] = (lock, users - 1)
+
+    async def _persist_dirty(self, slug: str) -> bool:
+        """Upload one thread if it is dirty; on failure it stays dirty."""
+        async with self._slug_lock(slug):
+            if slug not in self._dirty:
+                return True  # uploaded meanwhile, or never changed
+            self._dirty.discard(slug)  # a write during the upload marks it again
+            try:
+                await self.persist(slug)
+                return True
+            except Exception:
+                logger.exception("workspace sync failed", extra={"thread_slug": slug})
+                self._dirty.add(slug)
+                return False
+
+    def flush_soon(self, thread_slug: str) -> None:
+        """Upload this thread's changes now, in the background (a run just ended).
+
+        Never raises and never waits: the run's slot and reply don't depend on
+        S3. A failed upload leaves the thread dirty for the periodic flush.
+        """
+        if thread_slug not in self._dirty:
+            return  # nothing changed (or the lease was lost: nothing to upload)
+        if thread_slug in self._background:
+            self._again.add(thread_slug)  # upload again once the current one ends
+            return
+        task = asyncio.create_task(self._flush_in_background(thread_slug),
+                                   name=f"workspace-flush:{thread_slug}")
+        self._background[thread_slug] = task
+        # Also on a cancel before it started, when its own `finally` never runs.
+        task.add_done_callback(lambda finished: self._forget(thread_slug, finished))
+
+    def _forget(self, slug: str, task: asyncio.Task) -> None:
+        if self._background.get(slug) is task:
+            del self._background[slug]
+
+    async def _flush_in_background(self, slug: str) -> bool:
+        try:
+            while True:
+                synced = await self._persist_dirty(slug)
+                if not synced or slug not in self._again:
+                    break
+                self._again.discard(slug)  # another run ended during the upload
+            if synced:
+                logger.info("workspace synced at run end", extra={"thread_slug": slug})
+            return synced
+        finally:
+            self._again.discard(slug)
+            self._forget(slug, asyncio.current_task())
 
     async def flush(self) -> int:
         """Upload every dirty thread; failures stay dirty for the next flush."""
         async with self._flush_lock:
-            pending, self._dirty = self._dirty, set()
-            done = 0
-            for slug in sorted(pending):
-                try:
-                    await self.persist(slug)
+            # Run-end uploads under way finish first, so a shutdown flush returns
+            # only once they are done too (asyncio.wait: a cut-short flush
+            # leaves them running).
+            in_flight = list(self._background.values())
+            if in_flight:
+                await asyncio.wait(in_flight)
+            done = sum(1 for task in in_flight if not task.cancelled()
+                       and task.exception() is None and task.result())
+            for slug in sorted(self._dirty):
+                if await self._persist_dirty(slug):
                     done += 1
-                except Exception:
-                    logger.exception("workspace sync failed", extra={"thread_slug": slug})
-                    self._dirty.add(slug)
             return done
 
     async def run_periodic(self, stop: asyncio.Event, interval_seconds: float) -> None:

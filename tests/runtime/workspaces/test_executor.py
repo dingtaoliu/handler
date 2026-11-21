@@ -230,7 +230,9 @@ async def test_fresh_session_failure_is_not_retried_again_and_session_is_cleared
     await runner.execute(await claimed(store))
     assert len(harness.requests) == 2
     thread = await store.get_thread(KEY)
-    assert thread.session_id == "" and thread.attempts == 1
+    # Not retried: the failure is accepted (attempts reset, thread left open).
+    assert thread.session_id == "" and thread.attempts == 0 and not thread.dead
+    assert "session not found" in thread.last_error
     run, = await store.list_runs(KEY)
     assert run.status is RunStatus.FAILED
     assert sum(s.kind is StepKind.RETRY for s in await store.list_steps(run.id)) == 1
@@ -291,8 +293,8 @@ async def test_workspace_persisted_after_success_or_failure(store, tmp_path, fai
     sync = WorkspaceSync(files, tmp_path / "data")
     runner = executor(store, harness, tmp_path, workspace_sync=sync)
     await runner.execute(await claimed(store, session=None))
-    # The run itself never uploads; the thread is queued for the next flush.
-    assert await files.list() == [] and sync.dirty == {thread_slug(KEY)}
+    # The run doesn't wait for the upload; it starts in the background as the run ends.
+    assert sync.dirty == {thread_slug(KEY)}
     assert await sync.flush() == 1 and not sync.dirty
     assert await files.get(f"workspaces/{thread_slug(KEY)}/note.txt") == b"saved workspace"
     assert not any("auth.json" in key for key in await files.list())
@@ -331,10 +333,64 @@ async def test_run_finishes_without_waiting_for_workspace_upload(store, tmp_path
     sync = SlowSync(LocalFileStore(tmp_path / "remote"), tmp_path / "data")
     runner = executor(store, FakeHarness(), tmp_path, workspace_sync=sync)
     await asyncio.wait_for(runner.execute(await claimed(store, session=None)), 2)
-    assert uploads == [] and sync.dirty == {thread_slug(KEY)}
+    assert sync.dirty == {thread_slug(KEY)}
     assert (await store.get_thread(KEY)).lease_owner is None
     run, = await store.list_runs(KEY)
     assert run.status is RunStatus.COMPLETED
+    await asyncio.sleep(0)
+    assert uploads == [thread_slug(KEY)]  # the run-end upload is under way, unawaited
+    for task in list(sync._background.values()):
+        task.cancel()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_workspace_uploaded_when_the_run_ends(store, tmp_path, fail):
+    files = LocalFileStore(tmp_path / "remote")
+    harness = FakeHarness(fresh_error=HarnessError("failed") if fail else None)
+    sync = WorkspaceSync(files, tmp_path / "data")
+    await executor(store, harness, tmp_path, workspace_sync=sync).execute(
+        await claimed(store, session=None))
+    for task in list(sync._background.values()):
+        await task
+    assert not sync.dirty
+    assert await files.get(f"workspaces/{thread_slug(KEY)}/note.txt") == b"saved workspace"
+
+
+async def test_failed_run_end_upload_keeps_thread_dirty_and_run_completed(store, tmp_path):
+    class BrokenSync(WorkspaceSync):
+        async def persist(self, slug):
+            raise OSError("backup unavailable")
+
+    sync = BrokenSync(LocalFileStore(tmp_path / "remote"), tmp_path / "data")
+    await executor(store, FakeHarness(), tmp_path, workspace_sync=sync).execute(
+        await claimed(store, session=None))
+    for task in list(sync._background.values()):
+        await task
+    assert sync.dirty == {thread_slug(KEY)}  # left for the periodic flush
+    run, = await store.list_runs(KEY)
+    assert run.status is RunStatus.COMPLETED
+
+
+async def test_shutdown_flush_waits_for_a_run_end_upload(tmp_path):
+    started, release = asyncio.Event(), asyncio.Event()
+    persisted = []
+
+    class GatedSync(WorkspaceSync):
+        async def persist(self, slug):
+            started.set()
+            await release.wait()
+            persisted.append(slug)
+
+    sync = GatedSync(LocalFileStore(tmp_path / "remote"), tmp_path / "data")
+    sync.mark_dirty("t1")
+    sync.flush_soon("t1")
+    await started.wait()
+    assert sync.dirty == {"t1"}  # under way still counts as not uploaded
+    flushing = asyncio.create_task(sync.flush())
+    await asyncio.sleep(0.01)
+    assert not flushing.done()
+    release.set()
+    assert await flushing == 1 and persisted == ["t1"] and not sync.dirty
 
 
 async def test_failed_flush_keeps_thread_dirty(store, tmp_path):
@@ -489,3 +545,44 @@ async def test_run_after_an_abandoned_one_asks_for_session_repair(store, tmp_pat
     lease, = await store.claim("worker", Lane.INTERACTIVE, 1, 60)
     await executor(store, harness, tmp_path).execute(lease)
     assert harness.requests[-1].repair_session is False
+
+
+async def test_run_ending_during_an_upload_is_uploaded_after_it(tmp_path):
+    release = asyncio.Event()
+    persisted = []
+
+    class GatedSync(WorkspaceSync):
+        async def persist(self, slug):
+            persisted.append(slug)
+            if len(persisted) == 1:
+                await release.wait()
+
+    sync = GatedSync(LocalFileStore(tmp_path / "remote"), tmp_path / "data")
+    sync.mark_dirty("t1")
+    sync.flush_soon("t1")
+    await asyncio.sleep(0)
+    sync.mark_dirty("t1")  # the next run of the thread ends meanwhile
+    sync.flush_soon("t1")
+    release.set()
+    await asyncio.wait(list(sync._background.values()))
+    assert persisted == ["t1", "t1"] and not sync.dirty
+
+
+async def test_run_cancelled_at_shutdown_is_left_for_the_shutdown_flush(store, tmp_path):
+    class BlockingHarness(FakeHarness):
+        async def run(self, req):
+            (req.workspace / "note.txt").write_text("partial")
+            yield RunEvent(RunEventKind.TURN_STARTED, {})
+            await asyncio.sleep(3600)
+
+    sync = WorkspaceSync(LocalFileStore(tmp_path / "remote"), tmp_path / "data")
+    runner = executor(store, BlockingHarness(), tmp_path, workspace_sync=sync)
+    task = asyncio.create_task(runner.execute(await claimed(store, session=None)))
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if (tmp_path / "data" / "workspaces" / thread_slug(KEY) / "note.txt").exists():
+            break
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert sync.dirty == {thread_slug(KEY)}

@@ -18,6 +18,8 @@ const API = {
     threadMessages: (k) => `/api/threads/${enc(k)}/messages`,
     threadRuns: (k) => `/api/threads/${enc(k)}/runs`,
     threadStream: (k) => `/api/threads/${enc(k)}/stream`,
+    failedRuns: "/api/runs/failed",
+    replayRun: (id) => `/api/runs/${enc(id)}/replay`,
     stream: "/api/stream",
     run: (id) => `/api/runs/${enc(id)}`,
     chat: "/api/chat",
@@ -338,7 +340,7 @@ function renderThreadList(list = chat.threads) {
     $("thread-list").innerHTML = shown.length ? shown.map((t) => {
         const own = isOwnChat(t.key);
         const kind = t.type === "chat" ? (own ? "" : badge("other chat", "gray")) : badge(t.type, t.type === "automation" ? "blue" : "green");
-        const state = t.dead ? badge("dead", "red") : t.lease_owner ? badge("running", "blue") : t.pending_since ? badge("queued", "yellow") : "";
+        const state = t.lease_owner ? badge("running", "blue") : t.pending_since ? badge("queued", "yellow") : "";
         const unread = chat.unread.has(t.key) ? badge("new activity", "blue") : "";
         return `<div class="file-item thread-item ${t.key === chat.key ? "active" : ""}" role="button" tabindex="0" data-action="select-thread" data-key="${esc(t.key)}">
             <div class="file-name"><span class="t">${esc(threadTitle(t))}</span>${kind}${state}${unread}</div>
@@ -472,8 +474,8 @@ async function loadMessages(force) {
     if (key !== chat.key || request !== chat.request) return;
     const pending = (detail.pending_events || []).filter((e) => e.type === "chat.message" || e.type === "automation.fired");
     const t = detail.thread || {};
-    chat.thinking = !!(t.pending_since && !t.dead);
-    const sig = JSON.stringify([msgs, pending, t.last_error, t.dead, live]);
+    chat.thinking = !!t.pending_since;
+    const sig = JSON.stringify([msgs, pending, t.last_error, live]);
     if (!force && sig === chat.sig) { renderThinking(); return; }
     chat.sig = sig;
     const box = $("messages");
@@ -487,7 +489,8 @@ async function loadMessages(force) {
         html += (live.steps || []).map(stepHtml).join("");
     }
     if (t.last_error || (live && live.run.error)) {
-        const state = t.dead ? "Run failed and will not be retried" : t.pending_since ? "Run failed; retrying" : "Run failed";
+        // A failure never blocks the thread: a new message (or the next trigger) runs as usual.
+        const state = t.pending_since ? "Run failed; retrying" : t.type === "chat" ? "Run failed (send your message again to retry)" : "Run failed";
         html += `<div class="msg event run-error" role="status">${esc(state)}: ${esc(t.last_error || live.run.error)}</div>`;
     }
     box.innerHTML = html || empty("No messages yet. Agent activity will appear here.");
@@ -552,7 +555,7 @@ async function selectThread(key) {
     chat.unread.delete(key);
     document.body.classList.remove("thread-open");
     const t = chat.threads.find((x) => x.key === key);
-    if (t && t.pending_since && !t.dead) chat.thinking = true;
+    if (t && t.pending_since) chat.thinking = true;
     setChatMode();
     renderChatOpts();
     refreshChatOpts().catch(() => {});
@@ -852,7 +855,30 @@ loaders.automations = loadAutomations;
 const act = {run: null, items: [], cursor: null};
 const TASK_BADGE = {queued: "yellow", running: "blue", waiting_approval: "yellow", waiting_answer: "yellow",
     succeeded: "green", failed: "red", dead: "red"};
-const taskBadge = (s) => badge(s === "succeeded" ? "run completed" : String(s || "").replaceAll("_", " "), s === "succeeded" ? "gray" : TASK_BADGE[s] || "gray");
+const TASK_LABEL = {succeeded: "run completed"};
+const taskBadge = (s) => badge(TASK_LABEL[s] || String(s || "").replaceAll("_", " "), s === "succeeded" ? "gray" : TASK_BADGE[s] || "gray");
+// Runs that failed for good (admins only). Their threads keep working; Replay
+// runs the failed run's events once more.
+async function loadFailedRuns() {
+    const box = $("activity-failed");
+    if (!isAdmin()) { box.innerHTML = ""; return; }
+    const page = await apiOpt(API.failedRuns + "?limit=20", null);
+    const rows = (page && page.items) || [];
+    if (!rows.length) { box.innerHTML = ""; return; }
+    box.innerHTML = `<div class="section-title">Failed runs</div><p class="muted">These runs failed after their last attempt. Their threads keep working; Replay runs the same events once more.</p><div class="table-wrap"><table class="data-table"><thead><tr><th>Thread</th><th>Type</th><th>Error</th><th>Attempts</th><th>Events</th><th>Failed</th><th></th></tr></thead><tbody>` +
+        rows.map((r) => `<tr><td><a class="link" role="button" tabindex="0" data-action="goto-thread" data-key="${esc(r.thread_key)}">${esc(r.title || r.thread_key)}</a><div class="muted">${esc(r.run_id)}</div></td>
+            <td>${badge(r.thread_type, "gray")}</td><td class="err-text">${esc(String(r.error || "").slice(0, 200))}</td>
+            <td>${esc(r.attempts)}</td><td>${esc((r.event_ids || []).length)}</td><td>${esc(fmtTime(r.failed_at))}</td>
+            <td>${r.replayed_at ? `<span class="muted">replayed ${esc(fmtTime(r.replayed_at))}</span>` : `<button class="btn-small btn-primary" type="button" data-action="run-replay" data-run="${esc(r.run_id)}">Replay</button>`}</td></tr>`).join("") + "</tbody></table></div>";
+}
+actions["run-replay"] = async (el) => {
+    el.disabled = true;
+    try {
+        const r = await sendJson("POST", API.replayRun(el.dataset.run), {});
+        toast(`Replaying ${r.requeued} event(s)`);
+    } finally { el.disabled = false; }
+    await loadActivity();
+};
 const outcomeBadge = (t) => badge(String(t.task_outcome?.outcome || "unknown").replaceAll("_", " "), t.task_outcome?.outcome === "completed" ? "green" : "gray");
 async function loadIgnoredEmail() {
     const rows = await apiOpt("/api/events?source=email&status=ignored&limit=30", []);
@@ -878,7 +904,8 @@ function taskRow(t) {
         <td>${taskBadge(t.status)}<div>Task: ${outcomeBadge(t)}</div></td><td>${badge(t.thread_type, "gray")}</td>
         <td><b>${esc(t.trigger_summary)}</b><div class="muted">${esc(t.thread_title)}</div>
             ${t.summary ? `<div class="muted">${esc(t.summary)}</div>` : ""}
-            ${t.error ? `<div class="err-text">${esc(String(t.error).slice(0, 200))}</div>` : ""}</td>
+            ${t.error ? `<div class="err-text">${esc(String(t.error).slice(0, 200))}</div>` : ""}
+</td>
         <td title="${esc(when || "")}">${esc(fmtTime(when))}<div class="muted">${esc(fmtAge(when))} ago</div></td>
         <td>${esc(dur)}</td><td>${tokens}</td><td>${fmtCost(t.cost_usd)}</td></tr>`;
 }
@@ -890,6 +917,7 @@ function renderTasks() {
 }
 async function loadActivity() {
     loadIgnoredEmail().catch(() => {});
+    loadFailedRuns().catch(() => {});
     if (!chat.stream) connectStream();  // live task_updated messages
     const page = await api("/api/tasks?" + taskQuery());
     act.items = page.items || []; act.cursor = page.next_cursor;

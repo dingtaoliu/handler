@@ -83,8 +83,10 @@ class DeliveryStore(Protocol):
 
 class Outbox:
     def __init__(self, store: DeliveryStore, sinks: list[Sink] | None = None, *,
-                 poll_seconds: float = 5.0, lease_seconds: float = 60.0) -> None:
+                 poll_seconds: float = 5.0, lease_seconds: float = 60.0,
+                 tenant: str = "") -> None:
         self.store = store
+        self.tenant = tenant or "main"
         self.sinks: dict[str, Sink] = {}
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
@@ -112,6 +114,10 @@ class Outbox:
             self._wake.set()
         return queued
 
+    def wake(self) -> None:
+        """Deliver now (e.g. rows were just requeued)."""
+        self._wake.set()
+
     async def deliver_once(self, limit: int = 20) -> int:
         """Deliver due rows once; returns how many succeeded."""
         delivered = 0
@@ -127,7 +133,9 @@ class Outbox:
                 await self.store.delivery_failed(row.sink, row.key, error, retry_in)
                 extra = {"sink": row.sink, "key": row.key, "attempts": attempts, "error": error[:500]}
                 if retry_in is None:
-                    logger.error("delivery dead-lettered", extra=extra)
+                    # The stable message is the operator's log-based alert; the row
+                    # is kept for redeliver. Nobody else is notified.
+                    logger.error("delivery dead", extra={**extra, "tenant": self.tenant})
                 else:
                     logger.warning("delivery failed, retrying", extra={**extra, "retry_in": retry_in})
                 continue
