@@ -1,5 +1,43 @@
 # Handoff: handler rebuild
 
+## 2026-11-21 shared runtime Release 1 (Handler v64)
+
+- **Handler v64** (`main` at `26ae390`, merging `feat/shared-runtime-r1` at `e0140e9`; image
+  `278fc4df5576`, 2.15 GB). v63 set `HANDLER_ALLOWED_HARNESSES=openai_agents`. Backup
+  **b043**. **Rollback: v62** (v62 ignores the new `run_failures` table and the variable,
+  but would mark threads dead again; the next upgrade sweeps them).
+- **Contents:** see [shared-runtime-release-handoff.md](shared-runtime-release-handoff.md)
+  Release 1: native-only harness guard, workspace upload at run end, accepted failure
+  (`run failed` alert, `run_failures`, `GET /api/runs/failed`, Replay, user retry for
+  chat), dead-delivery redeliver, lowercase `.pdf` upload names, and retries for transient
+  provider errors.
+- **Verified:**
+  - `/healthz` and `/i/{main,bss,yeup}/healthz` return 200; an unknown instance returns 404;
+    no key returns 401, and main's admin key returns 401 on BSS.
+  - The startup sweep logged 13 `run failed` lines for BSS (`failed_before_upgrade`); no
+    thread is dead in any schema; `run_failures` holds BSS's 13.
+  - No harness errors at startup.
+  - Suite on merged `main`: 1,631 passed / 4 skipped. The image started cleanly in a local
+    smoke run.
+- **BSS backlog replayed:** the 12 mail failures (40 events, November 9 to 20) replayed
+  oldest first via `POST /i/bss/api/runs/{id}/replay`: all 12 runs **completed**, none
+  failed again (drained 15:25 to 15:37 EST). The November 11 chat
+  (`run_4b8520ffe33042ff`) was not replayed.
+- **Crontal v127** (Release 3, same day): `main` at `c3146ef` (chat `client_message_id`,
+  client conversation ids, red failure icon with Retry via
+  `POST /api/v1/handler/threads/<key>/runs/<run_id>/retry`), shipped together with the
+  owner-approved, previously undeployed `08d2d1f` (merchant quotation PDF templates,
+  migration `z2quote20261115`). Image `bbd01eee1a5c`; backup **b044**; maintenance mode
+  20:40:03 to 20:40:38 UTC for the migration; Alembic now `z2quote20261115`; Yeup (298)
+  and Brava (232) have their templates. Backend suite 759 passed / 1 skipped on the
+  release tree. Only H80 503s during maintenance; proxy calls 200 afterwards.
+  **Rollback: v126**, then `alembic downgrade y1hfree20261109` only if the column must go
+  (v126 ignores it). Tag `deployed/hephaestus-backend-test-v127`.
+- **Not yet checked by a person:** the failure icon and Retry in Crontal's panel (covered by
+  component tests only).
+- **Codex threads:** `handler_crontal` has 3 old chat threads on `codex` (user 1, October 18);
+  a message there now fails the run.
+
 ## 2026-11-21 production run failures (Release 1 line, `feat/shared-runtime-r1`)
 
 - **Uppercase `.PDF` attachments killed runs.** Native `read_file` uploaded a PDF under its
