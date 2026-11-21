@@ -17,7 +17,7 @@ All build work is finished and committed. Nothing is pushed or deployed.
 | --- | --- |
 | Production | Handler **v62** on `crontal-agent` (`7c7fde2`); Handler `main` is `6bfb180` (a docs commit on top). Tenants `main` (schema `handler_crontal`), `bss` (`handler_bss`), `yeup` (`handler_yeup`). Crontal on `hephaestus-backend-test` |
 | Handler integration branch | `feat/shared-runtime` in worktree `/Users/dannyliu/dev/repos/handler-wt-shared-runtime`. Release 2's code ends at **`db00880`**; commits after it change only this handoff, so merging the branch head is equivalent |
-| Crontal branch | `feat/chat-client-message-id`, **`18a3018`** (one commit on Crontal `main` at `08d2d1f`), in worktree `/Users/dannyliu/dev/repos/hephaestus-wt-client-msg-id`. Release 3 |
+| Crontal branch | `feat/chat-client-message-id`, **`e927a3f`** (two commits on Crontal `main` at `08d2d1f`), in worktree `/Users/dannyliu/dev/repos/hephaestus-wt-client-msg-id`. Release 3 |
 | Merged, safe to remove | `feat/shared-runtime-readers` (`/Users/dannyliu/dev/repos/handler-wt-shared-readers`) and `feat/shared-runtime-gating` (`/Users/dannyliu/dev/repos/handler-wt-shared-gating`): both merged into `feat/shared-runtime` |
 | Main checkouts | `/Users/dannyliu/dev/repos/handler` and `/Users/dannyliu/dev/repos/hephaestus` hold other sessions' uncommitted work. Don't edit them, and never build images from them |
 
@@ -25,23 +25,25 @@ Test results at handover:
 
 | Commit | Suite |
 | --- | --- |
-| Handler `ead189b` (Release 1, branch `feat/shared-runtime-r1`) | 1,620 passed / 4 skipped; 1,587 / 4 three runs in a row before the last two fixes |
-| Handler `feat/shared-runtime` (Release 2, includes the Release 1 line) | 1,665 passed / 5 skipped, twice. The skip is a Linux-only address-space test. The Linux pool tests passed in an arm64 container |
-| Crontal `18a3018` (Release 3) | Backend 751 passed / 1 skipped. Frontend `npm run build` passes; `npx vitest run` 64/64; lint has 64 errors and 30 warnings, all already there, none in changed files |
+| Handler `e0140e9` (Release 1, branch `feat/shared-runtime-r1`) | 1,631 passed / 4 skipped; 1,587 / 4 three runs in a row earlier on this line |
+| Handler `feat/shared-runtime` at `1d9ddf6` (Release 2, includes the Release 1 line) | 1,676 passed / 5 skipped. The skip is a Linux-only address-space test. The Linux pool tests passed in an arm64 container |
+| Crontal `e927a3f` (Release 3) | Backend 759 passed / 1 skipped. Frontend `npm run build` passes; `npx vitest run` 87/87; lint has 64 errors and 30 warnings, all already there, none in changed files |
 
 ## Plan: three releases
 
 | Release | App | What | Commit |
 | --- | --- | --- | --- |
-| 1 | `crontal-agent` | Steps 0 and 1: native-only harness guard, workspace upload at run end, accepted failure with Failed runs and Replay, dead-delivery redeliver; plus two production bug fixes (uppercase `.PDF` uploads, retry classification) | Handler `ead189b` on `feat/shared-runtime-r1` |
+| 1 | `crontal-agent` | Steps 0 and 1: native-only harness guard, workspace upload at run end, accepted failure with Failed runs and Replay, a user retry endpoint for failed chat runs, dead-delivery redeliver; plus two production bug fixes (uppercase `.PDF` uploads, retry classification) | Handler `e0140e9` on `feat/shared-runtime-r1` |
 | 2 | `crontal-agent` | Step 4 (reader pool, PyMuPDF for PDF text) and the run-gating fixes from Codex's review | Head of `feat/shared-runtime` (it already contains the Release 1 line) |
-| 3 | `hephaestus-backend-test` | Chat sends `client_message_id` and a client-made `conversation_id` | Crontal `18a3018` |
+| 3 | `hephaestus-backend-test` | Chat sends `client_message_id` and a client-made `conversation_id`; a red failure icon with a single Retry link on failed messages | Crontal `e927a3f` |
 
 Releases 1 and 2 are separate because the reader pool has no on/off switch: undoing it
-means rolling back the release. Release 3 is independent of both: current Handler already
-accepts both ids. It can go out before, between or after them.
+means rolling back the release. **Ship Release 3 after Release 1**: the run-failure Retry
+needs Release 1's endpoint and `retryable` field. Against v62 it is still safe (the icon
+shows without Retry, and send-failure Retry works), so the order only affects whether Retry
+appears on failed runs.
 
-### Release 1: steps 0 and 1 (Handler `ead189b`, branch `feat/shared-runtime-r1`)
+### Release 1: steps 0 and 1 (Handler `e0140e9`, branch `feat/shared-runtime-r1`)
 
 **Contents:**
 
@@ -55,6 +57,7 @@ accepts both ids. It can go out before, between or after them.
 | `0241bbe` | Cherry-pick of `6cedced`: the held-email test no longer depends on timing |
 | `cd5ae17`, `69ebc3a` | **Accepted failure replaces parking** (owner decision, November 21). A run that fails for good is `FAILED`, its events are consumed by it, and the thread stays usable. No user or tenant-admin failure notices, including the pre-existing background one. Operator signals: ERROR `run failed` (tenant, thread, type, run, attempts, error, event ids), a `run_failures` table, `GET /api/runs/failed`, `POST /api/runs/{run_id}/replay` (once), CLI `handler-rt run failed` / `run replay`, and a Failed runs table with Replay on Activity. A startup sweep clears old `dead` threads, marks their queued events `failed-before-upgrade` and records them for replay. Parking (`park_noticed`, `/api/threads/parked`, `/retry`, badges) is removed |
 | `70e48a5` | PDFs are uploaded under a lowercase `.pdf` name. OpenAI refused `X.PDF` as input with a 400, which failed 9 BSS mail threads |
+| `e0140e9` | `POST /api/runs/{run_id}/retry` for the person chatting: their own chat thread, the thread's latest run, a final failure, once (shared with Replay). It reruns the same events, charges no input and keeps one copy of the message. `run_finished` and the runs listing carry `retryable`; `run_finished` carries `event_ids` |
 | `ead189b` | Transient provider errors retry: overload, 429/408/409/5xx, and "another process is operating on this conversation" (after at least 30 s). "Model did not produce a final response" retries once. Other 400s stay final |
 
 **Checks before release:**
@@ -83,19 +86,21 @@ accepts both ids. It can go out before, between or after them.
    which is only on the Release 2 side. Run the suite on the Release 1 merge at least 3
    times with `-rf`. A failure in that one test is the known timing flake (rerun it, or
    cherry-pick `6cedced`, which is test-only). Investigate any other failure.
-3. **The UI in a browser.** The Failed runs table and Replay on Activity, and the
-   "Run failed (send your message again to retry)" note in a thread (`web/static/app/`),
-   were only checked with `node --check`. Run Handler locally against a scratch database,
-   make a run fail for good, and check the table, Replay and the note. Never connect a local run to
+3. **The UI in a browser (done, November 21).** Handler at `e0140e9` with SQLite and a
+   fake OpenAI server that answers 400, driven by headless Chromium: the thread shows "Run
+   failed (send your message again to retry): …"; Tasks shows the Failed runs table with
+   Replay; Replay re-queued the run and the row changed to "replayed"; no JavaScript
+   errors. Against the same server: `POST /api/runs/{id}/retry` gave 202, then 409 "already
+   replayed or retried"; the message appeared once; `run failed` logged with all fields. Never connect a local run to
    production stores.
 
-**Merge:** merge `feat/shared-runtime-r1` (`ead189b`) into `main`, not `feat/shared-runtime`, which includes Release 2.
+**Merge:** merge `feat/shared-runtime-r1` (`e0140e9`) into `main`, not `feat/shared-runtime`, which includes Release 2.
 Production follows `main`.
 
 ```sh
 git -C /Users/dannyliu/dev/repos/handler worktree add ../handler-wt-release1 main
 cd /Users/dannyliu/dev/repos/handler-wt-release1
-git merge --no-ff ead189b -m "Merge shared runtime steps 0 and 1"
+git merge --no-ff e0140e9 -m "Merge shared runtime steps 0 and 1"
 ```
 
 Then run the suite on the merge result. How `main` gets updated (direct merge, or a pull
@@ -225,7 +230,7 @@ Basic until measurements show otherwise). On a 1 GB dyno, 2 readers at 300 MB or
 **Record** the release in `HANDOFF.md` like Release 1, and mark step 4 released in
 `role-split-design.md`.
 
-### Release 3: Crontal chat message ids (Crontal `18a3018`)
+### Release 3: Crontal chat message ids and failure Retry (Crontal `e927a3f`)
 
 **Change:** the chat panel gives each message a `client_message_id` once, and reuses it on
 resend after a timeout, network error or 5xx, so Handler stores and runs it once. A new
@@ -235,9 +240,18 @@ conversation (`new_conversation` flag). A 4xx, including a 429 at the free month
 counts as a clear rejection, so a later send gets a new id. That is intended: a dropped
 over-limit message is recorded under its id, so reusing it would never run.
 
-**Checks:** the suites listed above. Optionally, run Crontal locally against a local
-Handler and check in the browser's network tab that a resend carries the same
-`client_message_id`.
+Also (`e927a3f`): a failed message shows a red `CircleAlert` icon and a "Retry" link
+beside the user's bubble. A send failure (network, timeout, 5xx) keeps the message and
+Retry resends with the same ids; a 4xx gives a new message id; the free-plan 429 keeps its
+limit notice and offers no Retry. A run failure is found from `run_finished` or, after a
+reload, the runs listing (matched by event id), and Retry calls the new proxy
+`POST /api/v1/handler/threads/<key>/runs/<run_id>/retry` (own chat threads only, run
+checked against the thread), which forwards to Handler's user retry. A missing
+`retryable` (older Handler) shows the icon without Retry.
+
+**Checks:** the suites listed above. The panel was not rendered in a browser; its states
+are covered by component tests (`HandlerChatPanel.test.tsx`). After release, look at one
+failed message in the panel to confirm the icon and Retry look right.
 
 **Merge and release:** merge `18a3018` into Crontal `main`, in a clean worktree, never the
 main checkout. Then follow Crontal's `.claude/skills/deploy/SKILL.md` for
@@ -246,7 +260,9 @@ main checkout. Then follow Crontal's `.claude/skills/deploy/SKILL.md` for
 
 **Verify:** a chat through the agent panel works for one user each on `bss` and `yeup`.
 The `POST /api/v1/handler/chat` request body carries `client_message_id`, and a new
-conversation also carries `conversation_id` and `new_conversation`.
+conversation also carries `conversation_id` and `new_conversation`. If a failed run is
+available (for example one from the BSS sweep is not a chat; use any chat failure), its
+message shows the icon and Retry.
 
 **Rollback:** `heroku rollback` to the previous Crontal release; nothing else changes.
 
