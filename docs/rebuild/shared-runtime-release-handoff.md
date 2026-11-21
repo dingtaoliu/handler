@@ -15,9 +15,8 @@ them. Never print secret config values or pass them as command arguments.
   replayed: 12 mail runs, all completed.
 - **Release 3 shipped** as Crontal **v127** (`main` `c3146ef`), together with the
   owner-approved quotation templates (`08d2d1f`, migration `z2quote20261115`). Backup b044.
-- **Release 2 is next.** Wait until v64 has run for about a day (watch `run failed`, R14
-  and the replayed BSS threads). Then follow the Release 2 section: re-measure on the
-  built image, check gate variables, merge `feat/shared-runtime` into `main`, and release.
+- **Release 2 shipped** as Handler **v65** (`main` `133cf3f`), backup b045, after re-measuring
+  on the built image. All three releases are out; next is build order steps 2 and 3.
 - Records are in [HANDOFF.md](HANDOFF.md).
 
 ## Where things stand (written before the releases)
