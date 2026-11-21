@@ -31,7 +31,14 @@ from ..tenancy.limits import (
 )
 from .postgres_hub import CONTROL_SCHEMA, SCHEMA_LOCK, SHARED_CHANNEL, PostgresHub
 from .usage import PostgresUsage
-from .run_failures import FAILED_BEFORE_UPGRADE, FAILED_MARKER, RunFailures, failure_row
+from .run_failures import (
+    ALREADY_REPLAYED,
+    FAILED_BEFORE_UPGRADE,
+    FAILED_MARKER,
+    NOT_LATEST,
+    RunFailures,
+    failure_row,
+)
 from .tasks import announce_routed
 from ..types import (
     ABANDONED_ERROR,
@@ -152,6 +159,28 @@ async def _route(conn: AsyncConnection, thread: ThreadSpec, event_type: str, now
          thread.owner_user_id, thread.harness, thread.model,
          thread.priority, now, now),
     )
+
+
+async def _latest_on_thread(conn: AsyncConnection, key: str, run_id: str,
+                            now: datetime) -> bool:
+    """True when `run_id` is the thread's newest run and nothing else is queued or
+    running there (see run_failures.NOT_LATEST). Locks the thread row first, so a
+    claim or a new input on the thread waits for this transaction."""
+    cursor = await conn.execute(
+        "SELECT lease_owner, lease_until FROM threads WHERE key = %s FOR UPDATE", (key,))
+    thread = await cursor.fetchone()
+    if thread is None or (thread["lease_owner"] is not None and thread["lease_until"]
+                          and thread["lease_until"] > now):
+        return False
+    cursor = await conn.execute("SELECT id FROM runs WHERE thread_key = %s "
+                                "ORDER BY started_at DESC, seq DESC LIMIT 1", (key,))
+    newest = await cursor.fetchone()
+    if newest is None or newest["id"] != run_id:
+        return False
+    cursor = await conn.execute(
+        "SELECT 1 FROM events WHERE thread_key = %s AND status = 'routed' "
+        "AND consumed_by_run IS NULL LIMIT 1", (key,))
+    return await cursor.fetchone() is None
 
 
 async def _charge_input(conn: AsyncConnection, event: Event, thread: ThreadSpec,
@@ -704,13 +733,27 @@ class PostgresCore(PostgresUsage):
                 await self._notify(conn)
         return swept
 
-    async def replay_failed_run(self, run_id: str, *, by: str | None = None) -> dict | None:
+    async def replay_failed_run(self, run_id: str, *, by: str | None = None,
+                                latest_only: bool = False) -> dict | None:
         """Make a terminal failure's events pending again on its thread, once.
 
         None if no such failure; otherwise its row with `replayed` (False if it
-        was replayed before) and `requeued` (events made pending again).
+        was not replayed now), `reason` when it wasn't (ALREADY_REPLAYED, or
+        NOT_LATEST with `latest_only`: the run is not the thread's newest, or the
+        thread has other work queued or running) and `requeued` (events made
+        pending again).
         """
         async with self._conn() as conn:
+            if latest_only:
+                cursor = await conn.execute("SELECT * FROM run_failures WHERE run_id = %s",
+                                            (run_id,))
+                existing = await cursor.fetchone()
+                if existing is None:
+                    return None
+                if existing["replayed_at"] is None and not await _latest_on_thread(
+                        conn, existing["thread_key"], run_id, self._clock()):
+                    return {**failure_row(existing), "replayed": False, "requeued": 0,
+                            "reason": NOT_LATEST}
             cursor = await conn.execute(
                 "UPDATE run_failures SET replayed_at = %s, replayed_by = %s "
                 "WHERE run_id = %s AND replayed_at IS NULL RETURNING *",
@@ -720,8 +763,9 @@ class PostgresCore(PostgresUsage):
                 cursor = await conn.execute("SELECT * FROM run_failures WHERE run_id = %s",
                                             (run_id,))
                 existing = await cursor.fetchone()
-                return None if existing is None else {**failure_row(existing),
-                                                      "replayed": False, "requeued": 0}
+                return None if existing is None else {
+                    **failure_row(existing), "replayed": False, "requeued": 0,
+                    "reason": ALREADY_REPLAYED}
             row = failure_row(row)
             cursor = await conn.execute(
                 "UPDATE events SET consumed_by_run = NULL WHERE thread_key = %s "

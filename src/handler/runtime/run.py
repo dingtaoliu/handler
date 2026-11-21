@@ -411,7 +411,8 @@ def log_run_failed(tenant: str | None, thread_key: str, thread_type: Any, run_id
     """The operator's signal for a terminal failure: one ERROR line, `run failed`.
 
     The stable message and fields are what a log-based alert matches. The run's
-    events can be run again with POST /api/runs/{run_id}/replay.
+    events can be run again with POST /api/runs/{run_id}/replay (or, for the
+    chat owner, /retry).
     """
     logger.error("run failed", extra={
         "tenant": tenant or "main", "thread_key": thread_key, "thread_type": str(thread_type),
@@ -1100,8 +1101,16 @@ class RunExecutor:
         elif failed:
             log_run_failed(self.config.instance_name, thread.key, thread.type, run.id,
                            attempt, run.error, run.trigger_event_ids)
+        # retryable: the chat's owner can POST /api/runs/{run_id}/retry now (the
+        # failure was accepted and nothing else is queued on the thread); the
+        # client marks the user message whose raw.event_id is in event_ids.
+        retryable = False
+        if failed and retry_in is None and thread.type == ThreadType.CHAT:
+            current = await self.store.get_thread(thread.key)
+            retryable = current is not None and current.pending_since is None
         self._publish(thread.key, run.id, "run_finished",
-                      {"status": "failed", "error": run.error, "retry_in": retry_in})
+                      {"status": "failed", "error": run.error, "retry_in": retry_in,
+                       "retryable": retryable, "event_ids": list(run.trigger_event_ids)})
         await self._publish_task(thread, run.id)
 
     async def _publish_task(self, thread: Thread, run_id: str) -> None:

@@ -15,7 +15,14 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from .usage import SQLiteUsage
-from .run_failures import FAILED_BEFORE_UPGRADE, FAILED_MARKER, RunFailures, failure_row
+from .run_failures import (
+    ALREADY_REPLAYED,
+    FAILED_BEFORE_UPGRADE,
+    FAILED_MARKER,
+    NOT_LATEST,
+    RunFailures,
+    failure_row,
+)
 from .tasks import announce_routed
 from ..types import (
     ABANDONED_ERROR,
@@ -129,6 +136,22 @@ def _add_columns(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
     for statement in ADDED_INDEXES:
         db.execute(statement)
+
+
+def _latest_on_thread(db: sqlite3.Connection, key: str, run_id: str, now: str) -> bool:
+    """True when `run_id` is the thread's newest run and nothing else is queued or
+    running there (see run_failures.NOT_LATEST)."""
+    newest = db.execute("SELECT id FROM runs WHERE thread_key = ? "
+                        "ORDER BY started_at DESC, rowid DESC LIMIT 1", (key,)).fetchone()
+    if newest is None or newest["id"] != run_id:
+        return False
+    busy = db.execute(
+        "SELECT 1 FROM threads WHERE key = ? AND lease_owner IS NOT NULL "
+        "AND lease_until > ?", (key, now)).fetchone()
+    pending = db.execute(
+        "SELECT 1 FROM events WHERE thread_key = ? AND status = 'routed' "
+        "AND consumed_by_run IS NULL LIMIT 1", (key,)).fetchone()
+    return busy is None and pending is None
 
 
 class SQLiteCore(SQLiteUsage):
@@ -415,13 +438,24 @@ class SQLiteCore(SQLiteUsage):
 
         return await self._call(write)
 
-    async def replay_failed_run(self, run_id: str, *, by: str | None = None) -> dict | None:
+    async def replay_failed_run(self, run_id: str, *, by: str | None = None,
+                                latest_only: bool = False) -> dict | None:
         """Make a terminal failure's events pending again on its thread, once.
 
         See PostgresCore.replay_failed_run.
         """
         def write(db: sqlite3.Connection) -> dict | None:
             with _transaction(db):
+                if latest_only:
+                    existing = db.execute("SELECT * FROM run_failures WHERE run_id = ?",
+                                          (run_id,)).fetchone()
+                    if existing is None:
+                        return None
+                    if existing["replayed_at"] is None and not _latest_on_thread(
+                            db, existing["thread_key"], run_id,
+                            _timestamp(self._clock())):
+                        return {**failure_row(existing), "replayed": False,
+                                "requeued": 0, "reason": NOT_LATEST}
                 row = db.execute(
                     "UPDATE run_failures SET replayed_at = ?, replayed_by = ? "
                     "WHERE run_id = ? AND replayed_at IS NULL RETURNING *",
@@ -429,8 +463,9 @@ class SQLiteCore(SQLiteUsage):
                 if row is None:
                     existing = db.execute("SELECT * FROM run_failures WHERE run_id = ?",
                                           (run_id,)).fetchone()
-                    return None if existing is None else {**failure_row(existing),
-                                                          "replayed": False, "requeued": 0}
+                    return None if existing is None else {
+                        **failure_row(existing), "replayed": False, "requeued": 0,
+                        "reason": ALREADY_REPLAYED}
                 row = failure_row(row)
                 ids = row["event_ids"]
                 requeued = len(db.execute(
