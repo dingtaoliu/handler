@@ -122,6 +122,8 @@ ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("memory_topics", "updated_thread_key", "TEXT"),
     ("threads", "context_links", "TEXT"),
     ("threads", "context_hash", "TEXT"),
+    ("runs", "cancel_requested_at", "TEXT"),
+    ("runs", "cancel_requested_by", "TEXT"),
 ]
 # Indexes on added columns, created once the columns exist.
 ADDED_INDEXES = [
@@ -591,6 +593,22 @@ class SQLiteCore(DueWriter, SQLiteUsage):
             ).rowcount)
 
         return await self._call(write)
+
+    async def request_run_cancel(self, run_id: str, by: str | None) -> bool:
+        """Set the run's cancel flag; False unless it is still running."""
+        return await self._call(lambda db: bool(db.execute(
+            "UPDATE runs SET cancel_requested_at = COALESCE(cancel_requested_at, ?), "
+            "cancel_requested_by = COALESCE(cancel_requested_by, ?) "
+            "WHERE id = ? AND status = ?",
+            (_timestamp(self._clock()), by, run_id, RunStatus.RUNNING.value)).rowcount))
+
+    async def run_cancel_requested(self, run_id: str) -> bool:
+        def read(db: sqlite3.Connection) -> bool:
+            row = db.execute("SELECT cancel_requested_at FROM runs WHERE id = ?",
+                             (run_id,)).fetchone()
+            return row is not None and row[0] is not None
+
+        return await self._call(read)
 
     async def sweep_abandoned_runs(self, thread_key: str | None = None) -> list[str]:
         def write(db: sqlite3.Connection) -> list[str]:

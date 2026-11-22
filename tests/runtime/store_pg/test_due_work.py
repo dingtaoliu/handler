@@ -172,3 +172,22 @@ async def test_retention_deletes_only_what_the_decision_covers(tenants):
             "SELECT key FROM deliveries")).fetchall()}
     assert keys == {"mail-old", "chat-new"}  # an email record is never removed
     assert deliveries == {"dead-new", "pending-old"}
+
+
+async def test_cancel_flag_is_stored_only_on_a_running_run(tenants):
+    from handler.runtime.types import Run, RunStatus
+
+    a, _ = tenants
+    spec = ThreadSpec("chat:u:1", ThreadType.CHAT, Lane.INTERACTIVE, owner_user_id="u")
+    await a.put(Event(type="chat.message", source="t", payload={}, idempotency_key="c1",
+                      thread_key=spec.key), spec)
+    lease, = await a.claim("w", Lane.INTERACTIVE, 1, 60)
+    run = Run(id="run_1", thread_key=spec.key, lease_version=lease.version,
+              trigger_event_ids=[], status=RunStatus.RUNNING, harness="fake", model=None)
+    assert await a.create_run(lease, run)
+    assert not await a.run_cancel_requested("run_1")
+    assert await a.request_run_cancel("run_1", "admin")
+    assert await a.run_cancel_requested("run_1")
+    run.status = RunStatus.CANCELLED
+    assert await a.finish_run(lease, run)
+    assert not await a.request_run_cancel("run_1", "admin")

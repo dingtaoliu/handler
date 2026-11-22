@@ -981,7 +981,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                 config.workspaces_dir, lambda: plan_limits.current.max_workspace_bytes).prime()
             await uploads.used.prime()
         app = create_app(store, bus, auth, default_harness=settings.harness_source("chat"),
-                         uploads=uploads, instance_name=instance_name)
+                         uploads=uploads, instance_name=instance_name,
+                         cancel_wake=executor.wake_cancel)
         app.mount("/mcp", mcp_app)
         app.include_router(approvals_router(gateway, store, auth))
         app.include_router(memory_recovery_router(gateway, store, auth))

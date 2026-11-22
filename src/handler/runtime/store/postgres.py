@@ -924,6 +924,24 @@ class PostgresCore(DueWriter, PostgresUsage):
             )
             return bool(cursor.rowcount)
 
+    async def request_run_cancel(self, run_id: str, by: str | None) -> bool:
+        """Set the run's cancel flag; False unless it is still running."""
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "UPDATE runs SET cancel_requested_at = COALESCE(cancel_requested_at, %s), "
+                "cancel_requested_by = COALESCE(cancel_requested_by, %s) "
+                "WHERE id = %s AND status = %s",
+                (self._clock(), by, run_id, RunStatus.RUNNING.value))
+            return bool(cursor.rowcount)
+
+    async def run_cancel_requested(self, run_id: str) -> bool:
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "SELECT cancel_requested_at IS NOT NULL AS flagged FROM runs WHERE id = %s",
+                (run_id,))
+            row = await cursor.fetchone()
+            return bool(row and row["flagged"])
+
     async def sweep_abandoned_runs(self, thread_key: str | None = None) -> list[str]:
         now = self._clock()
         where = "" if thread_key is None else "AND r.thread_key = %s "

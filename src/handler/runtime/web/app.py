@@ -191,6 +191,7 @@ def create_app(
     store: Store, bus: RunEventBus, auth: Authenticator, *, default_harness: HarnessSource = "codex",
     uploads: UploadStore | None = None,
     instance_name: str = "",
+    cancel_wake: Callable[[str], None] | None = None,
 ) -> FastAPI:
     # No interactive docs / OpenAPI: the API is authenticated, its schema needn't be public.
     app = FastAPI(title="handler runtime", docs_url=None, redoc_url=None, openapi_url=None)
@@ -400,6 +401,20 @@ def create_app(
             raise HTTPException(404, "run not found")  # another user's chat, even for admins
         await requeue_failed_run(run_id, f"retry:{user_id}", latest_only=True)
         return {"run_id": run_id, "thread_key": thread.key, "status": "queued"}
+
+    @router.post("/api/runs/{run_id}/cancel", status_code=202)
+    async def cancel_run(run_id: str, principal: Principal = principal_dep) -> Any:
+        """Stop a running run. The flag is stored on the run; the run checks it
+        between steps (at once in this process, through `cancel_wake`), ends as
+        `cancelled` and consumes its events. Anyone who can see the thread may cancel."""
+        run = await store.get_run(run_id)
+        if run is None or not can_see_thread(principal, run.thread_key):
+            raise HTTPException(404, "run not found")
+        if not await store.request_run_cancel(run_id, principal.identity):
+            raise HTTPException(409, f"run is {run.status.value}, not running")
+        if cancel_wake is not None:
+            cancel_wake(run_id)
+        return {"run_id": run_id, "thread_key": run.thread_key, "status": "cancel_requested"}
 
     @router.get("/api/runs/{run_id}")
     async def get_run(run_id: str, principal: Principal = principal_dep) -> Any:

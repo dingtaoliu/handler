@@ -361,3 +361,61 @@ async def test_each_run_logs_process_memory_at_start_and_end(env, caplog):
     assert all(r.active_runs == 1 and r.peak_rss_mb > 0 and r.instance == "main" for r in records)
     # The end line adds the run's own peak (None without /proc) and its reads' peak.
     assert hasattr(records[1], "run_peak_rss_mb") and records[1].reader_peak_rss_mb is None
+
+
+# --- cancel as a stored flag -----------------------------------------------
+
+async def _running(store, harness, dispatcher):
+    harness.gate = asyncio.Event()  # the run waits mid-way, between steps
+    await store.put(*chat("long job"))
+    await dispatcher.claim_once()
+    await asyncio.wait_for(harness.started.wait(), 2)
+    run, = await store.list_runs("chat:u1:c1")
+    return run
+
+
+@pytest.mark.parametrize("woken", [True, False])
+async def test_a_stored_cancel_stops_the_run_between_steps(env, woken):
+    store, bus, harness, dispatcher = env
+    run = await _running(store, harness, dispatcher)
+    async with bus.subscribe("chat:u1:c1") as q:
+        assert await store.request_run_cancel(run.id, "admin")
+        if woken:  # the API's in-process wake; without it the next beat sees the flag
+            dispatcher.executor.wake_cancel(run.id)
+        while dispatcher.active_count:
+            await asyncio.sleep(0.01)
+        finished = [m for m in [q.get_nowait() for _ in range(q.qsize())]
+                    if m.type == "run_finished"]
+    assert finished[-1].data == {"status": "cancelled"}
+    stored = await store.get_run(run.id)
+    assert stored.status == RunStatus.CANCELLED and stored.error == "cancelled on request"
+    thread = await store.get_thread("chat:u1:c1")
+    assert thread.pending_since is None and thread.lease_owner is None  # events consumed
+    assert not await store.request_run_cancel(run.id, "admin")  # no longer running
+    harness.gate.set()
+    await store.put(*chat("next", idem="k-next"))  # the thread keeps working
+    await drain(dispatcher)
+    assert (await store.list_runs("chat:u1:c1"))[0].status == RunStatus.COMPLETED
+
+
+async def test_cancel_api_sets_the_flag_and_wakes_the_run(env):
+    import httpx
+
+    from handler.runtime.auth import Authenticator
+    from handler.runtime.web.app import create_app
+
+    store, bus, harness, dispatcher = env
+    run = await _running(store, harness, dispatcher)
+    app = create_app(store, bus, Authenticator(store, "admin-key"),
+                     cancel_wake=dispatcher.executor.wake_cancel)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://h") as client:
+        auth = {"Authorization": "Bearer admin-key"}
+        assert (await client.post("/api/runs/run_nope/cancel", headers=auth)).status_code == 404
+        response = await client.post(f"/api/runs/{run.id}/cancel", headers=auth)
+        assert response.status_code == 202 and response.json()["status"] == "cancel_requested"
+        while dispatcher.active_count:
+            await asyncio.sleep(0.01)
+        assert (await store.get_run(run.id)).status == RunStatus.CANCELLED
+        again = await client.post(f"/api/runs/{run.id}/cancel", headers=auth)
+        assert again.status_code == 409
