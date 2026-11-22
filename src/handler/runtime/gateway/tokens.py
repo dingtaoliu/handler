@@ -17,13 +17,21 @@ class RunTokens:
 
     def __init__(self, *, clock: Callable[[], datetime] = utcnow) -> None:
         self._clock = clock
-        self._tokens: dict[str, tuple[RunContext, datetime, Any]] = {}
+        self._tokens: dict[str, tuple[RunContext, datetime, Any, str | None]] = {}
 
-    def issue(self, ctx: RunContext, ttl_seconds: float, gateway: Any = None) -> str:
+    def issue(self, ctx: RunContext, ttl_seconds: float, gateway: Any = None,
+              tenant: str | None = None) -> str:
+        """`gateway` and `tenant`: the issuing tenant's, so a call reaches only it and a
+        token presented under another tenant's URL is refused."""
         self._purge()
         token = secrets.token_urlsafe(32)
-        self._tokens[token] = (ctx, self._clock() + timedelta(seconds=ttl_seconds), gateway)
+        self._tokens[token] = (ctx, self._clock() + timedelta(seconds=ttl_seconds), gateway,
+                               tenant)
         return token
+
+    def tenant_of(self, token: str | None) -> str | None:
+        entry = self._tokens.get(token or "")
+        return entry[3] if entry is not None else None
 
     def resolve(self, token: str | None) -> RunContext | None:
         found = self.resolve_with_gateway(token)
@@ -33,7 +41,7 @@ class RunTokens:
         entry = self._tokens.get(token or "")
         if entry is None:
             return None
-        ctx, expires, gateway = entry
+        ctx, expires, gateway, _ = entry
         if expires <= self._clock():
             self._tokens.pop(token, None)
             return None
@@ -44,5 +52,5 @@ class RunTokens:
 
     def _purge(self) -> None:
         now = self._clock()
-        for token in [t for t, (_, exp, _g) in self._tokens.items() if exp <= now]:
+        for token in [t for t, (_, exp, *_rest) in self._tokens.items() if exp <= now]:
             del self._tokens[token]

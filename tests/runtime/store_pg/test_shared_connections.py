@@ -397,7 +397,7 @@ def quiet_host(monkeypatch, no_codex):
     async def idle(self, stop, *args):
         await stop.wait()
 
-    monkeypatch.setattr(server.Dispatcher, "run_forever", idle)
+    monkeypatch.setattr(server.HostRunner, "run", idle)
     monkeypatch.setattr(server.HostTimer, "run", idle)
 
 

@@ -729,6 +729,7 @@ class RunExecutor:
                                acting_as=current.acting_as if current is not None
                                and current.run_id == run.id else thread.owner_user_id),
                     ttl_seconds=plan.timeout_seconds + 300, gateway=self.gateway,
+                    tenant=self.config.instance_name,
                 )
                 mcp_servers.append(McpServerSpec(
                     name="handler", url=self.mcp_url,

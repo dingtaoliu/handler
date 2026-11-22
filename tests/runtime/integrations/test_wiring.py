@@ -15,7 +15,7 @@ from .fakes import Alpha, registry
 async def serving(env, monkeypatch):
     async def idle(self, stop, *args):
         await stop.wait()
-    monkeypatch.setattr(server.Dispatcher, "run_forever", idle)
+    monkeypatch.setattr(server.HostRunner, "run", idle)
     monkeypatch.setattr(server.HostTimer, "run", idle)
 
     def no_codex():
@@ -30,7 +30,7 @@ async def serving(env, monkeypatch):
 
 
 def instance_app(host, name):
-    return next(r.app for r in host.routes if getattr(r, "path", "") == f"/i/{name}")
+    return host.state.services.cache.cached(name).app  # SQLite: built at start
 
 
 async def test_fake_integration_is_wired_only_where_enabled(tmp_path, monkeypatch):

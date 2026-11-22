@@ -31,7 +31,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
-from ..context import RunContext
+from ..context import RunContext, current_tenant
 from .gateway import Gateway, result_text
 from .tokens import RunTokens
 
@@ -107,7 +107,9 @@ class McpApp:
             return
         if scope["type"] == "http":
             headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
-            if self._tokens.resolve(_bearer(headers)) is None:
+            token = _bearer(headers)
+            issuer, here = self._tokens.tenant_of(token), current_tenant()
+            if self._tokens.resolve(token) is None or (issuer and here and issuer != here):
                 response = JSONResponse(
                     {"error": "unauthorized"}, status_code=401,
                     headers={"WWW-Authenticate": "Bearer"},

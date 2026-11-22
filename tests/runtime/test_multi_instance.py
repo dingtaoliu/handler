@@ -81,7 +81,7 @@ async def running(tmp_path, monkeypatch, caplog):
     # Real stores, auth, settings, gateway and lifespans; no agent or network work.
     async def idle(self, stop, *args):
         await stop.wait()
-    monkeypatch.setattr(server.Dispatcher, 'run_forever', idle)
+    monkeypatch.setattr(server.HostRunner, 'run', idle)
     monkeypatch.setattr(server.HostTimer, 'run', idle)
     def no_codex():
         raise FileNotFoundError('test has no codex')
@@ -169,17 +169,20 @@ async def test_browser_and_oauth_paths_stay_with_instance(running):
 async def test_host_rolls_back_startup_and_closes_concurrently(tmp_path, monkeypatch):
     env = config(tmp_path)
     entered, closed = [], []
-    @contextlib.asynccontextmanager
-    async def runtime(args, env, *, base_path, instance_name, hub=None, gate=None,
+
+    def context(name, on_close):
+        return server.TenantContext(name=name, key='local', store=None, app=server.FastAPI(),
+                                    close=on_close)
+
+    async def runtime(args, env, *, base_path, instance_name, hub=None,
                       allowed_harnesses=None, host=None):
         entered.append(instance_name)
         if instance_name == 'bss':
             raise RuntimeError('startup failed')
-        try:
-            yield server.FastAPI()
-        finally:
+        async def close():
             closed.append(instance_name)
-    monkeypatch.setattr(server, 'instance_runtime', runtime)
+        return context(instance_name, close)
+    monkeypatch.setattr(server, 'build_tenant_context', runtime)
     host = server.create_host(server._parse_args(['serve'], env), env)
     with pytest.raises(RuntimeError, match='startup failed'):
         async with host.router.lifespan_context(host):
@@ -187,17 +190,16 @@ async def test_host_rolls_back_startup_and_closes_concurrently(tmp_path, monkeyp
     assert entered == ['main', 'bss'] and closed == ['main']
 
     drained = asyncio.Event()
-    @contextlib.asynccontextmanager
-    async def runtime(args, env, *, base_path, instance_name, hub=None, gate=None,
+
+    async def runtime(args, env, *, base_path, instance_name, hub=None,
                       allowed_harnesses=None, host=None):
-        try:
-            yield server.FastAPI()
-        finally:
+        async def close():
             closed.append(instance_name)
             if instance_name == 'main':
                 drained.set()
-            await asyncio.wait_for(drained.wait(), .5)
-    monkeypatch.setattr(server, 'instance_runtime', runtime)
+            await asyncio.wait_for(drained.wait(), .5)  # closes run concurrently
+        return context(instance_name, close)
+    monkeypatch.setattr(server, 'build_tenant_context', runtime)
     host = server.create_host(server._parse_args(['serve'], env), env)
     async with host.router.lifespan_context(host):
         pass
@@ -223,7 +225,9 @@ async def test_mcp_run_tokens_and_internal_urls_are_isolated(running):
     from handler.runtime.context import RunContext
     client, host = running
     context = RunContext('same-run', 'chat:alice:same-thread', 'alice')
-    token = host.state.resources['main']['tokens'].issue(context, 60)
+    main = host.state.services.cache.cached('main')
+    token = host.state.resources['main']['tokens'].issue(context, 60, gateway=main.gateway,
+                                                         tenant='main')
     body = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
         'protocolVersion': '2024-11-05', 'capabilities': {},
         'clientInfo': {'name': 'test', 'version': '1'}}}
@@ -242,7 +246,7 @@ async def test_single_instance_preserves_root_routes(tmp_path, monkeypatch, inst
     env['HANDLER_INSTANCES'] = instances
     async def idle(self, stop, *args):
         await stop.wait()
-    monkeypatch.setattr(server.Dispatcher, 'run_forever', idle)
+    monkeypatch.setattr(server.HostRunner, 'run', idle)
     monkeypatch.setattr(server.HostTimer, 'run', idle)
     monkeypatch.setattr(server, 'codex_binary', lambda: 'unused')
     host = server.create_host(server._parse_args(['serve'], env), env)
@@ -282,7 +286,7 @@ async def serving(env, monkeypatch):
     """The real host for `env` (codex unavailable, as on a host without the CLI)."""
     async def idle(self, stop, *args):
         await stop.wait()
-    monkeypatch.setattr(server.Dispatcher, 'run_forever', idle)
+    monkeypatch.setattr(server.HostRunner, 'run', idle)
     monkeypatch.setattr(server.HostTimer, 'run', idle)
     def no_codex():
         raise FileNotFoundError('test has no codex')
@@ -372,12 +376,13 @@ async def test_host_allow_list_reaches_every_instance_and_cannot_be_widened(tmp_
     env = {**config(tmp_path), 'HANDLER_ALLOWED_HARNESSES': 'openai_agents',
            'HANDLER_I_BSS__HANDLER_ALLOWED_HARNESSES': 'codex,openai_agents'}
     seen = {}
-    @contextlib.asynccontextmanager
-    async def runtime(args, env, *, base_path, instance_name, hub=None, gate=None,
+
+    async def runtime(args, env, *, base_path, instance_name, hub=None,
                       allowed_harnesses=None, host=None):
         seen[instance_name] = allowed_harnesses
-        yield server.FastAPI()
-    monkeypatch.setattr(server, 'instance_runtime', runtime)
+        return server.TenantContext(name=instance_name, key='local', store=None,
+                                    app=server.FastAPI())
+    monkeypatch.setattr(server, 'build_tenant_context', runtime)
     host = server.create_host(server._parse_args(['serve'], env), env)
     async with host.router.lifespan_context(host):
         pass

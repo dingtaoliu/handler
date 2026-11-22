@@ -69,23 +69,15 @@ async def test_with_the_registry_off_every_dispatcher_shares_one_gate(tmp_path, 
     share one host gate, configured paid as the registry would import them."""
     from tests.runtime.test_multi_instance import config
 
-    dispatchers = []
-    real = server.Dispatcher
-
-    def spy_dispatcher(*args, **kwargs):
-        dispatchers.append(kwargs)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(server, "Dispatcher", spy_dispatcher)
     monkeypatch.setattr(server, "codex_binary", lambda: (_ for _ in ()).throw(FileNotFoundError()))
     env = {**config(tmp_path), "HANDLER_GLOBAL_MAX_RUNS": "4", "HANDLER_MAX_CONCURRENT": "20"}
     host = server.create_host(server._parse_args(["serve"], env), env)
     async with host.router.lifespan_context(host):
-        pass
+        services = host.state.services
+        contexts = [services.cache.cached(name) for name in ("main", "bss")]
     gate = host.state.run_gate
-    assert [d["gate"] for d in dispatchers] == [gate, gate]
-    assert [d["gate_tenant"] for d in dispatchers] == ["main", "bss"]
-    assert [d["max_concurrent"] for d in dispatchers] == [20, 20]  # still applies beneath
+    assert services.runner.gate is gate  # one claim loop, one gate, for every instance
+    assert [c.max_concurrent for c in contexts] == [20, 20]  # still applies beneath
     assert gate.max_runs == 4 and gate._cap("main") == gate._cap("bss") == 3  # paid
 
 
@@ -98,8 +90,7 @@ async def test_env_instances_together_stay_under_the_host_cap(tmp_path, monkeypa
     host = server.create_host(server._parse_args(["serve"], env), env)
     async with host.router.lifespan_context(host):
         gate = host.state.run_gate
-        apps = {name: next(r.app for r in host.routes if getattr(r, "path", "") == f"/i/{name}")
-                for name in ("main", "bss")}
+        apps = {name: host.state.services.cache.cached(name).app for name in ("main", "bss")}
         for name, app in apps.items():
             store = app.state.lifecycle.store
             for n in range(3):

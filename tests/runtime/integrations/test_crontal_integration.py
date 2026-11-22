@@ -23,7 +23,7 @@ CRONTAL_ENV = {
 async def serving(env, monkeypatch):
     async def idle(self, stop, *args):
         await stop.wait()
-    monkeypatch.setattr(server.Dispatcher, "run_forever", idle)
+    monkeypatch.setattr(server.HostRunner, "run", idle)
 
     def no_codex():
         raise FileNotFoundError("test has no codex")
@@ -43,7 +43,7 @@ async def serving(env, monkeypatch):
 
 
 def instance_app(host, name):
-    return next(r.app for r in host.routes if getattr(r, "path", "") == f"/i/{name}")
+    return host.state.services.cache.cached(name).app  # SQLite: built at start
 
 
 def snapshot(app, calls):
