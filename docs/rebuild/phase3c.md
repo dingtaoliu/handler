@@ -75,6 +75,7 @@ Repos:
    - `GET /settings`, `GET|PUT /settings/<section>`, forwarding `If-Match` and returning handler's 409/422.
    - `GET /approvals`, `POST /approvals/<id>/approve|deny`.
    - `GET /notifications`: handler's notifications for the user.
+   - Moving a user off the built-in agent: `POST /api/threads/import` per legacy chat, with the bare admin key after provisioning the user (`legacy-chat-import.md`).
 4. **Config**: `HANDLER_ENABLED`, `HANDLER_URL` (non-secret, in yaml with env override), plus `HANDLER_ADMIN_KEY`, `CRONTAL_AGENT_TOKEN` and `HANDLER_WEBHOOK_SECRET` from env only.
 5. **Tests**: MCP auth matrix (no token, wrong token, unknown or non-entitled user), `initialize` → `tools/list` → `tools/call` round-trip, the outbox hook (entitled vs not), the sender's signature/backoff/failed path (mock HTTP), and proxy endpoints with handler mocked (`requests` mocked or a fake server), including entitlement 403 and lazy provisioning.
 
