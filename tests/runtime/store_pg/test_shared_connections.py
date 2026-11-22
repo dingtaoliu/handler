@@ -47,8 +47,10 @@ class ConnectionWatch:
         async with conn:
             while not self._stop.is_set():
                 row = await (await conn.execute(
+                    # Client connections only: an autovacuum worker also carries
+                    # the database's name, and is no connection Handler holds.
                     "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
-                    "AND pid <> pg_backend_pid()")).fetchone()
+                    "AND pid <> pg_backend_pid() AND backend_type = 'client backend'")).fetchone()
                 self.peak = max(self.peak, row[0])
                 self.samples += 1
                 await asyncio.sleep(0.005)
