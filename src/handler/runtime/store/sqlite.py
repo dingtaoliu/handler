@@ -730,11 +730,12 @@ from .sqlite_users import UsersMixin  # noqa: E402
 from .deliveries import SQLiteDeliveries  # noqa: E402
 from .tasks import TaskQueries  # noqa: E402
 from .task_outcomes import TaskOutcomeStore  # noqa: E402
+from .thread_imports import SQLiteThreadImports  # noqa: E402
 from .thread_metadata import SQLiteThreadMetadata  # noqa: E402
 
 
 class SQLiteStore(
-    TaskOutcomeStore, TaskQueries, RunFailures, SQLiteThreadMetadata, SQLiteDeliveries, ScheduleMixin, ApprovalMixin,
+    TaskOutcomeStore, TaskQueries, RunFailures, SQLiteThreadImports, SQLiteThreadMetadata, SQLiteDeliveries, ScheduleMixin, ApprovalMixin,
     QuestionMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, SQLiteCore,

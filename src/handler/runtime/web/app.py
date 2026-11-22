@@ -30,6 +30,7 @@ from ..tasks import decode_cursor, encode_cursor
 from ..settings import HarnessSource, ModelName, ReasoningEffort, resolve_harness
 from ..types import Event, Lane, RunStatus, ThreadSpec, ThreadType
 from .auth_api import auth_router
+from .thread_import_api import thread_import_router
 
 logger = logging.getLogger("handler.runtime.web")
 
@@ -508,6 +509,8 @@ def create_app(
     async def timeline(request: Request, _: Principal = principal_dep) -> HTMLResponse:
         return html(TIMELINE_HTML, request)
 
+    # Before `router`: its greedy /api/threads/{key:path} routes must not shadow it.
+    app.include_router(thread_import_router(store, bus, auth, default_harness=default_harness))
     app.include_router(router)
     app.include_router(public_pages(instance_name, build))
     app.include_router(auth_router(auth, instance_name))
