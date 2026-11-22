@@ -152,7 +152,7 @@ answer, for any caller:
 - `/healthz`, `/mcp`, `/ingest/*`
 - `/api/chat` and `/api/chat/options`
 - `/api/limits/inputs`, `/api/me`, `/api/users` and `/api/users/<id>`
-- `/api/threads…`, `/api/runs/…` (including the chat panel's
+- `/api/threads…` (including `POST /api/threads/import`, which counts no input), `/api/runs/…` (including the chat panel's
   `POST /api/runs/{run_id}/retry`), `/api/tasks…`
 - `/api/approvals…`, `/api/questions…`, `/api/notifications…`, `/api/uploads…`
 - `/api/mailboxes…` and `/api/connections/google…` (each answers 403 for its own feature)

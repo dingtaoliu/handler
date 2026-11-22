@@ -1029,11 +1029,12 @@ from .postgres_domains import (  # noqa: E402
 from .deliveries import PostgresDeliveries  # noqa: E402
 from .tasks import TaskQueries  # noqa: E402
 from .task_outcomes import TaskOutcomeStore  # noqa: E402
+from .thread_imports import PostgresThreadImports  # noqa: E402
 from .thread_metadata import PostgresThreadMetadata  # noqa: E402
 
 
 class PostgresStore(
-    TaskOutcomeStore, TaskQueries, RunFailures, PostgresThreadMetadata, PostgresDeliveries, ScheduleMixin, ApprovalMixin,
+    TaskOutcomeStore, TaskQueries, RunFailures, PostgresThreadImports, PostgresThreadMetadata, PostgresDeliveries, ScheduleMixin, ApprovalMixin,
     QuestionMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
     NotificationMixin, ConnectionMixin, UsersMixin, PostgresCore,

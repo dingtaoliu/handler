@@ -374,6 +374,7 @@ Repo and code layout:
   - Uploads take a workspace file through `upload_file`.
 - `crontal_api.*` and `crontal.*` are granted `allow` on the Heroku instance, because the owner wants full access for now. A proper authorization system for users and the agent is planned; the `actor: agent` claim is the hook for it.
 - Webhooks come in at `/ingest/crontal` (HMAC `X-Crontal-Signature`) and create `crontal:{entity_type}:{entity_id}` threads.
+- Legacy AI chats are carried over with `POST /api/threads/import` (bare admin key; the owner must already exist, so provision with `POST /api/users` first; history only, no input counted). See `legacy-chat-import.md`.
 
 ## 5. Deployments
 

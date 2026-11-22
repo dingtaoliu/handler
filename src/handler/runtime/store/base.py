@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ..observability.ledger import RunAttribution, ToolCallUsage, UsageRecord
 
@@ -33,6 +33,9 @@ from ..types import (
     Thread,
     ThreadSpec,
 )
+
+if TYPE_CHECKING:
+    from .thread_imports import ImportOutcome, ThreadImport
 
 
 class EventQueue(Protocol):
@@ -135,6 +138,16 @@ class Store(EventQueue, Protocol):
     ) -> list[Thread]:
         """Threads by latest activity. `types` keeps only those thread types and
         `exclude_types` drops them; both apply before `limit`."""
+        ...
+
+    async def import_thread(self, spec: "ThreadImport") -> "ImportOutcome":
+        """Create a chat thread holding another system's finished conversation.
+
+        One transaction, no event, no lease: thread (not pending, no session),
+        messages, title, the owner's read mark and the (source, source_id)
+        record. A repeat of the same import is "existing"; the same source chat
+        with other content, or a key already taken, is "conflict"
+        (store/thread_imports.py)."""
         ...
 
     async def set_session(self, lease: Lease, session_id: str) -> bool:
