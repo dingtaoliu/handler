@@ -665,7 +665,7 @@ class TenantHost:
             return
         runtime = slot.runtime
         if runtime is None or slot.lock.locked():
-            # Starts with the new plan; its first housekeeping pass releases the backlog.
+            # Starts with the new plan; its start (backfill_due) releases the backlog.
             await self.registry.request_wake(slot.tenant.name)
             self._activation(slot)
             return
