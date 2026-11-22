@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from .usage import SQLiteUsage
+from .due_work import DueWriter
 from .run_failures import (
     ALREADY_REPLAYED,
     FAILED_BEFORE_UPGRADE,
@@ -121,6 +122,8 @@ ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("memory_topics", "updated_thread_key", "TEXT"),
     ("threads", "context_links", "TEXT"),
     ("threads", "context_hash", "TEXT"),
+    ("runs", "cancel_requested_at", "TEXT"),
+    ("runs", "cancel_requested_by", "TEXT"),
 ]
 # Indexes on added columns, created once the columns exist.
 ADDED_INDEXES = [
@@ -154,7 +157,7 @@ def _latest_on_thread(db: sqlite3.Connection, key: str, run_id: str, now: str) -
     return busy is None and pending is None
 
 
-class SQLiteCore(SQLiteUsage):
+class SQLiteCore(DueWriter, SQLiteUsage):
     """Core tables (events, threads, runs, messages, steps) and DB plumbing.
 
     Domain mixins (schedules, approvals, memory, ...) live in sqlite_<domain>.py,
@@ -591,6 +594,22 @@ class SQLiteCore(SQLiteUsage):
 
         return await self._call(write)
 
+    async def request_run_cancel(self, run_id: str, by: str | None) -> bool:
+        """Set the run's cancel flag; False unless it is still running."""
+        return await self._call(lambda db: bool(db.execute(
+            "UPDATE runs SET cancel_requested_at = COALESCE(cancel_requested_at, ?), "
+            "cancel_requested_by = COALESCE(cancel_requested_by, ?) "
+            "WHERE id = ? AND status = ?",
+            (_timestamp(self._clock()), by, run_id, RunStatus.RUNNING.value)).rowcount))
+
+    async def run_cancel_requested(self, run_id: str) -> bool:
+        def read(db: sqlite3.Connection) -> bool:
+            row = db.execute("SELECT cancel_requested_at FROM runs WHERE id = ?",
+                             (run_id,)).fetchone()
+            return row is not None and row[0] is not None
+
+        return await self._call(read)
+
     async def sweep_abandoned_runs(self, thread_key: str | None = None) -> list[str]:
         def write(db: sqlite3.Connection) -> list[str]:
             now = _timestamp(self._clock())
@@ -732,12 +751,13 @@ from .tasks import TaskQueries  # noqa: E402
 from .task_outcomes import TaskOutcomeStore  # noqa: E402
 from .thread_imports import SQLiteThreadImports  # noqa: E402
 from .thread_metadata import SQLiteThreadMetadata  # noqa: E402
+from .due_work import SQLiteDueWork  # noqa: E402
 
 
 class SQLiteStore(
     TaskOutcomeStore, TaskQueries, RunFailures, SQLiteThreadImports, SQLiteThreadMetadata, SQLiteDeliveries, ScheduleMixin, ApprovalMixin,
     QuestionMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
-    NotificationMixin, ConnectionMixin, UsersMixin, SQLiteCore,
+    NotificationMixin, ConnectionMixin, UsersMixin, SQLiteDueWork, SQLiteCore,
 ):
     """The full SQLite store: core plus every domain mixin."""

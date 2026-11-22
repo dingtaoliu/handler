@@ -47,8 +47,10 @@ class ConnectionWatch:
         async with conn:
             while not self._stop.is_set():
                 row = await (await conn.execute(
+                    # Client connections only: an autovacuum worker also carries
+                    # the database's name, and is no connection Handler holds.
                     "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
-                    "AND pid <> pg_backend_pid()")).fetchone()
+                    "AND pid <> pg_backend_pid() AND backend_type = 'client backend'")).fetchone()
                 self.peak = max(self.peak, row[0])
                 self.samples += 1
                 await asyncio.sleep(0.005)
@@ -92,7 +94,7 @@ async def test_control_schema_holds_no_tenant_tables(tenants, pg_dsn):
     found = {r[0] for r in rows(
         pg_dsn, "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
         CONTROL_SCHEMA)}
-    assert found == {"tenant_schema_versions"}
+    assert found == {"tenant_schema_versions", "due_work"}  # control data, no tenant tables
 
 
 async def test_pool_connections_are_transactional(tenants, hub):
@@ -396,7 +398,7 @@ def quiet_host(monkeypatch, no_codex):
         await stop.wait()
 
     monkeypatch.setattr(server.Dispatcher, "run_forever", idle)
-    monkeypatch.setattr(server.Scheduler, "run_forever", idle)
+    monkeypatch.setattr(server.HostTimer, "run", idle)
 
 
 def admin(name):

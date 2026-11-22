@@ -22,8 +22,30 @@ CONTROL_SCHEMA = "handler_control"
 SHARED_CHANNEL = "handler_work_shared"
 SCHEMA_LOCK = 7_283_001
 DEFAULT_POOL_MAX = 11  # with the LISTEN connection, 12 for the whole process
+DUE_CHANNEL = "handler_due_work"  # due work changed (store/due_work.py); payload: schema
 
-_CONTROL_DDL = f"""
+# The host timer's rows for every tenant in the database (store/due_work.py).
+# `tenant` is the tenant's schema name. Additive: older releases ignore it.
+DUE_WORK_DDL = f"""
+CREATE SCHEMA IF NOT EXISTS {CONTROL_SCHEMA};
+CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.due_work (
+    tenant TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    due_at TIMESTAMPTZ NOT NULL,
+    version BIGINT NOT NULL DEFAULT 1,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    lease_owner TEXT,
+    lease_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, kind, ref)
+);
+CREATE INDEX IF NOT EXISTS due_work_due ON {CONTROL_SCHEMA}.due_work(due_at);
+"""
+
+_CONTROL_DDL = DUE_WORK_DDL + f"""
 CREATE SCHEMA IF NOT EXISTS {CONTROL_SCHEMA};
 CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.tenant_schema_versions (
     schema_name TEXT NOT NULL,
@@ -57,6 +79,8 @@ class PostgresHub:
         self._closed = False
         self.on_unattached: Callable[[str], None] | None = None  # work for an inactive schema
         self.on_listening: Callable[[], None] | None = None  # notices may have been missed
+        self.on_due: Callable[[], None] | None = None  # due work changed (the host timer)
+        self._due_queue = None
 
     async def _setup(self) -> None:
         await self.pool.open()
@@ -79,6 +103,14 @@ class PostgresHub:
             raise ValueError(f"schema {schema!r} is already attached to this hub")
         self._wakes[schema] = wake
 
+    def due_queue(self):
+        """The one due-work queue of this database (store/due_work.py)."""
+        if self._due_queue is None:
+            from .due_work import PostgresDueQueue
+
+            self._due_queue = PostgresDueQueue(self.pool.connection, ensure=self.start)
+        return self._due_queue
+
     def detach(self, schema: str) -> None:
         self._wakes.pop(schema, None)
 
@@ -90,12 +122,19 @@ class PostgresHub:
                 async with conn:
                     await conn.execute(
                         sql.SQL("LISTEN {}").format(sql.Identifier(SHARED_CHANNEL)))
+                    await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(DUE_CHANNEL)))
                     self._listening.set()
                     for wake in self._wakes.values():  # anything missed while offline
                         wake.set()
                     if self.on_listening is not None:
                         self.on_listening()
+                    if self.on_due is not None:
+                        self.on_due()
                     async for notice in conn.notifies():
+                        if notice.channel == DUE_CHANNEL:
+                            if self.on_due is not None:
+                                self.on_due()
+                            continue
                         wake = self._wakes.get(notice.payload)
                         if wake is not None:
                             wake.set()

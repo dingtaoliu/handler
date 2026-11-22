@@ -14,7 +14,10 @@ Lifecycle per instance:
    `prompt_fragments`, `ui_entries`) are collected and checked for duplicates;
 4. runtime hooks (`routers`, `tool_sets`, `sinks`, `identity_provider`,
    `background_tasks`) receive an `IntegrationContext` holding the instance's
-   core services.
+   core services;
+5. timer kinds (`timer_kinds`, static): the host's one timer calls a kind's
+   handler with the tenant's `IntegrationContext` when one of its due rows is due
+   (see TimerKind). Integrations provide handlers; the host owns the loop.
 
 The interface deliberately avoids importing core internals at runtime (only
 under TYPE_CHECKING) so integrations can later move to an entry-point package.
@@ -124,10 +127,36 @@ EmailIntakeObserver = Callable[..., Awaitable[Any]]
 
 
 @dataclass(frozen=True)
+class TimerKind:
+    """Time-driven work run by the host's one timer (runtime/timer.py).
+
+    Work is a due row (tenant, kind, ref, due_at) in store/due_work.py. The
+    integration writes its rows through the tenant's store, in the same transaction
+    as the work where it can: `store.due_statements(kind, ref, due_at)` for a
+    caller's own transaction, `store.set_due(kind, ref, due_at | None)` (None
+    removes it) and `store.prune_due(kind, keep_refs)`.
+
+    `handler(ctx, item)` does one firing for `item.ref` and returns the next due
+    time, or None when nothing more is due (the row is removed). An exception is
+    recorded on the row and retried with backoff. `backfill(ctx)` runs whenever the
+    tenant starts and must make the kind's rows match the integration's data,
+    idempotently (e.g. a row for each enabled mailbox, none for others).
+    `timeout_seconds` bounds one firing.
+    """
+
+    name: str
+    handler: Callable[[IntegrationContext, Any], Awaitable[Any]]
+    backfill: Callable[[IntegrationContext], Awaitable[None]] | None = None
+    timeout_seconds: float = 120.0
+
+
+@dataclass(frozen=True)
 class BackgroundTask:
     """A long-running coroutine started under the instance lifespan.
 
-    `run(stop)` must return soon after `stop` is set.
+    Not for time-driven work: that is a TimerKind. Left for the Crontal connector's
+    tool discovery, which moves into context loading in step 3 of
+    role-split-design.md. `run(stop)` must return soon after `stop` is set.
     """
 
     name: str
@@ -177,6 +206,10 @@ class Integration:
         return None
 
     def background_tasks(self, ctx: IntegrationContext) -> list[BackgroundTask]:
+        return []
+
+    def timer_kinds(self) -> list[TimerKind]:
+        """Kinds of due work this integration handles (static, like thread types)."""
         return []
 
     def email_intake_observers(self, ctx: IntegrationContext) -> list[EmailIntakeObserver]:

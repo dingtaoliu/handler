@@ -23,7 +23,7 @@ import logging
 import re
 from collections import OrderedDict
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any
@@ -665,7 +665,7 @@ class TenantHost:
             return
         runtime = slot.runtime
         if runtime is None or slot.lock.locked():
-            # Starts with the new plan; its first housekeeping pass releases the backlog.
+            # Starts with the new plan; its start (backfill_due) releases the backlog.
             await self.registry.request_wake(slot.tenant.name)
             self._activation(slot)
             return
@@ -673,7 +673,11 @@ class TenantHost:
         parts.limits.current = self._plan(slot)
         slot.applied_key = slot.limits_key
         await parts.store.release_held_inputs()
-        parts.scheduler.wake()  # schedules kept on a plan without them resume now
+        await parts.backfill_due()  # schedules kept on a plan without them resume now
+
+    # --- the host timer's view of tenants -------------------------------------
+    def timer_directory(self, hub: Any) -> "RegistryTimerDirectory":
+        return RegistryTimerDirectory(self, hub)
 
     # --- the one scanning task ----------------------------------------------
     async def run(self) -> None:
@@ -786,3 +790,42 @@ class TenantHost:
         for result in results:
             if isinstance(result, BaseException):
                 logger.error("tenant lifecycle failed", exc_info=result)
+
+
+class RegistryTimerDirectory:
+    """Tenants as the host timer sees them on a registry host.
+
+    Due rows of every enabled tenant are claimed from the hub's queue (the control
+    schema only). A row of a sleeping tenant activates it, as a request would; the
+    firing counts as in flight, so the tenant can't stop under it. Step 3 replaces
+    activation with the tenant context cache; this is the one place to change.
+    """
+
+    def __init__(self, host: TenantHost, hub: Any) -> None:
+        self._host = host
+        self._queue = hub.due_queue()
+
+    def register(self, target: Any) -> None:
+        pass  # the running runtime's target is found through its slot
+
+    def unregister(self, target: Any) -> None:
+        pass
+
+    def sources(self) -> list[tuple[Any, list[str]]]:
+        schemas = [schema for schema, slot in self._host._by_schema.items()
+                   if slot.tenant.enabled and slot.tenant.schema_name == schema]
+        return [(self._queue, schemas)]
+
+    @asynccontextmanager
+    async def tenant(self, queue: Any, key: str):
+        slot = self._host._by_schema.get(key)
+        if slot is None or not slot.tenant.enabled or self._host._closing:
+            yield None
+            return
+        task = asyncio.current_task()
+        slot.in_flight.add(task)  # before any await: a stop must see this firing
+        try:
+            runtime = await self._host._runtime(slot)
+            yield None if runtime is None else runtime.app.state.timer_target
+        finally:
+            slot.in_flight.discard(task)

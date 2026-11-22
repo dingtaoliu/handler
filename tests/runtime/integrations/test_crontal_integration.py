@@ -24,7 +24,6 @@ async def serving(env, monkeypatch):
     async def idle(self, stop, *args):
         await stop.wait()
     monkeypatch.setattr(server.Dispatcher, "run_forever", idle)
-    monkeypatch.setattr(server.Scheduler, "run_forever", idle)
 
     def no_codex():
         raise FileNotFoundError("test has no codex")

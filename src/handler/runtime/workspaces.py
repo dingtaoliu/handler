@@ -183,15 +183,6 @@ class WorkspaceSync:
                     done += 1
             return done
 
-    async def run_periodic(self, stop: asyncio.Event, interval_seconds: float) -> None:
-        while not stop.is_set():
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
-            except TimeoutError:
-                pass
-            if not stop.is_set() and self._dirty:
-                synced = await self.flush()
-                logger.info("workspaces synced", extra={"threads": synced})
 
     def _locations(self, slug: str) -> list[tuple[str, Path, bool]]:
         if not re.fullmatch(r"[A-Za-z0-9._-]+", slug) or slug in (".", ".."):
@@ -272,3 +263,46 @@ class WorkspaceSync:
                 if changed:
                     await self.file_store.sync_up(snapshot, prefix, only=changed)
                 self._write_manifest(prefix, digests)
+
+
+class WorkspaceBackstop:
+    """One task for the whole host: retries uploads a run end could not finish.
+
+    Each run uploads its own workspace when it ends (WorkspaceSync.flush_soon); a
+    failed upload leaves the thread dirty. Every `interval_seconds` this flushes the
+    dirty threads of every registered tenant. It never queries the database, and a
+    tenant with nothing dirty costs nothing.
+    """
+
+    def __init__(self, interval_seconds: float = 300.0) -> None:
+        self.interval_seconds = interval_seconds
+        self._syncs: dict[int, tuple[str, WorkspaceSync]] = {}
+
+    def register(self, tenant: str, sync: WorkspaceSync) -> None:
+        self._syncs[id(sync)] = (tenant, sync)
+
+    def unregister(self, sync: WorkspaceSync) -> None:
+        self._syncs.pop(id(sync), None)
+
+    async def flush_once(self) -> int:
+        synced = 0
+        for tenant, sync in list(self._syncs.values()):
+            if not sync._dirty:
+                continue
+            try:
+                count = await sync.flush()
+            except Exception:
+                logger.exception("workspace backstop flush failed", extra={"tenant": tenant})
+                continue
+            synced += count
+            logger.info("workspaces synced", extra={"tenant": tenant, "threads": count})
+        return synced
+
+    async def run(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self.interval_seconds)
+            except TimeoutError:
+                pass
+            if not stop.is_set():
+                await self.flush_once()

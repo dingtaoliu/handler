@@ -9,6 +9,7 @@ from typing import Any
 
 from .tasks import announce_routed
 from ..types import Event, EventStatus, Schedule, ThreadSpec
+from .due_work import SCHEDULE_FIRE, schedule_due, sqlite_set_due
 from .sqlite import _insert, _record, _timestamp, _transaction, _values
 
 
@@ -31,7 +32,14 @@ def _schedule(row: sqlite3.Row) -> Schedule:
 
 class ScheduleMixin:
     async def create_schedule(self, schedule: Schedule) -> None:
-        await self._call(lambda db: _insert(db, "schedules", _schedule_values(schedule)))
+        def write(db: sqlite3.Connection) -> None:
+            with _transaction(db):
+                _insert(db, "schedules", _schedule_values(schedule))
+                sqlite_set_due(db, SCHEDULE_FIRE, schedule.id, schedule_due(schedule),
+                               self._clock())
+
+        await self._call(write)
+        self._due_written()
 
     async def get_schedule(self, schedule_id: str) -> Schedule | None:
         def read(db: sqlite3.Connection) -> Schedule | None:
@@ -51,14 +59,27 @@ class ScheduleMixin:
     async def update_schedule(self, schedule: Schedule) -> None:
         values = _schedule_values(schedule)
         assignments = ", ".join(f"{name} = :{name}" for name in values if name != "id")
-        await self._call(lambda db: db.execute(
-            f"UPDATE schedules SET {assignments} WHERE id = :id", values,
-        ))
+
+        def write(db: sqlite3.Connection) -> None:
+            with _transaction(db):
+                if db.execute(f"UPDATE schedules SET {assignments} WHERE id = :id",
+                              values).rowcount:
+                    sqlite_set_due(db, SCHEDULE_FIRE, schedule.id, schedule_due(schedule),
+                                   self._clock())
+
+        await self._call(write)
+        self._due_written()
 
     async def delete_schedule(self, schedule_id: str) -> bool:
-        return await self._call(lambda db: bool(db.execute(
-            "DELETE FROM schedules WHERE id = ?", (schedule_id,),
-        ).rowcount))
+        def write(db: sqlite3.Connection) -> bool:
+            with _transaction(db):
+                sqlite_set_due(db, SCHEDULE_FIRE, schedule_id, None, self._clock())
+                return bool(db.execute("DELETE FROM schedules WHERE id = ?",
+                                       (schedule_id,)).rowcount)
+
+        deleted = await self._call(write)
+        self._due_written()
+        return deleted
 
     async def next_due_at(self) -> datetime | None:
         def read(db: sqlite3.Connection) -> datetime | None:
@@ -97,6 +118,7 @@ class ScheduleMixin:
                 ).rowcount
                 if not advanced:
                     return False
+                sqlite_set_due(db, SCHEDULE_FIRE, schedule.id, next_run_at, self._clock())
 
                 # SQLiteCore.put's insert and routing logic, in this transaction
                 # so the event and the schedule advance commit together.
@@ -125,6 +147,7 @@ class ScheduleMixin:
 
         fired = await self._call(write)
         if fired:
+            self._due_written()
             self._wake.set()
             announce_routed(self, event, thread)
         return fired

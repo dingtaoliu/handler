@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -352,6 +353,9 @@ class SettingsService:
         # model's own defaults (e.g. Crontal's memory kinds; see
         # Integration.settings_defaults). Saved versions always win.
         self.section_defaults: dict[str, dict] = dict(section_defaults or {})
+        # Called with (section, stored version) after every save in this process,
+        # e.g. the gateway takes new grants at once instead of polling for them.
+        self.on_saved: list[Callable[[str, SettingsVersion], None]] = []
 
     async def fallback(self, harness: str) -> dict:
         """What an empty model/effort setting resolves to on `harness`.
@@ -474,6 +478,12 @@ class SettingsService:
         )
         if stored is None:
             raise SettingsConflict(f"Settings version conflict for {section}")
+        for listener in list(self.on_saved):
+            try:
+                listener(section, stored)
+            except Exception:  # a listener must never fail the save
+                logging.getLogger("handler.runtime.settings").exception(
+                    "settings listener failed", extra={"section": section})
         return stored
 
     async def history(self, section: str, limit: int = 50) -> list[SettingsVersion]:

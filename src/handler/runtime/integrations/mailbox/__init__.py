@@ -1,8 +1,9 @@
 """IMAP/SMTP mailbox integration (`mailbox`).
 
 Connects any number of password-authenticated mailboxes to one instance:
-- input: a poller per instance ingests new mail into the instance's store and,
-  per the mailbox's wake mode, wakes the agent on a `mail` thread
+- input: the host timer polls each enabled mailbox (timer kind `mailbox.poll`, one
+  due row per mailbox) and ingests new mail into the instance's store and, per the
+  mailbox's wake mode, wakes the agent on a `mail` thread
   (`mail:<mailbox_id>:<conversation_id>`) with a `mail.received` event;
 - tools: `mail_list_mailboxes`, `mail_search`, `mail_read`, `mail_read_thread`,
   `mail_get_attachment`, `mail_draft_reply`, `mail_send` (always approved);
@@ -24,12 +25,12 @@ from __future__ import annotations
 from typing import Any
 
 from ..base import (
-    BackgroundTask,
     Integration,
     IntegrationConfig,
     IntegrationContext,
     PromptFragment,
     ThreadTypeSpec,
+    TimerKind,
     UIManifestEntry,
 )
 from .events import EVENT_TYPE, GUIDANCE, THREAD_TYPE, render_mail_event
@@ -54,6 +55,10 @@ def _register_link_source() -> None:
 
 
 _register_link_source()
+
+
+# A poll waits for one of the host's IMAP slots, then runs up to 10 minutes.
+POLL_KIND_TIMEOUT_SECONDS = 1800.0
 
 
 def _int(env, key: str, default: int, minimum: int = 1) -> int:
@@ -178,6 +183,14 @@ class MailboxIntegration(Integration):
         self._parts(ctx)
         return [self.intake] if self.intake is not None else []
 
-    def background_tasks(self, ctx: IntegrationContext) -> list[BackgroundTask]:
+    def timer_kinds(self) -> list[TimerKind]:
+        return [TimerKind("mailbox.poll", self._poll_due, backfill=self._backfill_polls,
+                          timeout_seconds=POLL_KIND_TIMEOUT_SECONDS)]
+
+    async def _poll_due(self, ctx: IntegrationContext, item: Any):
         _, _, poller = self._parts(ctx)
-        return [BackgroundTask("mailbox-poller", poller.run)]
+        return await poller.poll_due(item.ref)
+
+    async def _backfill_polls(self, ctx: IntegrationContext) -> None:
+        _, _, poller = self._parts(ctx)
+        await poller.backfill()
