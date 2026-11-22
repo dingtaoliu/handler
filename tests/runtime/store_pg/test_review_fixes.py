@@ -45,15 +45,20 @@ class FailingStore:
     async def has_claimable(self, lane):
         return True
 
+    async def work_state(self):
+        from handler.runtime.store.base import WorkState
+
+        return WorkState(frozenset({Lane.INTERACTIVE, Lane.BACKGROUND}))
+
 
 async def test_a_failed_claim_gives_its_gate_slots_back():
     gate = RunGate(2, {"free": 1, "paid": 2})
     gate.configure("t", "free")
     dispatcher = Dispatcher(FailingStore(), executor=None, gate=gate, gate_tenant="t",
                             lane_capacity={Lane.INTERACTIVE: 2, Lane.BACKGROUND: 1})
-    for _ in range(5):
-        with pytest.raises(ConnectionError):
-            await dispatcher.claim_once()
+    for _ in range(5):  # the host loop logs a failed claim and carries on
+        assert await dispatcher.claim_once() == 0
+    assert dispatcher.store.calls >= 5
     assert gate.total == 0 and gate.running("t") == 0
     assert gate.reserve("t", 1) == 1  # a free tenant at cap 1 can still run
 

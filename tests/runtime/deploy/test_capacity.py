@@ -33,5 +33,5 @@ async def test_global_limit_leaves_other_lane_unclaimed(tmp_path):
         assert background.lease_owner == dispatcher.owner
     finally:
         gate.set()
-        await dispatcher._drain(1)
+        await dispatcher.runner.drain(1)
         await store.close()
