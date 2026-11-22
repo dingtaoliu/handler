@@ -45,7 +45,7 @@ def _bearer(headers: Any) -> str | None:
 class McpApp:
     """ASGI app: bearer-token auth in front of the MCP streamable HTTP manager."""
 
-    def __init__(self, gateway: Gateway, tokens: RunTokens) -> None:
+    def __init__(self, gateway: Gateway | None, tokens: RunTokens) -> None:
         self._gateway = gateway
         self._tokens = tokens
         self._server = self._build_server()
@@ -55,14 +55,24 @@ class McpApp:
 
     def _build_server(self) -> Server:
         server: Server = Server("handler-gateway")
-        gateway, tokens = self._gateway, self._tokens
+        tokens = self._tokens
+
+        def caller(request) -> tuple[RunContext, Gateway] | None:
+            """The token's run and its own tenant's gateway (the host app's tokens
+            carry it; a tenant's own app falls back to its gateway)."""
+            found = tokens.resolve_with_gateway(_bearer(request.headers)) if request else None
+            if found is None:
+                return None
+            ctx, gateway = found
+            gateway = gateway or self._gateway
+            return (ctx, gateway) if gateway is not None else None
 
         @server.list_tools()
         async def list_tools() -> list[mt.Tool]:
-            request = request_ctx.get().request
-            ctx = tokens.resolve(_bearer(request.headers)) if request is not None else None
-            if ctx is None:
+            found = caller(request_ctx.get().request)
+            if found is None:
                 return []
+            ctx, gateway = found
             return [
                 mt.Tool(name=s.name, description=s.description, inputSchema=s.input_schema)
                 for s in await gateway.specs_for(ctx)
@@ -70,15 +80,13 @@ class McpApp:
 
         @server.call_tool(validate_input=False)  # the gateway validates
         async def call_tool(name: str, arguments: dict[str, Any]) -> mt.CallToolResult:
-            request = request_ctx.get().request
-            ctx: RunContext | None = None
-            if request is not None:
-                ctx = tokens.resolve(_bearer(request.headers))
-            if ctx is None:
+            found = caller(request_ctx.get().request)
+            if found is None:
                 return mt.CallToolResult(
                     content=[mt.TextContent(type="text", text="Unauthorized")],
                     isError=True,
                 )
+            ctx, gateway = found
             result = await gateway.call(ctx, name, arguments)
             return mt.CallToolResult(
                 content=[mt.TextContent(type="text", text=result_text(result))],
@@ -122,5 +130,6 @@ class McpApp:
         await send({"type": "lifespan.shutdown.complete"})
 
 
-def create_mcp_app(gateway: Gateway, tokens: RunTokens) -> McpApp:
+def create_mcp_app(gateway: Gateway | None, tokens: RunTokens) -> McpApp:
+    """None: the host's one MCP app, each token naming its tenant's gateway."""
     return McpApp(gateway, tokens)
