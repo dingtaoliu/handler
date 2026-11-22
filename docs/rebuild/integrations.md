@@ -22,7 +22,8 @@ Everything specific to an external app, such as Crontal, Gmail or email intake, 
 | **Identity** | An optional identity provider: where users come from, how a handler user maps to the app's user, and minting credentials to act as them. At most one per instance. |
 | **Settings and prompt** | Settings sections (pydantic models) and fragments added to the persona/instructions. |
 | **UI** | Entries in the manifest returned by `GET /api/ui/manifest`: nav items, settings sections, thread types under Settings → Threads, Connections cards. The UI renders only what the manifest lists. |
-| **Lifecycle** | Background tasks (pollers, flushers) started and stopped under the instance lifespan. |
+| **Timer kinds** | Time-driven work (polls, expiries): `timer_kinds()` returns `TimerKind`s whose handlers the host's one timer calls with the tenant's `IntegrationContext` when one of the kind's due rows is due. See "Timer kinds" below. Integrations provide handlers; the host owns the loop. |
+| **Lifecycle** | `background_tasks`: long-running coroutines under the instance lifespan. Not for time-driven work (use a timer kind); left only for the Crontal connector's tool discovery, which moves into context loading in role-split step 3. |
 | **Dependencies** | `requires = [...]`. Startup fails with a clear error if a required integration is not enabled. |
 
 Each instance builds its integrations, so nothing is shared between instances (see `multi-instance.md`).
@@ -55,10 +56,48 @@ It contributes the following:
 - Thread type `mail`, added as a built-in `ThreadType` so stored threads always parse, with a `threads.mail` settings entry.
 - A `mail.received` turn renderer (registered through `run.register_event_renderer`).
 - Thread guidance and a tool hint (`instructions.register_guidance` / `register_tool_hint`).
-- The `/api/mailboxes` router, the `mail_*` tool set, and a `mailbox-poller` background task.
+- The `/api/mailboxes` router, the `mail_*` tool set, and the `mailbox.poll` timer kind (one due row per enabled mailbox; no task of its own).
 - UI manifest entries for a `connection` card and the `thread_type`.
 
 Its `mail_*` tables are created lazily in the instance's own store, so a core-only instance has none.
+
+## Timer kinds
+
+Added in role-split step 2 (`integrations/base.py` `TimerKind`, `runtime/timer.py`).
+Time-driven work is a row in due work: `(tenant, kind, ref, due_at)`, in
+`handler_control.due_work` on Postgres with a hub (tenant = schema name), or a `due_work`
+table in the tenant's own store (SQLite, or a Postgres store with its own connections).
+The host has one `HostTimer`; it claims due rows (`FOR UPDATE SKIP LOCKED` and a renewed
+lease on Postgres), resolves the row's tenant, and calls the kind's handler.
+
+```python
+class MyIntegration(Integration):
+    def timer_kinds(self):
+        return [TimerKind("my.poll", self._poll, backfill=self._backfill, timeout_seconds=120)]
+
+    async def _poll(self, ctx, item):      # one firing for item.ref
+        ...
+        return utcnow() + timedelta(minutes=5)   # next due time; None removes the row
+
+    async def _backfill(self, ctx):        # at every tenant start: make rows match data
+        await ctx.store.set_due("my.poll", "thing-1", utcnow(), keep_existing=True)
+        await ctx.store.prune_due("my.poll", ["thing-1"])
+```
+
+- **Writing rows.** Through the tenant's store, in the same transaction as the work
+  where possible: `store.due_statements(kind, ref, due_at | None, keep_existing=...)`
+  gives `(sql, params)` pairs with `?` placeholders for the caller's own transaction
+  (MailStore uses it in `put_mailbox` and `delete_mailbox`; call `store._due_written()`
+  after the commit to wake the timer). `store.set_due(...)` and `store.prune_due(kind,
+  keep_refs)` write in their own transaction. `None` as the due time removes the row.
+- **Results.** The handler returns the next due time or None. If the work's own
+  transaction rewrote the row while the handler ran (its `version` changed), the stored
+  due time wins. An exception is recorded on the row (`attempts`, `last_error`) and
+  retried with backoff (30 s doubling to an hour); it never stops the timer.
+- **Names** are unique per instance and may not reuse a core kind (`schedule.fire`,
+  `approval.expire`, `question.expire`, `inputs.release`, `retention.cleanup`).
+- **Rows of a kind no longer enabled** for the tenant are removed when they come due;
+  the kind's backfill recreates them if it comes back.
 
 ## Decisions
 

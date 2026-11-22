@@ -28,7 +28,7 @@ run: agent calls ask_user ──► Question(pending) stored, people notified
 
 person: POST /api/questions/{id}/answer ──► CAS pending → answered
         └─► Event question.answered into the thread ──► new run
-housekeeping (every 15 s): pending and past expires_at ──► CAS → expired ──► same event
+host timer: question.expire row due at expires_at ──► CAS → expired ──► same event
 admin:  POST /api/questions/{id}/cancel ──► CAS → canceled ──► same event
 ```
 
@@ -226,7 +226,8 @@ note. The Tasks tab knows `waiting_answer` (badge and filter).
 - Notifying `"all"` on a non-chat thread with no `recipients` relies on the
   instance's users list (local) and Crontal resolving `"all"` (sink), as for
   `notify`.
-- Expiry runs in the existing housekeeping loop (every 15 s), so expiry can lag
-  by that much; answering past the deadline is still refused.
+- Expiry is a `question.expire` due row written with the question, fired by the
+  host's timer at `expires_at` (role-split step 2; approvals likewise use
+  `approval.expire`); answering past the deadline is still refused.
 - Untrusted threads can ask without approval (see the lockdown floor above);
   the `untrusted` warning depends on each UI rendering it.

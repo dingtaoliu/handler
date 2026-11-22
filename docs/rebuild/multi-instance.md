@@ -15,10 +15,13 @@ configuration and root URLs remain supported.
 | bss | `/i/bss` | `handler_bss` by default | `handler/bss/` by default | `<main-data-dir>/instances/bss` |
 
 The root alias uses the **same** main runtime and MCP lifetime. Unknown `/i/*`
-paths return 404. Instances own their store, bus, dispatcher, scheduler, gateway,
+paths return 404. Instances own their store, dispatcher, scheduler, gateway,
 run tokens, user tokens, settings, memory, uploads and workspaces. Identical user,
 thread, run and event ids in different instances do not share records. This is
 application namespace isolation inside a shared process, database and OS account.
+Since role-split step 2 the host also shares one run event bus (each instance publishes
+and subscribes through its own tenant view of it), one timer for every instance's due
+work, and one workspace backstop.
 
 ## Configuration
 
