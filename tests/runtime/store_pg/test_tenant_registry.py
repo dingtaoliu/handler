@@ -58,39 +58,38 @@ def fake_harness(monkeypatch):
 
 
 class RuntimeSpy:
-    """Wraps instance_runtime: counts live runtimes per tenant and can hold a stop open."""
+    """Wraps build_tenant_context: counts builds and live contexts per tenant."""
 
     def __init__(self, monkeypatch):
         self.live: dict[str, int] = {}
         self.peak: dict[str, int] = {}
         self.starts: dict[str, int] = {}
         self.envs: dict[str, dict] = {}
-        self.hold_stop: dict[str, asyncio.Event] = {}
-        self.stopping: dict[str, asyncio.Event] = {}
         self.fail_next: set[str] = set()
-        real = server.instance_runtime
+        real = server.build_tenant_context
 
-        @contextlib.asynccontextmanager
         async def wrapped(args, env, *, instance_name="", **kwargs):
             name = instance_name
             if name in self.fail_next:
                 self.fail_next.discard(name)
-                raise RuntimeError("activation failed")
+                raise RuntimeError("context build failed")
             self.envs[name] = dict(env)
             self.starts[name] = self.starts.get(name, 0) + 1
             self.live[name] = self.live.get(name, 0) + 1
             self.peak[name] = max(self.peak.get(name, 0), self.live[name])
-            try:
-                async with real(args, env, instance_name=name, **kwargs) as app:
-                    yield app
-                if name in self.hold_stop:  # stopped and detached, the lock still held
-                    self.stopping.setdefault(name, asyncio.Event()).set()
-                    with contextlib.suppress(TimeoutError):  # a failing test must still exit
-                        await asyncio.wait_for(self.hold_stop[name].wait(), 15)
-            finally:
-                self.live[name] -= 1
+            context = await real(args, env, instance_name=name, **kwargs)
+            close = context.close
 
-        monkeypatch.setattr(server, "instance_runtime", wrapped)
+            async def closing():
+                try:
+                    await close()
+                finally:
+                    self.live[name] -= 1
+
+            context.close = closing
+            return context
+
+        monkeypatch.setattr(server, "build_tenant_context", wrapped)
 
 
 @pytest.fixture
@@ -151,6 +150,11 @@ def rows(dsn, query, *params):
         return conn.execute(query, params).fetchall()
 
 
+def execute(dsn, query, *params):
+    with psycopg.connect(dsn) as conn:
+        conn.execute(query, params)
+
+
 def state(dsn, name="m42"):
     return rows(dsn, "SELECT active_since, next_wake_at FROM handler_control.tenant_state "
                      "WHERE name = %s", name)[0]
@@ -165,9 +169,18 @@ async def activate(client, merchant=42):
     assert response.status_code == 200, response.text
 
 
+def context(app, name="m42"):
+    """The tenant's built context (None when not cached)."""
+    return app.state.services.cache.cached(name)
+
+
 async def asleep(app, name="m42"):
-    assert await app.state.tenants._deactivate(slot(app, name)) is True
-    assert slot(app, name).runtime is None
+    """Evict the tenant's context, as the LRU or TTL would."""
+    cache = app.state.services.cache
+    assert cache.cached(name) is not None
+    cache.invalidate(name)
+    await cache.settle()
+    assert cache.cached(name) is None
 
 
 SPEC = ThreadSpec("chat:u:1", ThreadType.CHAT, Lane.INTERACTIVE, owner_user_id="u",
@@ -180,7 +193,7 @@ def chat(key, prompt="hello"):
 
 
 def live_store(app, name="m42"):
-    return slot(app, name).runtime.app.state.lifecycle.store
+    return context(app, name).store
 
 
 # --- done when: created with no restart ------------------------------------
@@ -195,10 +208,8 @@ async def test_tenant_is_created_with_no_restart(base_env, pg_dsn, spy):
         assert (body["name"], body["schema"], body["s3_prefix"], body["base_path"]) == (
             "m42", "handler_m42", "handler/m42/", "/i/m42")
         assert "secrets" not in body
-        assert spy.starts.get("m42") is None  # nothing runs until there is a reason
         await activate(client)
-        assert spy.starts["m42"] == 1
-        assert state(pg_dsn)[0] is not None
+        assert spy.starts["m42"] >= 1  # a context, built on demand
         assert rows(pg_dsn, "SELECT count(*) FROM information_schema.tables "
                             "WHERE table_schema = 'handler_m42' AND table_name = 'threads'")[0][0] == 1
 
@@ -208,6 +219,8 @@ async def test_tenant_is_created_with_no_restart(base_env, pg_dsn, spy):
 
 async def test_idle_tenant_issues_no_queries(base_env, pg_dsn):
     """Reads Postgres's own statement log, so it can't miss a query from any code path."""
+    base_env["HANDLER_CLAIM_POLL_SECONDS"] = "0.05"
+    base_env["HANDLER_OUTBOX_POLL_SECONDS"] = "0.05"
     dbname = pg_dsn.rsplit("dbname=", 1)[1]
     with psycopg.connect(pg_dsn, autocommit=True) as conn:
         conn.execute(f'ALTER DATABASE "{dbname}" SET log_statement = \'all\'')
@@ -222,67 +235,51 @@ async def test_idle_tenant_issues_no_queries(base_env, pg_dsn):
         await create(client)
         offset = log.stat().st_size
         await activate(client)
-        await until(lambda: "handler_m42" in since(offset))  # the detector sees an active tenant
-        await asleep(app)
+        await until(lambda: "handler_m42" in since(offset))  # the detector sees a busy tenant
+        await settled(pg_dsn)
         await asyncio.sleep(0.3)
         offset = log.stat().st_size
-        await asyncio.sleep(1.0)  # about 20 scans
+        await asyncio.sleep(1.0)  # about 20 passes of each host loop
         seen = since(offset)
-    assert "tenant_state" in seen  # the host's one scan really ran
+    assert "tenant_state" in seen  # the host's loops really ran
     for marker in ("handler_m42", "search_path TO", "FROM threads", "FROM events", "FROM schedules",
                    "FROM deliveries", "FROM settings"):
         assert marker not in seen, marker
 
 
-async def test_idle_tenant_is_deactivated_after_the_idle_period(base_env, pg_dsn, spy):
-    base_env["HANDLER_TENANT_IDLE_SECONDS"] = "0.3"
+async def settled(dsn, name="m42", timeout=10.0):
+    """The host loops have looked at the tenant and rescheduled it (nothing due)."""
+    await until(lambda: rows(dsn, "SELECT next_wake_at IS NULL AND next_delivery_at IS NULL "
+                                  "FROM handler_control.tenant_state WHERE name = %s",
+                             name)[0][0], timeout)
+
+
+async def test_an_unused_context_is_closed_after_the_ttl(base_env, spy):
+    base_env["HANDLER_TENANT_CACHE_TTL_SECONDS"] = "0.2"
+    base_env["HANDLER_CLAIM_POLL_SECONDS"] = "0.05"
     async with serve(base_env) as (app, client):
         await create(client)
         await activate(client)
-        await until(lambda: slot(app).runtime is None)
-        assert spy.live["m42"] == 0
-        await until(lambda: state(pg_dsn)[0] is None)  # cleared last, after next_wake_at
-        await activate(client)  # and comes back on the next request
-        assert spy.starts["m42"] == 2
+        await until(lambda: context(app) is None)  # expired by the claim loop's pass
+        await until(lambda: spy.live["m42"] == 0)  # and closed: nothing of it remains
+        builds = spy.starts["m42"]
+        await activate(client)  # built again on the next request
+        assert spy.starts["m42"] == builds + 1
+
+
+async def test_the_cache_keeps_at_most_its_size(base_env, spy):
+    base_env["HANDLER_TENANT_CACHE_SIZE"] = "2"
+    async with serve(base_env) as (app, client):
+        for merchant in (1, 2, 3):
+            await create(client, merchant)
+            await activate(client, merchant)
+        await app.state.services.cache.settle()
+        assert len(app.state.services.cache) <= 2
+        assert context(app, "m1") is None  # least recently used went first
+        assert sum(spy.live.values()) <= 2
 
 
 # --- done when: crash recovery ---------------------------------------------
-
-
-async def test_tenant_left_active_by_a_crash_restarts_at_boot(base_env, pg_dsn, spy):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-    assert state(pg_dsn)[0] is not None  # a shutdown or crash leaves it set
-    async with serve(base_env) as (app, client):
-        await until(lambda: "m42" in app.state.tenants._slots and slot(app).runtime is not None)
-    assert spy.starts["m42"] == 2
-
-
-async def test_crash_between_next_wake_and_clearing_active_recovers(base_env, pg_dsn, spy, monkeypatch):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        wake_at = utcnow() + timedelta(hours=1)
-        await live_store(app).create_schedule(Schedule(name="s", prompt="p", spec="every 1h",
-                                                       next_run_at=wake_at))
-
-        async def crash(name):
-            raise RuntimeError("process died here")
-
-        monkeypatch.setattr(app.state.registry, "clear_active", crash)
-        await app.state.tenants._deactivate(slot(app))
-        active_since, next_wake = state(pg_dsn)
-        assert active_since is not None and next_wake == wake_at
-        assert slot(app).recover
-        monkeypatch.undo()
-    monkeypatch.setattr(server, "OpenAIAgentsHarness", FakeHarness)
-    monkeypatch.setattr(server, "codex_binary", lambda: (_ for _ in ()).throw(FileNotFoundError()))
-    starts = spy.starts["m42"]
-    spy2 = RuntimeSpy(monkeypatch)
-    async with serve(base_env) as (app, client):
-        await until(lambda: "m42" in app.state.tenants._slots and slot(app).runtime is not None)
-    assert starts == 1 and spy2.starts["m42"] == 1
 
 
 async def test_shutdown_with_work_pending_resumes_after_restart(base_env, pg_dsn):
@@ -304,10 +301,45 @@ async def test_shutdown_with_work_pending_resumes_after_restart(base_env, pg_dsn
                         "WHERE pending_since IS NOT NULL")[0][0] == 0
 
 
+async def test_a_run_killed_mid_way_is_reclaimed_when_its_lease_expires(base_env, pg_dsn):
+    """A crash: a worker claimed the thread, started its run and died. Nothing completes
+    or fails it; the claim loop records the lease's end as the tenant's next look, and
+    when the lease expires it claims the thread again, sweeping the dead run."""
+    from handler.runtime.types import Run, RunStatus
+
+    base_env["HANDLER_CLAIM_POLL_SECONDS"] = "0.05"
+    async with serve(base_env) as (app, client):
+        await create(client)
+        await activate(client)
+        gate: RunGate = app.state.run_gate
+        gate.configure("other", "paid", gate.max_runs)
+        held = gate.reserve("other", gate.max_runs)  # every slot taken: the loop waits
+        store = live_store(app)
+        await store.put(chat("crash", "crash work"), SPEC)
+        lease, = await store.claim("dead-worker", Lane.INTERACTIVE, 1, 1.0)
+        assert await store.create_run(lease, Run("run-dead", SPEC.key, lease.version, [],
+                                                 RunStatus.RUNNING, "openai_agents", None))
+        gate.release("other", held)  # the dead worker's process is gone
+        def rescheduled():
+            wake = rows(pg_dsn, "SELECT next_wake_at FROM handler_control.tenant_state "
+                                "WHERE name = 'm42'")[0][0]
+            return wake is not None and wake > lease.until - timedelta(seconds=0.5)
+
+        await until(rescheduled)
+        wake, = rows(pg_dsn, "SELECT next_wake_at FROM handler_control.tenant_state "
+                             "WHERE name = 'm42'")[0]
+        assert abs((wake - lease.until).total_seconds()) < 1  # the lease's end, not "never"
+        await until(lambda: any("crash work" in run for run in FakeHarness.runs))
+        await until(lambda: rows(pg_dsn, "SELECT count(*) FROM handler_m42.runs "
+                                         "WHERE status = 'completed'")[0][0] == 1)
+        statuses = dict(rows(pg_dsn, "SELECT id, status FROM handler_m42.runs"))
+    assert statuses["run-dead"] == "abandoned"
+
+
 # --- done when: scheduled wake-ups -----------------------------------------
 
 
-async def test_schedule_wakes_an_inactive_tenant_and_fires(base_env, pg_dsn, spy):
+async def test_schedule_fires_for_a_tenant_with_no_context(base_env, pg_dsn, spy):
     async with serve(base_env) as (app, client):
         await create(client)
         await activate(client)
@@ -316,215 +348,44 @@ async def test_schedule_wakes_an_inactive_tenant_and_fires(base_env, pg_dsn, spy
             name="s", prompt="scheduled work", spec="every 1h", next_run_at=due,
             harness="openai_agents"))
         await asleep(app)
-        assert state(pg_dsn) == (None, due)
-        await until(lambda: spy.starts["m42"] == 2)
         await until(lambda: any("scheduled work" in run for run in FakeHarness.runs))
-        assert state(pg_dsn)[0] is not None
 
 
-async def test_next_wake_uses_the_earliest_of_schedule_and_outbox_retry(base_env, pg_dsn):
+async def test_outbox_retry_is_delivered_by_the_host_outbox_loop(base_env, pg_dsn):
+    base_env["HANDLER_OUTBOX_POLL_SECONDS"] = "0.05"
+    delivered = []
+
+    class Sink:
+        name = "test.sink"
+        from handler.runtime.sinks import RetryPolicy
+        retry = RetryPolicy()
+
+        def accepts(self, event):
+            return True
+
+        async def deliver(self, payload):
+            delivered.append(payload["key"])
+
     async with serve(base_env) as (app, client):
         await create(client)
         await activate(client)
+        context(app).outbox.register(Sink())
         store = live_store(app)
-        later, sooner = utcnow() + timedelta(hours=2), utcnow() + timedelta(minutes=30)
-        await store.create_schedule(Schedule(name="s", prompt="p", spec="every 1h", next_run_at=later))
-        await store.enqueue_delivery("crontal", "k1", {"a": 1})
-        await store._dq("UPDATE deliveries SET next_attempt_at = ? WHERE key = 'k1'", (sooner,))
-        tenants = app.state.tenants
-        lifecycle = slot(app).runtime.app.state.lifecycle
-        lifecycle.outbox.sinks["crontal"] = object()  # a sink this runtime can deliver to
-        await tenants._deactivate(slot(app))
-        assert state(pg_dsn) == (None, sooner)
-
-
-async def test_outbox_retry_wakes_an_inactive_tenant(base_env, pg_dsn, spy):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        await asleep(app)
-        due = utcnow() + timedelta(milliseconds=200)
-        with psycopg.connect(pg_dsn) as conn:
-            conn.execute("UPDATE handler_control.tenant_state SET next_wake_at = %s "
-                         "WHERE name = 'm42'", (due,))
-        await until(lambda: spy.starts["m42"] == 2)
-
-
-# --- races around one tenant's lifecycle -----------------------------------
-
-
-async def test_concurrent_activations_make_one_runtime(base_env, spy):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        responses = await asyncio.gather(*(
-            client.get("/i/m42/api/me", headers=admin("admin-42")) for _ in range(25)))
-        assert {r.status_code for r in responses} == {200}
-        assert spy.starts["m42"] == 1 and spy.peak["m42"] == 1
-
-
-async def test_request_during_deactivation_gets_a_fresh_runtime(base_env, spy):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        spy.hold_stop["m42"] = asyncio.Event()
-        spy.stopping["m42"] = asyncio.Event()
-        stopping = asyncio.create_task(app.state.tenants._deactivate(slot(app)))
-        await asyncio.wait_for(spy.stopping["m42"].wait(), 5)
-        request = asyncio.create_task(client.get("/i/m42/api/me", headers=admin("admin-42")))
-        await asyncio.sleep(0.1)
-        assert not request.done() and spy.live["m42"] == 1  # waits; no second runtime
-        spy.hold_stop.pop("m42").set()
-        assert (await asyncio.wait_for(request, 10)).status_code == 200
-        assert await stopping is True
-        assert spy.starts["m42"] == 2 and spy.peak["m42"] == 1
-
-
-async def test_notification_during_deactivation_restarts_the_tenant(base_env, pg_dsn, spy):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        spy.hold_stop["m42"] = asyncio.Event()
-        spy.stopping["m42"] = asyncio.Event()
-        stopping = asyncio.create_task(app.state.tenants._deactivate(slot(app)))
-        await asyncio.wait_for(spy.stopping["m42"].wait(), 5)
-        await until(lambda: "handler_m42" not in app.state.registry.hub._wakes)
-        cli = PostgresStore(pg_dsn, schema="handler_m42")
-        try:
-            await cli.put(chat("during-stop", "during stop"), SPEC)
-        finally:
-            await cli.close()
-        spy.hold_stop.pop("m42").set()
-        await stopping
-        await until(lambda: any("during stop" in run for run in FakeHarness.runs))
-        assert spy.peak["m42"] == 1
-
-
-async def test_activation_while_deactivation_is_flushing_keeps_the_tenant(base_env, spy):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        sync = slot(app).runtime.app.state.lifecycle.workspace_sync
-        flushing, release = asyncio.Event(), asyncio.Event()
-        sync.mark_dirty("thread")
-
-        async def slow_flush():
-            flushing.set()
-            await release.wait()
-            sync._dirty.clear()
-            return 1
-
-        sync.flush = slow_flush
-        stopping = asyncio.create_task(app.state.tenants._deactivate(slot(app)))
-        await asyncio.wait_for(flushing.wait(), 5)
-        request = asyncio.create_task(client.get("/i/m42/api/me", headers=admin("admin-42")))
-        await asyncio.sleep(0.1)
-        assert not request.done()
-        release.set()
-        assert (await asyncio.wait_for(request, 10)).status_code == 200
-        assert await stopping is False  # the request arrived, so the stop was abandoned
-        assert slot(app).runtime is not None and spy.starts["m42"] == 1
-
-
-async def test_a_failed_flush_keeps_the_tenant_active(base_env):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        sync = slot(app).runtime.app.state.lifecycle.workspace_sync
-        sync.mark_dirty("thread")
-
-        async def failing():
-            return 0
-
-        sync.flush = failing
-        assert await app.state.tenants._deactivate(slot(app)) is False
-        assert slot(app).runtime is not None
-        sync._dirty.clear()
-
-
-async def test_deactivation_does_not_hold_up_other_tenants(base_env, spy):
-    async with serve(base_env) as (app, client):
-        await create(client, 1)
-        await create(client, 2)
-        await activate(client, 1)
-        await activate(client, 2)
-        spy.hold_stop["m1"] = asyncio.Event()
-        spy.stopping["m1"] = asyncio.Event()
-        stopping = asyncio.create_task(app.state.tenants._deactivate(slot(app, "m1")))
-        await asyncio.wait_for(spy.stopping["m1"].wait(), 5)
-        response = await asyncio.wait_for(client.get("/i/m2/api/me", headers=admin("admin-2")), 5)
-        assert response.status_code == 200
-        await create(client, 3)
-        await asyncio.wait_for(activate(client, 3), 10)  # a new start is not blocked either
-        spy.hold_stop.pop("m1").set()
-        await stopping
-
-
-# --- deactivation checks ---------------------------------------------------
-
-
-async def test_in_flight_run_blocks_deactivation(base_env):
-    FakeHarness.gate = asyncio.Event()
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        await live_store(app).put(chat("busy"), SPEC)
-        await until(lambda: FakeHarness.runs)
-        assert await app.state.tenants._deactivate(slot(app)) is False
-        FakeHarness.gate.set()
-
-
-async def test_pending_events_block_deactivation(base_env, monkeypatch):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        lifecycle = slot(app).runtime.app.state.lifecycle
-        monkeypatch.setattr(lifecycle.dispatcher, "claim_once", lambda: asyncio.sleep(0, 0))
-        await asyncio.sleep(0.05)
-        await lifecycle.store.put(chat("queued"), SPEC)
-        assert await app.state.tenants._deactivate(slot(app)) is False
-
-
-async def test_due_outbox_row_blocks_deactivation(base_env):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        lifecycle = slot(app).runtime.app.state.lifecycle
-        await lifecycle.store.enqueue_delivery("crontal", "k1", {"a": 1})
-        lifecycle.outbox.sinks["crontal"] = object()
-        assert await app.state.tenants._deactivate(slot(app)) is False
-        lifecycle.outbox.sinks.pop("crontal")
-        assert await app.state.tenants._deactivate(slot(app)) is True  # no sink: not its to send
-
-
-async def test_open_sse_stream_blocks_deactivation(base_env):
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        started, gone = asyncio.Event(), asyncio.Event()
-
-        async def receive():
-            await gone.wait()
-            return {"type": "http.disconnect"}
-
-        async def send(message):
-            started.set()
-
-        scope = {"type": "http", "method": "GET", "path": "/i/m42/api/stream", "raw_path": b"/i/m42/api/stream",
-                 "root_path": "", "scheme": "http", "query_string": b"", "server": ("h", 80),
-                 "client": ("c", 1), "http_version": "1.1",
-                 "headers": [(b"authorization", b"Bearer admin-42")]}
-        stream = asyncio.create_task(app.state.tenants(scope, receive, send))
-        await asyncio.wait_for(started.wait(), 5)
-        assert await app.state.tenants._deactivate(slot(app)) is False
-        gone.set()
-        await asyncio.wait_for(stream, 5)
-        assert await app.state.tenants._deactivate(slot(app)) is True
+        soon = utcnow() + timedelta(milliseconds=300)
+        await store.enqueue_delivery("test.sink", "k1", {"key": "k1"})
+        await until(lambda: delivered == ["k1"])
+        await store.enqueue_delivery("test.sink", "k2", {"key": "k2"})
+        await store.delivery_failed("test.sink", "k2", "down", 0.3)
+        assert rows(pg_dsn, "SELECT next_delivery_at FROM handler_control.tenant_state "
+                            "WHERE name = 'm42'")[0][0] is not None
+        await until(lambda: delivered == ["k1", "k2"])
+        assert utcnow() >= soon
 
 
 # --- lost wake-ups ---------------------------------------------------------
 
 
-async def test_notify_activates_an_inactive_tenant_and_runs_its_work(base_env, pg_dsn, spy):
+async def test_work_from_another_process_runs(base_env, pg_dsn, spy):
     async with serve(base_env) as (app, client):
         await create(client)
         await activate(client)
@@ -535,10 +396,10 @@ async def test_notify_activates_an_inactive_tenant_and_runs_its_work(base_env, p
         finally:
             await cli.close()
         await until(lambda: any("from a cli" in run for run in FakeHarness.runs))
-        assert spy.starts["m42"] == 2
 
 
-async def test_notify_missed_while_the_listener_is_down_is_found_by_the_scan(base_env, pg_dsn, spy):
+async def test_work_missed_while_the_listener_is_down_is_found_by_the_poll(base_env, pg_dsn):
+    base_env["HANDLER_CLAIM_POLL_SECONDS"] = "0.1"
     async with serve(base_env) as (app, client):
         await create(client)
         await activate(client)
@@ -551,24 +412,26 @@ async def test_notify_missed_while_the_listener_is_down_is_found_by_the_scan(bas
             await cli.put(chat("missed", "missed notify"), SPEC)
         finally:
             await cli.close()
+        # The writer marked tenant_state in its transaction; the poll reads it.
         await until(lambda: any("missed notify" in run for run in FakeHarness.runs))
 
 
-async def test_listener_reconnect_triggers_a_scan_and_keeps_notifications(base_env, pg_dsn):
+async def test_listener_reconnect_looks_at_every_tenant(base_env, pg_dsn):
+    base_env["HANDLER_CLAIM_POLL_SECONDS"] = "3600"  # only a signal can prompt a pass
     async with serve(base_env) as (app, client):
         await create(client)
         await activate(client)
         await asleep(app)
-        app.state.tenants.scan_seconds = 3600  # only the reconnect can prompt a scan now
         await asyncio.sleep(0.1)
-        cli = PostgresStore(pg_dsn, schema="handler_m42")
-        await cli.get_thread("x")
+        old = PostgresStore(pg_dsn, schema="handler_m42")
+        await old.get_thread("x")
+        old._marks_wake = None  # an older image: it marks nothing
         rows(pg_dsn, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                      "WHERE datname = current_database() AND query ILIKE 'LISTEN%%'")
         try:
-            await cli.put(chat("gap", "written in the gap"), SPEC)
+            await old.put(chat("gap", "written in the gap"), SPEC)
         finally:
-            await cli.close()
+            await old.close()
         await until(lambda: any("written in the gap" in run for run in FakeHarness.runs))
 
 
@@ -581,38 +444,17 @@ async def test_work_with_no_signal_at_all_is_found_at_boot(base_env, pg_dsn):
     cli = PostgresStore(pg_dsn, schema="handler_m42")
     try:
         await cli.get_thread("x")
-        cli._marks_wake = False
+        cli._marks_wake = None
         await cli.put(chat("silent", "silent work"), SPEC)
     finally:
         await cli.close()
-    assert state(pg_dsn) == (None, None)
+    execute(pg_dsn, "UPDATE handler_control.tenant_state SET next_wake_at = NULL")
     async with serve(base_env) as (app, client):
         await until(lambda: any("silent work" in run for run in FakeHarness.runs))
 
 
-async def test_the_delayed_boot_sweep_catches_writes_during_a_dyno_overlap(base_env, pg_dsn):
-    base_env["HANDLER_TENANT_BOOT_GRACE_SECONDS"] = "0.5"
-    async with serve(base_env) as (app, client):
-        await create(client)
-        await activate(client)
-        await asleep(app)
-    async with serve(base_env) as (app, client):
-        await asyncio.sleep(0.1)  # booted; the old dyno is still writing
-        hub = app.state.registry.hub
-        hub._listener.cancel()
-        await asyncio.gather(hub._listener, return_exceptions=True)
-        old = PostgresStore(pg_dsn, schema="handler_m42")
-        try:
-            await old.get_thread("x")
-            old._marks_wake = False
-            await old.put(chat("overlap", "overlap work"), SPEC)
-        finally:
-            await old.close()
-        await until(lambda: any("overlap work" in run for run in FakeHarness.runs))
-
-
-async def test_failed_activation_is_retried_durably(base_env, pg_dsn, spy, monkeypatch):
-    monkeypatch.setattr("handler.runtime.tenancy.host.ACTIVATION_RETRY_SECONDS", 0.2)
+async def test_a_failed_build_is_retried_without_a_request(base_env, pg_dsn, spy):
+    base_env["HANDLER_CLAIM_POLL_SECONDS"] = "0.1"
     async with serve(base_env) as (app, client):
         await create(client)
         await activate(client)
@@ -621,12 +463,16 @@ async def test_failed_activation_is_retried_durably(base_env, pg_dsn, spy, monke
         response = await client.get("/i/m42/api/me", headers=admin("admin-42"))
         assert response.status_code == 503  # the sender retries; nothing was accepted and lost
         assert response.headers["retry-after"] == "5"
-        active_since, wake = state(pg_dsn)
-        assert active_since is None and wake is not None
-        await until(lambda: slot(app).runtime is not None)  # the scan retried without a request
+        cli = PostgresStore(pg_dsn, schema="handler_m42")
+        try:
+            await cli.put(chat("later", "after a failed build"), SPEC)
+        finally:
+            await cli.close()
+        spy.fail_next.add("m42")  # the claim loop's first build fails too; it stays due
+        await until(lambda: any("after a failed build" in run for run in FakeHarness.runs))
 
 
-async def test_crontal_notification_on_an_inactive_tenant_runs(base_env, pg_dsn, spy):
+async def test_crontal_notification_on_an_unbuilt_tenant_runs(base_env, pg_dsn, spy):
     secrets = {"HANDLER_ADMIN_KEY": "admin-42", "HANDLER_WEBHOOK_SECRET": "hook-42"}
     async with serve(base_env) as (app, client):
         await create(client, secrets=secrets)
@@ -637,7 +483,6 @@ async def test_crontal_notification_on_an_inactive_tenant_runs(base_env, pg_dsn,
                                      headers={"X-Crontal-Signature": sign("hook-42", body)})
         assert response.status_code < 300, response.text
         await until(lambda: FakeHarness.runs)
-        assert spy.starts["m42"] == 2
 
 
 def raw_email(subject="Quote please"):
@@ -654,7 +499,7 @@ async def post_email(client, name, secret, body):
         "x-handler-timestamp": timestamp, "x-handler-signature": signature})
 
 
-async def test_inbound_email_to_an_inactive_tenant_is_stored(base_env, pg_dsn, spy):
+async def test_inbound_email_to_an_unbuilt_tenant_is_stored(base_env, pg_dsn, spy):
     secrets = {"HANDLER_ADMIN_KEY": "admin-42", "HANDLER_EMAIL_SECRET": "mail-42"}
     async with serve(base_env) as (app, client):
         await create(client, secrets=secrets)
@@ -662,31 +507,27 @@ async def test_inbound_email_to_an_inactive_tenant_is_stored(base_env, pg_dsn, s
         await asleep(app)
         response = await post_email(client, "m42", "mail-42", raw_email())
         assert response.status_code < 300, response.text
-        assert spy.starts["m42"] == 2
         assert rows(pg_dsn, "SELECT count(*) FROM handler_m42.events")[0][0] == 1
 
 
-async def test_inbound_email_during_deactivation_is_stored(base_env, pg_dsn, spy):
-    secrets = {"HANDLER_ADMIN_KEY": "admin-42", "HANDLER_EMAIL_SECRET": "mail-42"}
+async def test_a_context_in_use_is_not_closed_by_invalidation(base_env, pg_dsn, spy):
+    """A change mid-request retires the context; the request finishes on it, the next
+    one gets a fresh build, and the old one closes once its last user leaves."""
     async with serve(base_env) as (app, client):
-        await create(client, secrets=secrets)
+        await create(client)
         await activate(client)
-        spy.hold_stop["m42"] = asyncio.Event()
-        spy.stopping["m42"] = asyncio.Event()
-        stopping = asyncio.create_task(app.state.tenants._deactivate(slot(app)))
-        await asyncio.wait_for(spy.stopping["m42"].wait(), 5)
-        post = asyncio.create_task(post_email(client, "m42", "mail-42", raw_email()))
-        await asyncio.sleep(0.1)
-        assert not post.done()
-        spy.hold_stop.pop("m42").set()
-        response = await asyncio.wait_for(post, 10)
-        await stopping
-        assert response.status_code < 300, response.text
-        assert rows(pg_dsn, "SELECT count(*) FROM handler_m42.events")[0][0] == 1
-        assert spy.peak["m42"] == 1
+        cache = app.state.services.cache
+        async with cache.use("m42") as held:
+            cache.invalidate("m42")
+            await cache.settle()
+            assert spy.live["m42"] == 1  # still held: not closed
+            await activate(client)  # a new request builds afresh
+            assert context(app) is not held and spy.live["m42"] == 2
+        await cache.settle()
+        assert spy.live["m42"] == 1 and spy.peak["m42"] == 2
 
 
-# --- pinned tenants --------------------------------------------------------
+# --- mailboxes poll from the host timer; nothing pins a tenant --------------
 
 
 async def add_mailbox(app, name="m42", *, enabled=True):
@@ -701,59 +542,14 @@ async def add_mailbox(app, name="m42", *, enabled=True):
     return mailbox
 
 
-async def test_a_mailbox_integration_alone_does_not_pin_a_tenant(base_env, spy):
-    base_env["HANDLER_TENANT_IDLE_SECONDS"] = "0.2"
-    async with serve(base_env) as (app, client):
-        await create(client, integrations=["mailbox"])  # what Crontal pushes to every paid tenant
-        await asyncio.sleep(0.3)
-        assert spy.starts.get("m42") is None  # asleep at boot: nothing to poll
-        await activate(client)
-        await until(lambda: slot(app).runtime is None)  # and it sleeps again when idle
-
-
-async def test_a_connected_mailbox_pins_and_removing_it_unpins(base_env, spy):
-    from handler.runtime.integrations.mailbox.store import MailStore
-
-    base_env["HANDLER_TENANT_IDLE_SECONDS"] = "0.2"
-    async with serve(base_env) as (app, client):
-        await create(client, integrations=["mailbox"])
-        await activate(client)
-        mailbox = await add_mailbox(app)
-        await until(lambda: slot(app).pinned)
-        await asyncio.sleep(0.5)
-        assert slot(app).runtime is not None  # past the idle period, still awake
-        await MailStore(live_store(app)).delete_mailbox(mailbox.id)
-        await until(lambda: slot(app).runtime is None)
-        assert not slot(app).pinned
-
-
-async def test_a_disabled_mailbox_does_not_pin(base_env, spy):
-    base_env["HANDLER_TENANT_IDLE_SECONDS"] = "0.2"
-    async with serve(base_env) as (app, client):
-        await create(client, integrations=["mailbox"])
-        await activate(client)
-        await add_mailbox(app, enabled=False)
-        await until(lambda: slot(app).runtime is None)
-
-
-async def test_a_tenant_with_a_mailbox_is_woken_at_boot_and_kept_awake(base_env, spy):
-    base_env["HANDLER_TENANT_IDLE_SECONDS"] = "0.2"
+async def test_a_connected_mailbox_does_not_keep_a_context(base_env, spy):
+    base_env["HANDLER_TENANT_CACHE_TTL_SECONDS"] = "0.2"
+    base_env["HANDLER_CLAIM_POLL_SECONDS"] = "0.05"
     async with serve(base_env) as (app, client):
         await create(client, integrations=["mailbox"])
         await activate(client)
         await add_mailbox(app)
-        await until(lambda: slot(app).pinned)
-    async with serve(base_env) as (app, client):
-        await until(lambda: "m42" in app.state.tenants._slots and slot(app).runtime is not None)
-        await asyncio.sleep(0.5)
-        assert slot(app).runtime is not None and slot(app).pinned
-
-
-async def test_an_ordinary_tenant_is_not_pinned(base_env, spy):
-    async with serve(base_env) as (app, client):
-        await create(client, integrations=["crontal"])
-        await asyncio.sleep(0.2)
-        assert spy.starts.get("m42") is None
+        await until(lambda: spy.live["m42"] == 0, timeout=15)  # polls are due rows now
 
 
 # --- platform API and isolation --------------------------------------------
@@ -778,7 +574,7 @@ async def test_update_merges_and_a_restart_applies_new_secrets(base_env, spy):
         assert response.status_code == 200
         assert response.json()["plan"] == "free"
         assert response.json()["config"] == {"HANDLER_RT_MODEL": "one"}
-        await until(lambda: spy.starts["m42"] == 1 and slot(app).runtime is None)
+        await until(lambda: spy.starts["m42"] >= 2)  # the change retired its context
         assert (await client.get("/i/m42/api/me", headers=admin("rotated"))).status_code == 200
         assert (await client.get("/i/m42/api/me", headers=admin("admin-42"))).status_code == 401
         assert spy.envs["m42"]["HANDLER_RT_MODEL"] == "one"
@@ -790,7 +586,8 @@ async def test_disable_stops_the_tenant_and_enable_resumes_its_work(base_env, pg
         await activate(client)
         response = await client.post("/platform/tenants/42/disable", headers=PLATFORM)
         assert response.status_code == 200 and response.json()["enabled"] is False
-        assert slot(app).runtime is None
+        assert context(app) is None  # its context retired; the claim loop skips it
+        assert not app.state.services.tenants.get("m42").enabled
         assert (await client.post("/platform/tenants/42/disable", headers=PLATFORM)).status_code == 200
         assert (await client.get("/i/m42/healthz")).status_code == 404
         cli = PostgresStore(pg_dsn, schema="handler_m42")
@@ -959,7 +756,7 @@ async def test_registry_off_leaves_env_hosting_untouched(base_env, pg_dsn, spy):
             assert (await client.get("/platform/tenants", headers=PLATFORM)).status_code != 200
     tables = {r[0] for r in rows(pg_dsn, "SELECT table_name FROM information_schema.tables "
                                          "WHERE table_schema = 'handler_control'")}
-    assert tables == {"tenant_schema_versions", "due_work"}
+    assert tables == {"tenant_schema_versions", "due_work", "tenant_state"}
 
 
 async def test_registry_needs_its_keys_and_database(base_env, tmp_path):

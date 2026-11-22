@@ -158,18 +158,29 @@ class HostRunner:
         if self.gate is not None:
             self.gate.dequeue(*key)
 
-    async def _settle(self, name: str, until: datetime | None) -> None:
-        """No lane of `name` is waiting any more: write its next look back."""
+    async def _settle(self, name: str) -> None:
+        """No lane of `name` is waiting any more: write its next look back, read afresh
+        (threads it just claimed count by their lease, which a crash lets expire;
+        another worker may have claimed since the look)."""
         if any(tenant == name for tenant, _ in self._want):
             return
         pending = self._rewrite.pop(name, None)
         if pending is None:
             return
-        source, version, at = pending
-        if until is not None and (at is None or until < at):
-            at = until
-        with contextlib.suppress(Exception):
-            await source.reschedule(name, version, at)
+        source, version, _ = pending
+        try:
+            async with self.tenants.use(name) as context:
+                if context is None:
+                    return
+                state = await context.store.work_state()
+            if state.lanes:  # more became claimable meanwhile: stays due
+                for lane in state.lanes:
+                    self._want.setdefault((name, lane), None)
+                self._rewrite[name] = (source, version, state.next_at)
+                return
+            await source.reschedule(name, version, state.next_at)
+        except Exception:
+            logger.exception("could not reschedule a tenant", extra={"tenant": name})
 
     async def _admit(self) -> int:
         started = 0
@@ -205,7 +216,7 @@ class HostRunner:
                 started += 1
             if len(leases) < granted:  # the lane is drained
                 self._unwant(key)
-                await self._settle(name, min((lease.until for lease in leases), default=None))
+                await self._settle(name)
         return started
 
     async def claim_once(self) -> int:

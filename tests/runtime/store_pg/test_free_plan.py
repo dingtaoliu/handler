@@ -63,7 +63,7 @@ AS_PROXY = {"Authorization": "Bearer admin-42", "X-Handler-User": "owner"}
 
 
 def lifecycle(app, name="m42"):
-    return slot(app, name).runtime.app.state.lifecycle
+    return app.state.services.cache.cached(name).lifecycle
 
 
 # --- the review's bug: max_runs in the plan table ----------------------------

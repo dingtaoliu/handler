@@ -1098,7 +1098,7 @@ class PostgresCore(DueWriter, PostgresUsage):
             with contextlib.suppress(Exception):
                 await self._ready
             if self._hub is not None:
-                self._hub.detach(self._tenant_schema)
+                self._hub.detach(self._tenant_schema, self._wake)
             else:
                 await self._pool.close()
 

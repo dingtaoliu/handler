@@ -100,9 +100,13 @@ class PostgresHub:
             dsn, min_size=min_size, max_size=max_size, open=False,
             kwargs={"row_factory": dict_row, "options": self._options,
                     "prepare_threshold": None},
+            configure=self._configure,
         )
+        # Backends of this process's pool: a tenant-changed notice sent from one of
+        # them was already acted on here (the writer invalidated in process).
+        self._own_pids: set[int] = set()
         self.ddl_lock = asyncio.Lock()  # DDL waits here, not holding a pool connection
-        self._wakes: dict[str, asyncio.Event] = {}
+        self._wakes: dict[str, list[asyncio.Event]] = {}
         self._ready: asyncio.Task[None] | None = None
         self._listener: asyncio.Task[None] | None = None
         self._listening = asyncio.Event()
@@ -113,6 +117,9 @@ class PostgresHub:
         self.on_work: Callable[[str], None] | None = None  # a schema has new work (claim loop)
         self.on_tenant_changed: Callable[[str], None] | None = None  # drop its context
         self._due_queue = None
+
+    async def _configure(self, conn) -> None:
+        self._own_pids.add(conn.info.backend_pid)
 
     async def _setup(self) -> None:
         await self.pool.open()
@@ -130,10 +137,9 @@ class PostgresHub:
         await asyncio.shield(self._ready)
 
     def attach(self, schema: str, wake: asyncio.Event) -> None:
-        """Route `schema`'s notifications to `wake`."""
-        if schema in self._wakes:
-            raise ValueError(f"schema {schema!r} is already attached to this hub")
-        self._wakes[schema] = wake
+        """Route `schema`'s notifications to `wake` (a rebuilt tenant context may
+        briefly have two stores on one schema: the retiring one and its successor)."""
+        self._wakes.setdefault(schema, []).append(wake)
 
     def due_queue(self):
         """The one due-work queue of this database (store/due_work.py)."""
@@ -170,8 +176,14 @@ class PostgresHub:
         """Inside a writer's transaction: every process drops this tenant's context."""
         await conn.execute("SELECT pg_notify(%s, %s)", (TENANT_CHANNEL, schema))
 
-    def detach(self, schema: str) -> None:
-        self._wakes.pop(schema, None)
+    def detach(self, schema: str, wake: asyncio.Event | None = None) -> None:
+        wakes = self._wakes.get(schema, [])
+        if wake is None:
+            wakes.clear()
+        elif wake in wakes:
+            wakes.remove(wake)
+        if not wakes:
+            self._wakes.pop(schema, None)
 
     async def _listen(self) -> None:
         while not self._closed:
@@ -185,8 +197,9 @@ class PostgresHub:
                     await conn.execute(sql.SQL("LISTEN {}").format(
                         sql.Identifier(TENANT_CHANNEL)))
                     self._listening.set()
-                    for wake in self._wakes.values():  # anything missed while offline
-                        wake.set()
+                    for wakes in list(self._wakes.values()):  # anything missed while offline
+                        for wake in wakes:
+                            wake.set()
                     if self.on_listening is not None:
                         self.on_listening()
                     if self.on_due is not None:
@@ -199,14 +212,17 @@ class PostgresHub:
                                 self.on_due()
                             continue
                         if notice.channel == TENANT_CHANNEL:
+                            if notice.pid in self._own_pids:
+                                continue  # this process's own change, handled in process
                             if self.on_tenant_changed is not None:
                                 self.on_tenant_changed(notice.payload)
                             continue
                         if self.on_work is not None:
                             self.on_work(notice.payload)
-                        wake = self._wakes.get(notice.payload)
-                        if wake is not None:
-                            wake.set()
+                        wakes = self._wakes.get(notice.payload)
+                        if wakes:
+                            for wake in list(wakes):
+                                wake.set()
                         elif self.on_unattached is not None:
                             self.on_unattached(notice.payload)
             except asyncio.CancelledError:

@@ -1182,7 +1182,14 @@ async def _build_tenant_context(args, env, *, host, base_path, instance_name, re
             take_grants(*await settings.get("grants"))
 
         settings.on_saved.append(grants_saved)
-        executor.before_run = refresh_grants
+        executor.before_run = refresh_grants  # a backstop for a save NOTIFY missed
+
+        def settings_saved(section: str, stored) -> None:
+            # Every section feeds the context (limits, threads, grants): the next use
+            # builds afresh. Other processes hear NOTIFY handler_tenant_changed.
+            host.cache.invalidate(name)
+
+        settings.on_saved.append(settings_saved)
 
         crontal_token = env.get("CRONTAL_AGENT_TOKEN")
         if legacy_crontal and args.crontal_url and crontal_token:
