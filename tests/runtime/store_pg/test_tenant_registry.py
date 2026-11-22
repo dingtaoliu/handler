@@ -985,7 +985,7 @@ async def test_stores_without_a_registry_do_not_mark_wakes(pg_dsn):
     store = PostgresStore(pg_dsn, schema="handler_solo")
     try:
         await store.get_thread("x")
-        assert store._marks_wake is False
+        assert not store._marks_wake
     finally:
         await store.close()
 

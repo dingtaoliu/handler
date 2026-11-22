@@ -32,6 +32,7 @@ from ..tenancy.limits import (
 from .postgres_hub import (
     CONTROL_SCHEMA, SCHEMA_LOCK, SHARED_CHANNEL, PostgresHub,
 )
+from .base import WorkSignal, WorkState
 from .usage import PostgresUsage
 from .due_work import LOCAL_PG_DDL, DueWriter
 from .run_failures import (
@@ -120,6 +121,31 @@ async def _insert(conn: AsyncConnection, table: str, values: dict[str, Any]) -> 
     columns = ", ".join(values)
     placeholders = ", ".join(f"%({name})s" for name in values)
     await conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", values)
+
+
+# Marks the tenant's wake in handler_control.tenant_state, inside the transaction
+# that wrote the work (step 3): the host's claim loop reads only that table to find
+# due tenants. LEAST keeps the earliest due time (the wait counts from then); the
+# version tells the loop a writer came after its read.
+MARK_WAKE_SQL = (f"UPDATE {CONTROL_SCHEMA}.tenant_state SET next_wake_at = "
+                 "LEAST(next_wake_at, now()), wake_version = wake_version + 1 "
+                 "WHERE schema_name = %s")
+
+# One tenant's claim outlook (store.work_state): which lanes `claim` would find now,
+# and when the next pending thread that isn't claimable now becomes so.
+WORK_STATE_SQL = (
+    "SELECT lane, bool_or(ready) AS ready, MIN(CASE WHEN NOT ready THEN "
+    "GREATEST(COALESCE(available_at, pending_since), COALESCE(lease_until, pending_since)) "
+    "END) AS later FROM (SELECT lane, available_at, lease_until, pending_since, "
+    "(available_at IS NULL OR available_at <= %(now)s) "
+    "AND (lease_until IS NULL OR lease_until < %(now)s) AS ready FROM threads "
+    "WHERE pending_since IS NOT NULL AND NOT dead) pending GROUP BY lane")
+
+
+def work_state_of(rows) -> WorkState:
+    lanes = frozenset(Lane(row["lane"]) for row in rows if row["ready"])
+    later = [row["later"] for row in rows if row["later"] is not None]
+    return WorkState(lanes, min(later) if later else None)
 
 
 async def earliest_work_at(conn: AsyncConnection, sinks: Sequence[str] | None,
@@ -331,13 +357,16 @@ class PostgresCore(DueWriter, PostgresUsage):
             dsn, min_size=min_size, max_size=max_size, open=False,
             kwargs={"row_factory": dict_row, "options": self._options},
         )
-        self._wake = asyncio.Event()
+        self._wake = WorkSignal()
         self._ready: asyncio.Task[None] | None = None
         self._listener: asyncio.Task[None] | None = None
         self._listening = asyncio.Event()
         self._closed = False
         self.limits: LiveLimits | None = None  # set for registry-hosted tenants only
-        self._marks_wake = False  # a registry's tenant_state exists for a store on its own
+        # A store on its own connections marks a registry's tenant_state when one
+        # exists: None (no table), "legacy" (rows found by joining tenants, as in
+        # v65) or "schema" (tenant_state.schema_name and wake_version, step 3).
+        self._marks_wake: str | None = None
 
     @property
     def _due_table(self) -> str:
@@ -365,8 +394,13 @@ class PostgresCore(DueWriter, PostgresUsage):
                 await conn.execute(text)
             await conn.execute(LOCAL_PG_DDL)  # the timer's rows, in this schema (due_work.py)
             cursor = await conn.execute(
-                "SELECT to_regclass(%s) AS state", (f"{CONTROL_SCHEMA}.tenant_state",))
-            self._marks_wake = (await cursor.fetchone())["state"] is not None
+                "SELECT to_regclass(%s) AS state, EXISTS (SELECT 1 FROM "
+                "information_schema.columns WHERE table_schema = %s "
+                "AND table_name = 'tenant_state' AND column_name = 'wake_version') AS v",
+                (f"{CONTROL_SCHEMA}.tenant_state", CONTROL_SCHEMA))
+            row = await cursor.fetchone()
+            self._marks_wake = (None if row["state"] is None
+                                else "schema" if row["v"] else "legacy")
         self._listener = asyncio.create_task(self._listen())
         await self._listening.wait()
 
@@ -448,11 +482,16 @@ class PostgresCore(DueWriter, PostgresUsage):
         CLI process reaches a server that listens through a hub.
         """
         if self._hub is not None:
+            # Commits with the work: the host's claim loop finds the tenant from
+            # handler_control alone, even if nobody heard the NOTIFY.
+            await conn.execute(MARK_WAKE_SQL, (self._tenant_schema,))
             await conn.execute("SELECT pg_notify(%s, %s)", (SHARED_CHANNEL, self._tenant_schema))
             return
         await conn.execute("SELECT pg_notify(%s || '_' || current_schema(), ''), "
                            "pg_notify(%s, current_schema())", (CHANNEL, SHARED_CHANNEL))
-        if self._marks_wake:
+        if self._marks_wake == "schema":
+            await conn.execute(MARK_WAKE_SQL, (self._tenant_schema,))
+        elif self._marks_wake:
             # Commits with the work: the wake survives a NOTIFY nobody heard.
             await conn.execute(
                 sql.SQL("UPDATE {0}.tenant_state s SET next_wake_at = LEAST(s.next_wake_at, now()) "
@@ -812,6 +851,12 @@ class PostgresCore(DueWriter, PostgresUsage):
                             *, schedules: bool = True) -> datetime | None:
         async with self._conn() as conn:
             return await earliest_work_at(conn, sinks, schedules=schedules)
+
+    async def work_state(self) -> WorkState:
+        now = self._clock()
+        async with self._conn() as conn:
+            cursor = await conn.execute(WORK_STATE_SQL, {"now": now})
+            return work_state_of(await cursor.fetchall())
 
     async def has_claimable(self, lane: Lane) -> bool:
         async with self._conn() as conn:

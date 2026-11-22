@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
+from .base import WorkSignal, WorkState
 from .usage import SQLiteUsage
 from .due_work import DueWriter
 from .run_failures import (
@@ -171,7 +172,7 @@ class SQLiteCore(DueWriter, SQLiteUsage):
         self._clock = clock
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="handler-store")
         self._db: sqlite3.Connection | None = None
-        self._wake = asyncio.Event()
+        self._wake = WorkSignal()
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
 
@@ -286,6 +287,23 @@ class SQLiteCore(DueWriter, SQLiteUsage):
                 return leases
 
         return await self._call(write)
+
+    async def work_state(self) -> WorkState:
+        def read(db: sqlite3.Connection) -> WorkState:
+            now = _timestamp(self._clock())
+            rows = db.execute(
+                "SELECT lane, MAX(ready) AS ready, MIN(CASE WHEN ready = 0 THEN "
+                "MAX(COALESCE(available_at, pending_since), COALESCE(lease_until, pending_since)) "
+                "END) AS later FROM (SELECT lane, available_at, lease_until, pending_since, "
+                "((available_at IS NULL OR available_at <= ?) "
+                "AND (lease_until IS NULL OR lease_until < ?)) AS ready FROM threads "
+                "WHERE pending_since IS NOT NULL AND dead = 0) GROUP BY lane",
+                (now, now)).fetchall()
+            lanes = frozenset(Lane(row["lane"]) for row in rows if row["ready"])
+            later = [row["later"] for row in rows if row["later"] is not None]
+            return WorkState(lanes, datetime.fromisoformat(min(later)) if later else None)
+
+        return await self._call(read)
 
     async def has_claimable(self, lane: Lane) -> bool:
         def read(db: sqlite3.Connection) -> bool:

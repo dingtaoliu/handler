@@ -94,7 +94,7 @@ async def test_control_schema_holds_no_tenant_tables(tenants, pg_dsn):
     found = {r[0] for r in rows(
         pg_dsn, "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
         CONTROL_SCHEMA)}
-    assert found == {"tenant_schema_versions", "due_work"}  # control data, no tenant tables
+    assert found == {"tenant_schema_versions", "due_work", "tenant_state"}  # control data only
 
 
 async def test_pool_connections_are_transactional(tenants, hub):

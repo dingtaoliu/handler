@@ -8,7 +8,9 @@ write is rejected (returns False) and nothing is changed.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -38,6 +40,33 @@ if TYPE_CHECKING:
     from .thread_imports import ImportOutcome, ThreadImport
 
 
+class WorkSignal(asyncio.Event):
+    """A store's in-process "work may be waiting" signal.
+
+    Setting it also tells `listener` (the host's claim loop, step 3), so one loop can
+    hear every tenant's store without a task per store.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listener: Callable[[], None] | None = None
+
+    def set(self) -> None:
+        super().set()
+        if self.listener is not None:
+            self.listener()
+
+
+@dataclass(frozen=True)
+class WorkState:
+    """What `claim` would find in one tenant: lanes claimable now, and the earliest
+    time a pending thread that isn't claimable now becomes so (a retry's
+    `available_at`, or a live lease's `lease_until`, which a crash lets expire)."""
+
+    lanes: frozenset[Lane] = frozenset()
+    next_at: datetime | None = None
+
+
 class EventQueue(Protocol):
     async def put(self, event: Event, thread: ThreadSpec | None) -> bool:
         """Durably store an event and, if `thread` is given, route it.
@@ -64,6 +93,10 @@ class EventQueue(Protocol):
 
     async def has_claimable(self, lane: Lane) -> bool:
         """Whether `claim` would find a thread in `lane` now (the run gate queues on it)."""
+        ...
+
+    async def work_state(self) -> WorkState:
+        """Claimable lanes now and the next time more becomes claimable (one query)."""
         ...
 
     async def heartbeat(self, lease: Lease, lease_seconds: float) -> Lease | None:

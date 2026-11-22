@@ -14,6 +14,11 @@ from typing import Any
 
 PENDING, DELIVERED, DEAD = "pending", "delivered", "dead"
 
+MARK_DELIVERY_SQL = (
+    "UPDATE handler_control.tenant_state SET next_delivery_at = "
+    "LEAST(next_delivery_at, %s), delivery_version = delivery_version + 1 "
+    "WHERE schema_name = %s")
+
 
 @dataclass(frozen=True)
 class Delivery:
@@ -49,7 +54,18 @@ def _delivery(row: Any) -> Delivery:
 
 
 class _Deliveries:
-    """Backend-neutral SQL; subclasses supply _dq (query) and _ts (timestamp)."""
+    """Backend-neutral SQL; subclasses supply _dq (query) and _ts (timestamp).
+
+    A write that makes a row due (`mark`: when) tells the host's outbox loop: in its
+    transaction on a hub (tenant_state.next_delivery_at), and in process through
+    `on_delivery_due`.
+    """
+
+    on_delivery_due = None  # Callable[[], None]: the host outbox loop's hint
+
+    def _delivery_due(self) -> None:
+        if self.on_delivery_due is not None:
+            self.on_delivery_due()
 
     async def enqueue_delivery(self, sink: str, key: str, payload: dict[str, Any]) -> bool:
         """Queue one delivery; False when (sink, key) already exists (idempotent)."""
@@ -58,8 +74,10 @@ class _Deliveries:
             "INSERT INTO deliveries (sink, key, payload, status, attempts, next_attempt_at, "
             "created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?) "
             "ON CONFLICT (sink, key) DO NOTHING RETURNING key",
-            (sink, key, self._json(payload), PENDING, now, now, now),
+            (sink, key, self._json(payload), PENDING, now, now, now), mark=self._clock(),
         )
+        if rows:
+            self._delivery_due()
         return bool(rows)
 
     async def get_delivery(self, sink: str, key: str) -> Delivery | None:
@@ -93,6 +111,7 @@ class _Deliveries:
             "UPDATE deliveries SET status = ?, attempts = attempts + 1, last_error = ?, "
             "next_attempt_at = ?, updated_at = ? WHERE sink = ? AND key = ? RETURNING key",
             (status, error[:2000], self._ts(due), self._ts(now), sink, key),
+            mark=due if retry_in_seconds is not None else None,
         )
 
 
@@ -107,9 +126,21 @@ class _Deliveries:
         rows = await self._dq(
             "UPDATE deliveries SET status = ?, attempts = 0, next_attempt_at = ?, "
             f"updated_at = ? WHERE sink = ? AND status = ? {where}RETURNING key",
-            (PENDING, now, now, sink, DEAD, *params),
+            (PENDING, now, now, sink, DEAD, *params), mark=self._clock(),
         )
+        if rows:
+            self._delivery_due()
         return len(rows)
+
+    async def next_delivery_at(self, sinks: list[str]) -> datetime | None:
+        """When the earliest pending row of these sinks is due (the outbox loop)."""
+        if not sinks:
+            return None
+        marks = ",".join("?" for _ in sinks)
+        rows = await self._dq(
+            f"SELECT MIN(next_attempt_at) AS due FROM deliveries WHERE status = ? "
+            f"AND sink IN ({marks})", (PENDING, *sinks))
+        return _date(rows[0]["due"]) if rows else None
 
 
 class SQLiteDeliveries(_Deliveries):
@@ -119,7 +150,7 @@ class SQLiteDeliveries(_Deliveries):
     def _json(self, value: dict) -> str:
         return json.dumps(value, default=str)
 
-    async def _dq(self, query: str, parameters: tuple) -> list[dict]:
+    async def _dq(self, query: str, parameters: tuple, mark=None) -> list[dict]:
         def run(db):
             return [dict(row) for row in db.execute(query, parameters)]
         return await self._call(run)
@@ -158,10 +189,14 @@ class PostgresDeliveries(_Deliveries):
         from psycopg.types.json import Jsonb
         return Jsonb(value)
 
-    async def _dq(self, query: str, parameters: tuple) -> list[dict]:
+    async def _dq(self, query: str, parameters: tuple, mark=None) -> list[dict]:
         async with self._conn() as conn:
             cursor = await conn.execute(query.replace("?", "%s"), parameters)
-            return await cursor.fetchall() if cursor.description else []
+            rows = await cursor.fetchall() if cursor.description else []
+            if mark is not None and rows and self._hub is not None:
+                # Commits with the row: the outbox loop finds it from handler_control.
+                await conn.execute(MARK_DELIVERY_SQL, (mark, self._tenant_schema))
+            return rows
 
     async def claim_deliveries(
         self, sinks: list[str], limit: int = 20, lease_seconds: float = 60.0
