@@ -754,11 +754,20 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
         if tenant is None or not tenant.enabled:
             raise LookupError(f"tenant {name!r} is not enabled")
         name, cfg, scoped, base = tenant_instance_config(args, env, tenant, box)
+        # One LiveLimits per tenant across rebuilds: a context still in use (an open
+        # stream, a running run) follows the new plan too, so a call from an older
+        # tool view is refused at once.
+        limits = live_limits.get(name)
+        if limits is None:
+            limits = live_limits[name] = LiveLimits(limits_for(tenant))
+        else:
+            limits.current = limits_for(tenant)
         return await build_tenant_context(
             cfg, scoped, base_path=base, instance_name=name, hub=hub,
-            plan_limits=LiveLimits(limits_for(tenant)),
+            plan_limits=limits,
             allowed_harnesses=allowed_harnesses, host=services)
 
+    live_limits: dict[str, LiveLimits] = {}
     services.cache.build = build
     tenants = TenantHost(registry, services, hub, limits_for=limits_for,
                          scan_seconds=float(env.get("HANDLER_TENANT_SCAN_SECONDS", "15")))

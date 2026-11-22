@@ -170,11 +170,11 @@ async def test_a_plan_change_made_elsewhere_is_applied_by_load(base_env, pg_dsn,
                                                  lambda: "unused")
         await app.state.tenants.load()
         await until(lambda: rows(pg_dsn, "SELECT count(*) FROM handler_m42.held_inputs")[0][0] == 0)
-        assert live_store(app).limits.current.plan == "paid"
-        assert slot(app).stale  # its new config waits for the next quiet restart
+        assert live_store(app).limits.current.plan == "paid"  # a fresh context
+        builds = spy.starts["m42"]
         # The platform's own report afterwards still sees nothing left to do.
         await app.state.tenants.tenant_changed("m42")
-        assert spy.starts["m42"] == 1
+        assert spy.starts["m42"] == builds  # no plan change: dropped, not rebuilt
 
 
 async def test_limits_are_resolved_only_when_they_change(base_env, monkeypatch):
