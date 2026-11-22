@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from .usage import SQLiteUsage
+from .due_work import DueWriter
 from .run_failures import (
     ALREADY_REPLAYED,
     FAILED_BEFORE_UPGRADE,
@@ -154,7 +155,7 @@ def _latest_on_thread(db: sqlite3.Connection, key: str, run_id: str, now: str) -
     return busy is None and pending is None
 
 
-class SQLiteCore(SQLiteUsage):
+class SQLiteCore(DueWriter, SQLiteUsage):
     """Core tables (events, threads, runs, messages, steps) and DB plumbing.
 
     Domain mixins (schedules, approvals, memory, ...) live in sqlite_<domain>.py,
@@ -731,12 +732,13 @@ from .deliveries import SQLiteDeliveries  # noqa: E402
 from .tasks import TaskQueries  # noqa: E402
 from .task_outcomes import TaskOutcomeStore  # noqa: E402
 from .thread_metadata import SQLiteThreadMetadata  # noqa: E402
+from .due_work import SQLiteDueWork  # noqa: E402
 
 
 class SQLiteStore(
     TaskOutcomeStore, TaskQueries, RunFailures, SQLiteThreadMetadata, SQLiteDeliveries, ScheduleMixin, ApprovalMixin,
     QuestionMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
-    NotificationMixin, ConnectionMixin, UsersMixin, SQLiteCore,
+    NotificationMixin, ConnectionMixin, UsersMixin, SQLiteDueWork, SQLiteCore,
 ):
     """The full SQLite store: core plus every domain mixin."""

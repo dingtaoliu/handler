@@ -456,8 +456,16 @@ class RunExecutor:
         self.raw_sink = RawSink(config.raw_dir)
         self.uploads = UploadStore(config.data_dir / "uploads")
         self.workspace_sync = workspace_sync or WorkspaceSync(None, config.data_dir)
+        # Run before each claimed thread runs: e.g. the grants version check, so a
+        # grants change saved by another process applies from the next run.
+        self.before_run: Callable[[], Awaitable[None]] | None = None
 
     async def execute(self, lease: Lease) -> None:
+        if self.before_run is not None:
+            try:
+                await self.before_run()
+            except Exception:  # noqa: BLE001 - the run goes ahead with what it has
+                logger.warning("pre-run refresh failed", exc_info=True)
         thread = await self.store.get_thread(lease.thread_key)
         if thread is not None:
             await self._enforce_plan_harness(thread)

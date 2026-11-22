@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -60,26 +59,28 @@ def parse_spec(spec: str, tz: str, after: datetime) -> tuple[datetime | None, bo
 
 
 class Scheduler:
+    """Fires automations. The host timer calls `fire_due` for each `schedule.fire` row
+    (store/due_work.py), which the schedule's own writes keep at its next_run_at;
+    `tick` fires everything due at once (tests, and a catch-up without the timer)."""
+
     def __init__(
         self,
         store: ScheduleStore,
         *,
         clock: Callable[[], datetime] = utcnow,
         default_harness: HarnessSource = "codex",
-        max_sleep_seconds: float = 300,
     ) -> None:
-        if max_sleep_seconds <= 0:
-            raise ValueError("max_sleep_seconds must be greater than zero")
         self.store = store
         self.clock = clock
         self.default_harness = default_harness
-        self.max_sleep_seconds = max_sleep_seconds
-        self._wake = asyncio.Event()
         self.on_skipped: Callable[[Schedule, OverLimit], Awaitable[None]] | None = None
         self.paused: Callable[[], bool] | None = None  # a plan without automations
+        self.on_wake: Callable[[], None] | None = None  # the host timer's wake
 
     def wake(self) -> None:
-        self._wake.set()
+        """A schedule changed. Its due row was written with it; this only hints."""
+        if self.on_wake is not None:
+            self.on_wake()
 
     def _is_paused(self) -> bool:
         return self.paused is not None and self.paused()
@@ -91,66 +92,70 @@ class Scheduler:
         fired = 0
         while schedules := await self.store.due_schedules(now):
             for schedule in schedules:
-                expected = schedule.next_run_at
-                assert expected is not None  # due_schedules excludes null next_run_at
-                try:
-                    next_run, one_shot = parse_spec(schedule.spec, schedule.timezone, expected)
-                except ValueError:
-                    # A bad stored spec must not stop every other automation.
-                    logger.exception("disabling schedule %s with invalid spec", schedule.id)
-                    schedule.enabled = False
-                    await self.store.update_schedule(schedule)
-                    continue
-                if schedule.one_shot or one_shot:
-                    next_run = None
-                elif next_run is not None and next_run <= now:
-                    next_run, _ = parse_spec(schedule.spec, schedule.timezone, now)
-                key = f"automation:{schedule.id}"
-                event = Event(
-                    type="automation.fired", source="scheduler",
-                    payload={
-                        "schedule_id": schedule.id, "name": schedule.name,
-                        "prompt": schedule.prompt, "fired_at": now.isoformat(),
-                        "notify": schedule.notify,
-                        "parent_thread_key": schedule.parent_thread_key,
-                    },
-                    idempotency_key=f"automation:{schedule.id}:{expected.isoformat()}",
-                    thread_key=key, user_id=schedule.created_by, received_at=now,
-                )
-                thread = ThreadSpec(
-                    key, ThreadType.AUTOMATION, Lane.BACKGROUND,
-                    owner_user_id=schedule.created_by,
-                    harness=schedule.harness or await resolve_harness(self.default_harness), model=schedule.model,
-                )
-                outcome = await self.store.fire_schedule(schedule, expected, next_run, event, thread)
-                if isinstance(outcome, OverLimit):
-                    logger.info("automation skipped: input limit",
-                                extra={"schedule": schedule.id, "used": outcome.used})
-                    if outcome.notify and self.on_skipped is not None:
-                        try:
-                            await self.on_skipped(schedule, outcome)
-                        except Exception:
-                            logger.exception("skip notice failed", extra={"schedule": schedule.id})
-                    continue
-                fired += outcome
+                fired += await self._fire(schedule, now)
         return fired
 
-    async def run_forever(self, stop: asyncio.Event) -> None:
-        while not stop.is_set():
-            # Clear before reading storage, so a wake during a read is retained.
-            self._wake.clear()
-            try:
-                await self.tick()
-            except Exception:
-                logger.exception("scheduler tick failed")
-            next_due = None if self._is_paused() else await self.store.next_due_at()
-            delay = self.max_sleep_seconds
-            if next_due is not None:
-                delay = min(delay, max(0.0, (next_due - self.clock()).total_seconds()))
-            waiters = [asyncio.create_task(self._wake.wait()), asyncio.create_task(stop.wait())]
-            try:
-                await asyncio.wait(waiters, timeout=delay, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                for waiter in waiters:
-                    waiter.cancel()
-                await asyncio.gather(*waiters, return_exceptions=True)
+    async def fire_due(self, schedule_id: str) -> datetime | None:
+        """One `schedule.fire` row: fire it if due; return when it is due next.
+
+        A next_run_at long past fires once, then moves to the next slot from now
+        (missed intervals are not replayed). A paused schedule's row is dropped:
+        the plan change that allows automations again backfills it.
+        """
+        schedule = await self.store.get_schedule(schedule_id)
+        if schedule is None or not schedule.enabled or schedule.next_run_at is None:
+            return None
+        if self._is_paused():
+            return None
+        now = self.clock().astimezone(timezone.utc)
+        if schedule.next_run_at > now:
+            return schedule.next_run_at
+        await self._fire(schedule, now)
+        current = await self.store.get_schedule(schedule_id)
+        return (current.next_run_at if current is not None and current.enabled
+                else None)
+
+    async def _fire(self, schedule: Schedule, now: datetime) -> int:
+        expected = schedule.next_run_at
+        assert expected is not None  # due_schedules excludes null next_run_at
+        try:
+            next_run, one_shot = parse_spec(schedule.spec, schedule.timezone, expected)
+        except ValueError:
+            # A bad stored spec must not stop every other automation.
+            logger.exception("disabling schedule %s with invalid spec", schedule.id)
+            schedule.enabled = False
+            await self.store.update_schedule(schedule)
+            return 0
+        if schedule.one_shot or one_shot:
+            next_run = None
+        elif next_run is not None and next_run <= now:
+            next_run, _ = parse_spec(schedule.spec, schedule.timezone, now)
+        key = f"automation:{schedule.id}"
+        event = Event(
+            type="automation.fired", source="scheduler",
+            payload={
+                "schedule_id": schedule.id, "name": schedule.name,
+                "prompt": schedule.prompt, "fired_at": now.isoformat(),
+                "notify": schedule.notify,
+                "parent_thread_key": schedule.parent_thread_key,
+            },
+            idempotency_key=f"automation:{schedule.id}:{expected.isoformat()}",
+            thread_key=key, user_id=schedule.created_by, received_at=now,
+        )
+        thread = ThreadSpec(
+            key, ThreadType.AUTOMATION, Lane.BACKGROUND,
+            owner_user_id=schedule.created_by,
+            harness=schedule.harness or await resolve_harness(self.default_harness),
+            model=schedule.model,
+        )
+        outcome = await self.store.fire_schedule(schedule, expected, next_run, event, thread)
+        if isinstance(outcome, OverLimit):
+            logger.info("automation skipped: input limit",
+                        extra={"schedule": schedule.id, "used": outcome.used})
+            if outcome.notify and self.on_skipped is not None:
+                try:
+                    await self.on_skipped(schedule, outcome)
+                except Exception:
+                    logger.exception("skip notice failed", extra={"schedule": schedule.id})
+            return 0
+        return int(outcome)

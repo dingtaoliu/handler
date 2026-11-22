@@ -206,6 +206,16 @@ class QuestionService:
                 count += await self._expire(question)
         return count
 
+    async def expire_due(self, question_id: str) -> datetime | None:
+        """One `question.expire` row (host timer): expire it if its time has come."""
+        question = await self._store.get_question(question_id)
+        if question is None or question.status != QuestionStatus.PENDING or not question.expires_at:
+            return None
+        if question.expires_at > self._clock():
+            return question.expires_at
+        await self._expire(question)
+        return None
+
     async def _expire(self, question: Question) -> int:
         moved = await self._store.transition_question(
             question.id, QuestionStatus.PENDING, QuestionStatus.EXPIRED)

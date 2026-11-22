@@ -4,7 +4,8 @@ from handler.runtime.integrations.base import IntegrationConfig
 from handler.runtime.integrations.mailbox.poller import MailboxPoller
 from handler.runtime.run import render_turn
 from handler.runtime.settings import ThreadsSettings
-from handler.runtime.types import Event
+from handler.runtime.types import Event, utcnow
+from datetime import datetime, timedelta
 
 
 
@@ -29,31 +30,58 @@ async def test_poller_backs_off_and_notifies_once_on_login_failure(env):
     notes, clock = Notes(), Clock()
     poller = MailboxPoller(env.service, env.mail_store, notifier=notes, clock=clock)
     env.server.password = "rotated"  # stored password is now wrong
-    poller.poll_soon(mailbox.id)
-    await poller.tick()
-    await poller.wait_idle()
+    before = utcnow()
+    due = await poller.poll_due(mailbox.id)
     stored = await env.mail_store.get_mailbox(mailbox.id)
     assert stored.status == "auth_failed" and "login failed" in stored.last_error
     assert len(notes.sent) == 1 and notes.sent[0][2] == ["7"]
-    assert poller._due[mailbox.id] >= clock.now + 240  # backed off
-    clock.now += 10_000
-    await poller.tick()
-    await poller.wait_idle()
+    assert due >= before + timedelta(seconds=240)  # backed off
+    await poller.poll_due(mailbox.id)
     assert len(notes.sent) == 1  # not repeated while still failing
     env.server.password = "code-1234"
-    clock.now += 10_000
-    await poller.tick()
-    await poller.wait_idle()
+    due = await poller.poll_due(mailbox.id)
     stored = await env.mail_store.get_mailbox(mailbox.id)
     assert stored.status == "active" and stored.last_error is None
+    assert due <= utcnow() + timedelta(seconds=mailbox.poll_seconds)  # backoff cleared
 
 
 async def test_disabled_mailboxes_are_not_polled(env):
     mailbox = await env.add_mailbox(enabled=False)
     poller = MailboxPoller(env.service, env.mail_store, clock=Clock())
-    poller.poll_soon(mailbox.id)
-    await poller.tick()
+    assert await poller.poll_due(mailbox.id) is None
     assert env.transport.imap_opens == 0
+
+
+async def test_each_enabled_mailbox_has_one_due_row_written_with_it(env):
+    on = await env.add_mailbox()
+    off = await env.add_mailbox(email="off@example.cn", enabled=False)
+    rows = {(r["kind"], r["ref"]) for r in await env.store.due_rows()}
+    assert ("mailbox.poll", on.id) in rows and ("mailbox.poll", off.id) not in rows
+    first = next(r for r in await env.store.due_rows() if r["ref"] == on.id)
+    await env.mail_store.put_mailbox(on)  # an ordinary save keeps the due time
+    again = next(r for r in await env.store.due_rows() if r["ref"] == on.id)
+    assert again["due_at"] == first["due_at"]
+    on.enabled = False
+    await env.mail_store.put_mailbox(on)
+    assert not [r for r in await env.store.due_rows() if r["kind"] == "mailbox.poll"]
+    on.enabled = True
+    await env.mail_store.put_mailbox(on)
+    await env.mail_store.delete_mailbox(on.id)
+    assert not [r for r in await env.store.due_rows() if r["kind"] == "mailbox.poll"]
+    del off
+
+
+async def test_backfill_matches_rows_to_mailboxes_and_poll_soon_moves_to_now(env):
+    mailbox = await env.add_mailbox()
+    await env.store.set_due("mailbox.poll", "mbx_gone", utcnow())
+    await env.store.set_due("mailbox.poll", mailbox.id, utcnow() + timedelta(hours=1))
+    poller = MailboxPoller(env.service, env.mail_store)
+    await poller.backfill()
+    rows = {r["ref"]: r for r in await env.store.due_rows() if r["kind"] == "mailbox.poll"}
+    assert set(rows) == {mailbox.id}  # the gone one removed, the existing time kept
+    await poller.poll_soon(mailbox.id)
+    rows = {r["ref"]: r for r in await env.store.due_rows() if r["kind"] == "mailbox.poll"}
+    assert datetime.fromisoformat(rows[mailbox.id]["due_at"]) <= utcnow()
 
 
 def test_mail_event_renders_mode_and_escapes_untrusted_text():

@@ -92,7 +92,7 @@ async def test_control_schema_holds_no_tenant_tables(tenants, pg_dsn):
     found = {r[0] for r in rows(
         pg_dsn, "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
         CONTROL_SCHEMA)}
-    assert found == {"tenant_schema_versions"}
+    assert found == {"tenant_schema_versions", "due_work"}  # control data, no tenant tables
 
 
 async def test_pool_connections_are_transactional(tenants, hub):
@@ -396,7 +396,7 @@ def quiet_host(monkeypatch, no_codex):
         await stop.wait()
 
     monkeypatch.setattr(server.Dispatcher, "run_forever", idle)
-    monkeypatch.setattr(server.Scheduler, "run_forever", idle)
+    monkeypatch.setattr(server.HostTimer, "run", idle)
 
 
 def admin(name):

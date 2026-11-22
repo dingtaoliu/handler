@@ -23,6 +23,7 @@ from .base import (
     PromptFragment,
     SettingsSection,
     ThreadTypeSpec,
+    TimerKind,
     UIManifestEntry,
 )
 
@@ -68,6 +69,7 @@ class LoadedIntegrations:
     prompt_fragments: list[tuple[str, PromptFragment]] = field(default_factory=list)
     settings_defaults: dict[str, tuple[str, dict]] = field(default_factory=dict)
     ui_entries: list[tuple[str, UIManifestEntry]] = field(default_factory=list)
+    timer_kinds: dict[str, tuple[str, TimerKind]] = field(default_factory=dict)
     configured: bool = True  # False when HANDLER_INTEGRATIONS is unset
 
     @property
@@ -175,7 +177,8 @@ class IntegrationRegistry:
 
     def load(self, names: list[str], *, instance_name: str = "",
              env: Mapping[str, str] | None = None, base_path: str = "",
-             reserved_thread_types: frozenset[str] = frozenset()) -> LoadedIntegrations:
+             reserved_thread_types: frozenset[str] = frozenset(),
+             reserved_timer_kinds: frozenset[str] = frozenset()) -> LoadedIntegrations:
         where = instance_name or "instance"
         unknown = [n for n in names if n not in self._factories]
         if unknown:
@@ -229,6 +232,14 @@ class IntegrationRegistry:
                         f"{where}: default {section!r} settings from {n!r} duplicate those "
                         f"from {loaded.settings_defaults[section][0]!r}")
                 loaded.settings_defaults[section] = (n, value)
+            for kind in integration.timer_kinds():
+                if kind.name in loaded.timer_kinds or kind.name in reserved_timer_kinds:
+                    owner = (loaded.timer_kinds[kind.name][0] if kind.name in loaded.timer_kinds
+                             else "core")
+                    raise IntegrationError(
+                        f"{where}: timer kind {kind.name!r} from {n!r} duplicates one "
+                        f"from {owner!r}")
+                loaded.timer_kinds[kind.name] = (n, kind)
             loaded.prompt_fragments.extend((n, f) for f in integration.prompt_fragments())
             loaded.ui_entries.extend((n, e) for e in integration.ui_entries())
         return loaded

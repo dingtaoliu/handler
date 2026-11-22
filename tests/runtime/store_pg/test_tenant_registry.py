@@ -959,7 +959,7 @@ async def test_registry_off_leaves_env_hosting_untouched(base_env, pg_dsn, spy):
             assert (await client.get("/platform/tenants", headers=PLATFORM)).status_code != 200
     tables = {r[0] for r in rows(pg_dsn, "SELECT table_name FROM information_schema.tables "
                                          "WHERE table_schema = 'handler_control'")}
-    assert tables == {"tenant_schema_versions"}
+    assert tables == {"tenant_schema_versions", "due_work"}
 
 
 async def test_registry_needs_its_keys_and_database(base_env, tmp_path):

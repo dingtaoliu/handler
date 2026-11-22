@@ -82,7 +82,7 @@ async def running(tmp_path, monkeypatch, caplog):
     async def idle(self, stop, *args):
         await stop.wait()
     monkeypatch.setattr(server.Dispatcher, 'run_forever', idle)
-    monkeypatch.setattr(server.Scheduler, 'run_forever', idle)
+    monkeypatch.setattr(server.HostTimer, 'run', idle)
     def no_codex():
         raise FileNotFoundError('test has no codex')
     monkeypatch.setattr(server, 'codex_binary', no_codex)
@@ -171,7 +171,7 @@ async def test_host_rolls_back_startup_and_closes_concurrently(tmp_path, monkeyp
     entered, closed = [], []
     @contextlib.asynccontextmanager
     async def runtime(args, env, *, base_path, instance_name, hub=None, gate=None,
-                      allowed_harnesses=None):
+                      allowed_harnesses=None, host=None):
         entered.append(instance_name)
         if instance_name == 'bss':
             raise RuntimeError('startup failed')
@@ -189,7 +189,7 @@ async def test_host_rolls_back_startup_and_closes_concurrently(tmp_path, monkeyp
     drained = asyncio.Event()
     @contextlib.asynccontextmanager
     async def runtime(args, env, *, base_path, instance_name, hub=None, gate=None,
-                      allowed_harnesses=None):
+                      allowed_harnesses=None, host=None):
         try:
             yield server.FastAPI()
         finally:
@@ -243,7 +243,7 @@ async def test_single_instance_preserves_root_routes(tmp_path, monkeypatch, inst
     async def idle(self, stop, *args):
         await stop.wait()
     monkeypatch.setattr(server.Dispatcher, 'run_forever', idle)
-    monkeypatch.setattr(server.Scheduler, 'run_forever', idle)
+    monkeypatch.setattr(server.HostTimer, 'run', idle)
     monkeypatch.setattr(server, 'codex_binary', lambda: 'unused')
     host = server.create_host(server._parse_args(['serve'], env), env)
     async with host.router.lifespan_context(host):
@@ -283,7 +283,7 @@ async def serving(env, monkeypatch):
     async def idle(self, stop, *args):
         await stop.wait()
     monkeypatch.setattr(server.Dispatcher, 'run_forever', idle)
-    monkeypatch.setattr(server.Scheduler, 'run_forever', idle)
+    monkeypatch.setattr(server.HostTimer, 'run', idle)
     def no_codex():
         raise FileNotFoundError('test has no codex')
     monkeypatch.setattr(server, 'codex_binary', no_codex)
@@ -374,7 +374,7 @@ async def test_host_allow_list_reaches_every_instance_and_cannot_be_widened(tmp_
     seen = {}
     @contextlib.asynccontextmanager
     async def runtime(args, env, *, base_path, instance_name, hub=None, gate=None,
-                      allowed_harnesses=None):
+                      allowed_harnesses=None, host=None):
         seen[instance_name] = allowed_harnesses
         yield server.FastAPI()
     monkeypatch.setattr(server, 'instance_runtime', runtime)
