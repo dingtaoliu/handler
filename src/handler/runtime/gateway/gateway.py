@@ -351,6 +351,16 @@ class Gateway:
                 count += await self._expire(approval)
         return count
 
+    async def expire_due(self, approval_id: str) -> datetime | None:
+        """One `approval.expire` row (host timer): expire it if its time has come."""
+        approval = await self._store.get_approval(approval_id)
+        if approval is None or approval.status != ApprovalStatus.PENDING or not approval.expires_at:
+            return None
+        if approval.expires_at > self._clock():
+            return approval.expires_at
+        await self._expire(approval)
+        return None
+
     async def _expire(self, approval: Approval) -> int:
         moved = await self._store.transition_approval(
             approval.id, ApprovalStatus.PENDING, ApprovalStatus.EXPIRED,

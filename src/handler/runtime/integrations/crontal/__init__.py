@@ -5,11 +5,11 @@ Contributes, from the same config vars as the legacy wiring in `server.py`
 each piece turns on only when its vars are set):
 - thread type `crontal` (a built-in `ThreadType` value; instructions stay in
   the settings thread defaults);
-- `/ingest/crontal` (`web.ingest.crontal_ingest_router`) when the webhook
-  secret is set;
+- `/ingest/crontal` (`web.ingest.crontal_ingest_router_for`), registered once on
+  the host's app and served to a tenant whose webhook secret is set;
 - `CrontalApiTools` (`crontal_api_*`) when URL and token are set;
-- the curated `crontal.*` MCP tools, registered by a background task once
-  Crontal is reachable, when the URL is set;
+- the curated `crontal.*` MCP tools, discovered while the context loads from the
+  host's cached listing (`connector.py`), when URL and token are set;
 - the Crontal notification sink (`sink.py`) when URL and secret are set;
 - default memory kinds (inquiry, company, conversation; `memory_kinds.py`).
 """
@@ -18,7 +18,6 @@ from __future__ import annotations
 from typing import Any
 
 from ..base import (
-    BackgroundTask,
     Integration,
     IntegrationConfig,
     IntegrationContext,
@@ -48,13 +47,18 @@ class CrontalIntegration(Integration):
         return [ThreadTypeSpec(name="crontal", lane="background", visibility="shared",
                                acts_as="instance", label="Crontal")]
 
-    def routers(self, ctx: IntegrationContext) -> list[Any]:
-        if not self.webhook_secret:
-            return []
-        from ...web.ingest import crontal_ingest_router
+    def routers(self, tenant) -> list[Any]:
+        from ...web.ingest import crontal_ingest_router_for
 
-        return [crontal_ingest_router(ctx.store, self.webhook_secret,
-                                      harness=ctx.settings.harness_source("crontal"))]
+        def binding():
+            ctx = tenant.context()
+            return (ctx.store, tenant.integration().webhook_secret,
+                    ctx.settings.harness_source("crontal"))
+
+        return [crontal_ingest_router_for(binding)]
+
+    def serves_routes(self, ctx: IntegrationContext) -> bool:
+        return bool(self.webhook_secret)
 
     def tool_sets(self, ctx: IntegrationContext) -> list[Any]:
         if not (self.crontal_url and self.agent_token):
@@ -74,14 +78,21 @@ class CrontalIntegration(Integration):
                                         self.webhook_secret, ctx.instance_name)
         return [sink] if sink is not None else []
 
-    def background_tasks(self, ctx: IntegrationContext) -> list[BackgroundTask]:
+    async def load(self, ctx: IntegrationContext) -> bool:
         if not self.crontal_url:
-            return []
-        from .connector import run_crontal_connector
+            return True
+        tools = ctx.extra.get("crontal_tools")
+        if tools is None:
+            tools = ctx.extra["crontal_tools"] = crontal_tools(ctx, self.crontal_url,
+                                                               self.agent_token)
+        return await tools.ensure()
 
-        url, token, gateway = self.crontal_url, self.agent_token, ctx.gateway
 
-        async def run(stop):
-            await run_crontal_connector(url, token, gateway, stop)
+def crontal_tools(ctx: IntegrationContext, url: str | None, token: str | None):
+    """The tenant's curated Crontal tools, from the host's cached discovery."""
+    from .connector import CrontalTools, default_discovery
 
-        return [BackgroundTask("crontal-connector", run)]
+    services = ctx.services
+    discovery = getattr(services, "crontal_discovery", None) or default_discovery()
+    return CrontalTools(discovery, url, token, ctx.gateway, ctx.instance_name or "main",
+                        on_registered=ctx.extra.get("on_tools_changed"))

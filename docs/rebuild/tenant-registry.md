@@ -15,9 +15,12 @@ this code.
 | `HANDLER_TENANT_REGISTRY` | off | `1` hosts tenants from the database |
 | `HANDLER_PLATFORM_KEY` | required | Bearer key for `/platform/*`. Never an admin key, never in a tenant's environment |
 | `HANDLER_TENANT_SECRET_KEY` | required | Seals tenants' secrets. Changing it makes them unreadable and stops startup |
-| `HANDLER_TENANT_IDLE_SECONDS` | 600 | Idle time before a tenant stops |
-| `HANDLER_TENANT_SCAN_SECONDS` | 15 | Host scan interval, also the latest a durable wake is noticed |
-| `HANDLER_TENANT_BOOT_GRACE_SECONDS` | 120 | When the second boot sweep runs |
+| `HANDLER_TENANT_CACHE_SIZE` | 32 | Tenant contexts kept built (LRU); a context in use is never closed, so the cache may briefly exceed it |
+| `HANDLER_TENANT_CACHE_TTL_SECONDS` | 600 | An unused context is closed after this |
+| `HANDLER_CLAIM_POLL_SECONDS` | 5 | The claim loop's backstop poll of `tenant_state` (signals wake it at once) |
+| `HANDLER_OUTBOX_POLL_SECONDS` | 5 | The outbox loop's backstop poll |
+| `HANDLER_OUTBOX_BATCH` / `HANDLER_OUTBOX_CONCURRENCY` | 20 / 4 | Deliveries per tenant per round; tenants delivered at once |
+| `HANDLER_TENANT_SCAN_SECONDS` | 15 | Spool replay interval (the host's request-side scan) |
 | `HANDLER_GLOBAL_MAX_RUNS` | 6 | Runs at once, whole process |
 | `HANDLER_PLAN_RUN_CAPS` | `free:1,paid:3` | Runs at once per tenant, by plan. An unknown plan gets the lowest |
 | `HANDLER_RUN_MAX_WAIT_SECONDS` | 60 | After this a waiting free tenant ranks with paid ones, and waiting background work goes ahead of chats (once; its wait then restarts) |
@@ -70,35 +73,64 @@ accepted:
 If `HANDLER_ADMIN_KEY` is omitted at creation one is generated and returned once,
 as `admin_key`. Every check `instance_configs` makes runs on each write, and a
 conflict returns 409. A `HANDLER_DEFAULT_HARNESS` that is unknown or outside
-`HANDLER_ALLOWED_HARNESSES` returns 422. Changes to a running tenant apply when it next restarts,
-which happens as soon as it is quiescent.
+`HANDLER_ALLOWED_HARNESSES` returns 422. A change retires the tenant's cached context
+(`NOTIFY handler_tenant_changed`, heard by every process): the next request, run, firing
+or delivery builds a fresh one with the new secrets, config, integrations and plan.
+Work in progress finishes on the old context, which follows the new plan's limits at
+once (one `LiveLimits` per tenant).
 
-## Lifecycle
+## Lifecycle: a tenant is context (shared runtime step 3)
 
-A tenant runs only while it has a reason to. It **activates** on an HTTP request,
-a notification for its schema, `next_wake_at` being reached, or at boot if
-`active_since` is set. A tenant with an enabled connected mailbox is pinned active (see above).
+A tenant has no runtime to start or stop. Its **context** (store on the shared hub,
+settings and grants, live limits, gateway, executor, sinks, timer handlers, the route
+groups of the host's one HTTP app it is served) is built on demand into the host's LRU cache (`tenancy/contexts.py`) and
+closed when it is unused for the TTL, pushed out by the size, or retired by a change.
+Building starts no long-lived task: runs, timer firings and deliveries belong to the
+host's loops (`runner.py`, `sinks.py` `HostOutbox`, `timer.py`), MCP is one host app,
+and HTTP is one routed app (`web/host_app.py`, step 3b): its routers are registered
+once and read the request tenant's objects from the context in a context variable.
+Crontal's tools are discovered while the context loads, from a listing the host caches
+for every tenant (integrations.md, "Request side").
+A context in use (a run, a firing, a delivery pass, an open request or SSE stream) is
+pinned; a retired one closes when its last user leaves. Closing flushes workspaces
+and detaches the store; nothing of the tenant remains.
 
-It **deactivates** after the idle period when it has no in-flight run, open request
-or SSE stream, due event or due outbox row, and its workspaces flushed cleanly.
-Then, in order: the runtime stops, `next_wake_at` is written, `active_since` is
-cleared. `next_wake_at` is the earliest of schedules, outbox retries, thread retries
-and approval or question expiry.
+`tenant_state` (`handler_control`, created by the hub) records when each tenant next
+needs the claim loop (`next_wake_at`, `wake_version`) and the outbox loop
+(`next_delivery_at`, `delivery_version`). Every writer of pending work marks it in its
+own transaction. At boot every enabled tenant is marked due once, so each is looked
+at once (its build backfills due work, and work a restart left runs); `active_since`
+is no longer written. There is no activation, eviction lock, active-tenant cap or
+pinning: a connected mailbox is a timer row, not a reason to stay built.
 
-Everything that starts or stops one tenant holds that tenant's lock, so it can never
-have two runtimes. A request or notification arriving during a stop waits, then
-starts a fresh runtime. Locks are per tenant, so a slow stop delays no one else.
-Activations run at most four at a time. A clean shutdown leaves `active_since` set,
-so a restart resumes those tenants.
+## Which tenant a request is for
 
-## What may wake a sleeping tenant
+The tenant comes from the request's credentials (`tenancy/host.py`); `/i/<name>` is
+only a hint, kept because Crontal stores those base URLs:
+
+- an admin key names its tenant: another tenant's key is refused with 401 before
+  anything is built (the host keeps each tenant's admin key digest);
+- a user token, sign-in ticket, Crontal or email signature or OAuth `state` is checked
+  against the hinted tenant's own, so another tenant's fails with 401;
+- a run token names its tenant: MCP is one host route, `/mcp/`, keyed by the token
+  alone (harnesses are given `http://127.0.0.1:<port>/mcp/`); `/i/<name>/mcp/` still
+  works, for that tenant's tokens only;
+- an unknown name is 404. Public routes (health, the app shell and sign-in pages) use
+  the hint alone and read no tenant data.
+
+The request then runs with the tenant's context in a context variable, and the
+tenant's store refuses any transaction while the work in progress is another
+tenant's (`TenantMismatch`).
+
+## What may build a tenant's context
 
 Tenant names like `m123` are guessable, so a request alone does not start a tenant:
 
 - `/i/<name>/healthz` (and `/healthz` for `main`) is answered by the host without
   waking it.
 - The sign-in page and app shell (`/`, `/app`, `/app/static/*`, `/login`) are served by
-  the host from the package; their data calls carry credentials. On a plan without
+  the host's app with no context (it serves nothing else that way); their data calls
+  carry credentials. On a plan without
   the console they are refused (`plan-limits.md`).
 - Anything else wakes the tenant only with a credential that checks out:
   - the instance admin key;
@@ -108,33 +140,84 @@ Tenant names like `m123` are guessable, so a request alone does not start a tena
 
   Otherwise it gets a 401 and nothing starts. Failed credential lookups are remembered
   for a minute and run at most four at a time.
-- Requests without a credential do not count as activity, so a probe can't keep a
-  tenant awake.
+- A request without a credential never builds a context (it may use one already
+  built).
 - Tenant names are held in memory: an unknown name costs no query. The list is
   reloaded once a minute, so a tenant created by another process is known within a
   minute.
-- `HANDLER_MAX_ACTIVE_TENANTS` (default 40) caps running tenants. A start beyond it
-  first stops the quiescent, least recently used, unpinned tenant. If none can stop,
-  requests get 503, signed email is spooled, and a durable retry is recorded.
-- A tenant is pinned awake only while it has an enabled connected mailbox, which its
-  poller polls. Having the `mailbox` integration alone does not pin it. Gmail has no
-  poller and never pins. The host checks this at boot, and once per scan for running
-  tenants, so a tenant pins when its first mailbox is added and unpins when the last
-  is removed or disabled.
 
-## How queued work on a sleeping tenant is always found
+## How queued work is always found
 
 | Source | Guarantee |
 |---|---|
-| HTTP (chat, email intake, Crontal webhooks) | The request activates the tenant first. If that fails it gets 503 with `Retry-After`, nothing was accepted, and a durable retry is recorded. Email is instead spooled durably and acknowledged |
-| Another process (CLI, a store with its own connections) | Writes `next_wake_at` **in the same transaction as the work**, so the wake can't be lost. The notification only makes it faster |
-| Schedules, retries, expiries | `next_wake_at`, written at stop |
-| Listener outage | The durable wake above; reconnecting prompts an immediate scan |
-| Crash | `active_since` still set, restarted at boot |
-| Anything else, such as an older image writing during a release overlap | Each inactive tenant's tables are swept at boot, and once more after the boot grace |
+| HTTP (chat, email intake, Crontal webhooks) | The request builds the context first. If that fails it gets 503 with `Retry-After` and nothing was accepted. Email is instead spooled durably and acknowledged |
+| Every writer (this process, the CLI, another process) | Marks `tenant_state.next_wake_at` **in the same transaction as the work** (`MARK_WAKE_SQL`), so the wake can't be lost; `NOTIFY handler_work_shared` only makes it faster |
+| Thread retries, crashed runs | After each look the claim loop writes back the earliest of a retry's `available_at` and a live lease's `lease_until`; a lease a crash left expires and the thread is claimed again |
+| Schedules, expiries, mail polls, held-input release | Host timer rows (`due_work`, step 2) |
+| Deliveries | `next_delivery_at`, marked by enqueue, retry and redeliver |
+| Listener outage | The durable marks above, read by the backstop polls; reconnecting looks at every tenant |
+| A failed context build | The tenant stays due and is retried at the next pass |
+| Anything else, such as an older image writing during a release overlap | Every tenant is looked at once at boot; v65's NOTIFY still reaches the claim loop |
 
-Only those two sweeps look inside a sleeping tenant. Otherwise the host's single
-scan reads `handler_control` alone, so idle tenants issue no queries.
+Otherwise the host's loops read `handler_control` alone, so idle tenants issue no
+tenant-scoped queries (`store_pg/test_idle_tenants.py`, 50 tenants).
+
+## Switching the registry on in production
+
+Rehearsed by `store_pg/test_registry_switch_on.py` on a database shaped like
+production's, and with `deploy/registry-switch-on.sh` against a local server (step 3b,
+November 22, 2026). Runbook stage 1 in Crontal's `docs/handler-full-cutover.md`.
+
+What production must set on `crontal-agent`, and how:
+
+| Variable | Value | How |
+|---|---|---|
+| `HANDLER_I_MAIN__HANDLER_MERCHANT_ID`, `HANDLER_I_BSS__HANDLER_MERCHANT_ID`, `HANDLER_I_YEUP__HANDLER_MERCHANT_ID` | `2`, `1`, `298` | Set by the script's `on`, before or with the switch: the import reads them once, at the first start with the registry on |
+| `HANDLER_PLATFORM_KEY` | 48 random bytes, URL-safe | Generated by `on` (kept if already set). Crontal needs the same value (stage 2) |
+| `HANDLER_TENANT_SECRET_KEY` | 48 random bytes, URL-safe | Generated by `on` (kept if already set). **Never change or lose it**: tenants' secrets become unreadable and startup stops |
+| `HANDLER_TENANT_REGISTRY` | `1` | Set by `on`, in the same change as the keys (one restart) |
+| Keep | `HANDLER_INSTANCES`, every `HANDLER_I_*`, main's unprefixed variables | Rollback reads them |
+
+Nothing else changes: no schema migration (3b adds none), no new secret per tenant
+(the import seals each instance's existing ones), and the defaults suit the dyno
+(`HANDLER_TENANT_CACHE_SIZE` 32, `HANDLER_GLOBAL_MAX_RUNS` 6,
+`HANDLER_PLAN_RUN_CAPS` `free:1,paid:3`, `HANDLER_CRONTAL_DISCOVERY_TTL_SECONDS` 3600).
+
+The script never puts a secret in a file, an argument or the terminal: it reads values
+with `heroku config:get` into shell variables, sends them to curl on stdin, and writes
+config through the Heroku API with the netrc that `heroku login` writes.
+
+```sh
+export HANDLER_APP=crontal-agent HANDLER_URL=https://<handler host>
+heroku pg:backups:capture -a crontal-agent
+deploy/registry-switch-on.sh check    # env-defined instances answer, keys isolated
+deploy/registry-switch-on.sh on       # keys, merchant ids, switch: one restart
+heroku logs -a crontal-agent --tail   # wait for "tenant context built" x3, no ERROR
+deploy/registry-switch-on.sh verify   # main/bss/yeup listed paid with merchants 2/1/298,
+                                      # same schemas and prefixes; keys isolated
+```
+
+Then, by hand: chat as Danny (main) and as Eric (BSS) in Crontal's panel; Handler's logs
+show `crontal tools registered` for each tenant and `crontal tools discovered` once.
+
+What the rehearsal verified, beyond the script's checks: every tenant data table's row
+count is unchanged by the import (users, tokens, threads, schedules, memory,
+approvals, the BSS mailbox among them); the registry rows carry the same schemas, S3
+prefixes, admin keys, webhook and email secrets, agent tokens, Google OAuth client and
+config (`HANDLER_MAX_CONCURRENT`, `HANDLER_PUBLIC_URL`), plan `paid`; old URLs, admin keys and user tokens reach the same threads, schedules, memory,
+approvals and mailbox; every request shape Crontal's proxy sends works (user
+provisioning and role sync, sign-in tickets, panel reads, multipart uploads and their
+fetch, the SSE stream, chat with attachments and context links, a resend reported as a
+duplicate, retry of a failed run, the signed `/ingest/crontal` webhook); a free tenant
+made with `PUT /platform/tenants/<merchant_id>` gets schema `handler_m<id>`, chats on
+`gpt-6.1-terra` with 50 inputs and no email, automations, console or mailboxes, chats
+without Crontal tools while Crontal can't be reached and gains them on a later run, and
+takes a legacy chat import uncounted; switching the registry off returns to env mode
+with everything written meanwhile visible (the free tenant 404s, its data intact), and
+switching it on again brings the free tenant back.
+
+**Rollback:** `deploy/registry-switch-on.sh off` (unsets `HANDLER_TENANT_REGISTRY`; one
+restart), or restore an earlier image. See below.
 
 ## Rollback
 

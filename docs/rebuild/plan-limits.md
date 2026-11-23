@@ -75,8 +75,10 @@ Only plans set to `hold` hold anything. In a new month, a new metered input firs
 releases what fits of the held backlog, in the same transaction, so it never takes
 the allowance ahead of older held inputs. Held inputs are released oldest first, each counting against the current month, for
 as long as the allowance lasts. **The rest stay held for the next month; nothing is
-discarded.** Release happens at the start of each month (a sleeping tenant's
-`next_wake_at` includes the reset), and on a plan change.
+discarded.** Release happens at the start of each month: holding an input writes an
+`inputs.release` due row for the next month boundary in the same transaction, and the
+host timer releases then (and again a month later while anything is still held). A
+tenant start and a plan change also release what fits.
 
 A plan change takes effect at once on a running tenant, without waiting for it to
 restart, and a sleeping one is woken for it.
@@ -152,7 +154,7 @@ answer, for any caller:
 - `/healthz`, `/mcp`, `/ingest/*`
 - `/api/chat` and `/api/chat/options`
 - `/api/limits/inputs`, `/api/me`, `/api/users` and `/api/users/<id>`
-- `/api/threads…`, `/api/runs/…` (including the chat panel's
+- `/api/threads…` (including `POST /api/threads/import`, which counts no input), `/api/runs/…` (including the chat panel's
   `POST /api/runs/{run_id}/retry`), `/api/tasks…`
 - `/api/approvals…`, `/api/questions…`, `/api/notifications…`, `/api/uploads…`
 - `/api/mailboxes…` and `/api/connections/google…` (each answers 403 for its own feature)

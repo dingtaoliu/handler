@@ -30,6 +30,7 @@ from ..types import (
     ThreadSpec,
     new_id,
 )
+from .due_work import APPROVAL_EXPIRE, QUESTION_EXPIRE, SCHEDULE_FIRE, pg_set_due, schedule_due
 from .postgres import _insert, _put_event
 from . import sqlite as _sqlite  # noqa: F401  (sqlite_memory needs sqlite imported first)
 from .sqlite_memory import Notification
@@ -78,9 +79,15 @@ class _Rows:
 
 
 class ScheduleMixin(_Rows):
+    async def _schedule_due(self, conn, schedule_id: str, due_at: datetime | None) -> None:
+        await pg_set_due(conn, self._tenant_schema, SCHEDULE_FIRE, schedule_id, due_at,
+                         self._clock(), table=self._due_table)
+
     async def create_schedule(self, schedule: Schedule) -> None:
         async with self._conn() as conn:
             await _insert(conn, "schedules", _row_values(schedule))
+            await self._schedule_due(conn, schedule.id, schedule_due(schedule))
+        self._due_written()
 
     async def get_schedule(self, schedule_id: str) -> Schedule | None:
         return await self._fetch_one(
@@ -99,12 +106,18 @@ class ScheduleMixin(_Rows):
         values = _row_values(schedule)
         assignments = ", ".join(f"{name} = %({name})s" for name in values if name != "id")
         async with self._conn() as conn:
-            await conn.execute(f"UPDATE schedules SET {assignments} WHERE id = %(id)s", values)
+            cursor = await conn.execute(f"UPDATE schedules SET {assignments} WHERE id = %(id)s",
+                                        values)
+            if cursor.rowcount:
+                await self._schedule_due(conn, schedule.id, schedule_due(schedule))
+        self._due_written()
 
     async def delete_schedule(self, schedule_id: str) -> bool:
         async with self._conn() as conn:
             cursor = await conn.execute("DELETE FROM schedules WHERE id = %s", (schedule_id,))
-            return bool(cursor.rowcount)
+            await self._schedule_due(conn, schedule_id, None)
+        self._due_written()
+        return bool(cursor.rowcount)
 
     async def next_due_at(self) -> datetime | None:
         async with self._conn() as conn:
@@ -140,11 +153,13 @@ class ScheduleMixin(_Rows):
             )
             if not cursor.rowcount:
                 return False
+            await self._schedule_due(conn, schedule.id, next_run_at)
             released: list = []
             routed = await _put_event(conn, event, thread, self._clock(), self._plan_limits(),
-                                      released)
+                                      released, self._due_table)
             if released or (routed and not isinstance(routed, OverLimit)):
                 await self._notify(conn)
+        self._due_written()
         self._announce_released(released)
         if isinstance(routed, OverLimit):
             return routed
@@ -158,6 +173,10 @@ class ApprovalMixin(_Rows):
     async def create_approval(self, approval: Approval) -> None:
         async with self._conn() as conn:
             await _insert(conn, "approvals", _row_values(approval))
+            if approval.expires_at is not None:  # expired by the host timer
+                await pg_set_due(conn, self._tenant_schema, APPROVAL_EXPIRE, approval.id,
+                                 approval.expires_at, self._clock(), table=self._due_table)
+        self._due_written()
 
     async def get_approval(self, approval_id: str) -> Approval | None:
         return await self._fetch_one(
@@ -206,13 +225,21 @@ class ApprovalMixin(_Rows):
                 f"UPDATE approvals SET {', '.join(sets)} WHERE id = %s AND status = %s",
                 (*params, approval_id, expected.value),
             )
-            return cursor.rowcount == 1
+            moved = cursor.rowcount == 1
+            if moved and new != ApprovalStatus.PENDING:  # nothing left to expire
+                await pg_set_due(conn, self._tenant_schema, APPROVAL_EXPIRE, approval_id, None,
+                                 self._clock(), table=self._due_table)
+            return moved
 
 
 class QuestionMixin(_Rows):
     async def create_question(self, question: Question) -> None:
         async with self._conn() as conn:
             await _insert(conn, "questions", _row_values(question))
+            if question.expires_at is not None:
+                await pg_set_due(conn, self._tenant_schema, QUESTION_EXPIRE, question.id,
+                                 question.expires_at, self._clock(), table=self._due_table)
+        self._due_written()
 
     async def get_question(self, question_id: str) -> Question | None:
         return await self._fetch_one(
@@ -264,7 +291,11 @@ class QuestionMixin(_Rows):
                 f"UPDATE questions SET {', '.join(sets)} WHERE id = %s AND status = %s",
                 (*params, question_id, expected.value),
             )
-            return cursor.rowcount == 1
+            moved = cursor.rowcount == 1
+            if moved and new != QuestionStatus.PENDING:
+                await pg_set_due(conn, self._tenant_schema, QUESTION_EXPIRE, question_id, None,
+                                 self._clock(), table=self._due_table)
+            return moved
 
 
 class AuditMixin(_Rows):
@@ -398,6 +429,9 @@ class SettingsMixin(_Rows):
                 (section, stored.version, Jsonb(value), schema_version, updated_by,
                  stored.updated_at),
             )
+            if cursor.rowcount and self._hub is not None:
+                # Every process drops this tenant's cached context (grants, limits).
+                await self._hub.tenant_changed(conn, self._tenant_schema)
             return stored if cursor.rowcount else None
 
     async def settings_history(self, section: str, limit: int = 50) -> list[SettingsVersion]:

@@ -16,25 +16,21 @@ import os
 import re
 import secrets
 import shlex
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 from pathlib import Path
 
 import uvicorn
 
-from .auth import Authenticator, Principal, add_cli_commands, run_cli
+from .auth import Authenticator, add_cli_commands, run_cli
 from .bus import RunEventBus
 from . import main_limits
-from .context import TenantScope, reset_current_tenant, set_current_tenant
-from .dispatcher import Dispatcher
+from .context import reset_current_tenant, set_current_tenant
 from .documents import configure_readers, shutdown_readers
 from .files import LocalFileStore, S3FileStore
-from .gateway.api import approvals_router, questions_router
-from .web.memory_recovery_api import memory_recovery_router
 from .gateway.questions import QuestionService, QuestionTools
 from .gateway.gateway import Gateway
 from .gateway.gmail import GmailTools
@@ -46,21 +42,23 @@ from .gateway.tokens import RunTokens
 from .harness.codex import SANDBOX_MODES, CodexHarness, codex_binary
 from .gateway.crontal_api import CrontalApiTools, crontal_base_url
 from .harness.openai_agents import OpenAIAgentsHarness
-from .integrations.crontal.connector import run_crontal_connector
+from .integrations.crontal import CrontalIntegration, crontal_tools
+from .integrations.crontal.connector import CrontalDiscovery, discovery_settings
 from .integrations.crontal.sink import crontal_sink_from_config
-from .integrations.base import IntegrationContext
+from .integrations.base import IntegrationConfig, IntegrationContext, TimerKind
 from .integrations.registry import (
     IntegrationRegistry,
     LoadedIntegrations,
     default_registry,
     enabled_names,
-    route_keys,
+    route_group,
 )
 from .memory import MemoryTools
 from .notifications import Notifier
 from .observability.logging import configure_json_logging
 from .observability.pricing import PriceTable
 from .run import RunConfig, RunExecutor, log_run_failed, thread_slug
+from .retention import retention_due
 from .scheduler import Scheduler
 from .settings import (
     ALLOWED_HARNESSES_ENV,
@@ -70,13 +68,30 @@ from .settings import (
     check_harness,
     parse_allowed_harnesses,
 )
-from .sinks import Outbox
+from .sinks import HostOutbox, Outbox, outbox_settings
 from .store.postgres import PostgresStore
 from .store.postgres_hub import DEFAULT_POOL_MAX, PostgresHub
 from .store.sqlite import SQLiteStore
 from .tasks import publish_queued
+from .store.due_work import (
+    APPROVAL_EXPIRE,
+    INPUTS_RELEASE,
+    QUESTION_EXPIRE,
+    RETENTION_CLEANUP,
+    SCHEDULE_FIRE,
+)
+from .timer import HostTimer, TimerTarget, timer_settings
+from .runner import HostRunner, runner_settings
 from .storage import register_workspace_limit, unregister_workspace_limit
-from .tenancy.host import DEFAULT_MAX_ACTIVE, PINNED_INTEGRATIONS, TenantHost
+from .tenancy.contexts import (
+    DEFAULT_CACHE_SIZE,
+    DEFAULT_CACHE_TTL_SECONDS,
+    ContextCache,
+    HostTenants,
+    ServedTenant,
+    TenantContext,
+)
+from .tenancy.host import PINNED_INTEGRATIONS, EnvRouter, TenantHost
 from .tenancy.limits import (
     PLAN_LIMITS_ENV,
     LiveLimits,
@@ -84,10 +99,9 @@ from .tenancy.limits import (
     check_limit_keys,
     parse_plan_table,
     resolve_limits,
-    upgrade_required,
 )
 from .tenancy.platform_api import platform_router
-from .tenancy.plan_guard import ConsoleGuard
+from .tenancy.routing import TenantApp
 from .tenancy.registry import Tenant, TenantRegistry
 from .tenancy.run_gate import DEFAULT_MAX_RUNS, DEFAULT_PLAN_CAPS, RunGate, parse_plan_caps
 from .tools.automation import AutomationTools
@@ -95,17 +109,10 @@ from .tools.notify import NotifyTools
 from .tools.threads import ThreadTools
 from .types import Event, Lane, ThreadSpec
 from .uploads import UploadStore
-from .web.admin_api import admin_router
-from .web.usage_api import usage_router
-from .web.automation_dashboard import automation_dashboard_router
-from .web.app import create_app
-from .web.email_ingest import email_ingest_router
-from .web.google_api import google_router
-from .web.ingest import crontal_ingest_router
-from .web.settings_api import settings_router
-from .web.tasks_api import tasks_router
-from .web.ui_manifest_api import ui_manifest_router
-from .workspaces import WorkspaceSync
+from .web.email_ingest import EmailIngest
+from .web.google_api import parse_origins
+from .web.host_app import EMAIL_INGEST, create_routed_app
+from .workspaces import WorkspaceBackstop, WorkspaceSync
 
 logger = logging.getLogger("handler.runtime.server")
 
@@ -397,6 +404,158 @@ _HOST_ONLY_ENV = {REGISTRY_ENV, PLATFORM_KEY_ENV, TENANT_SECRET_ENV, "HANDLER_IN
 CORE_THREAD_TYPES = frozenset({"chat", "automation"})
 
 
+# Time-driven work the core owns (store/due_work.py); `context` is the instance's
+# lifecycle namespace. Integrations add theirs (Integration.timer_kinds).
+CORE_TIMER_KINDS = (
+    TimerKind(SCHEDULE_FIRE, lambda c, item: c.scheduler.fire_due(item.ref)),
+    TimerKind(APPROVAL_EXPIRE, lambda c, item: c.gateway.expire_due(item.ref)),
+    TimerKind(QUESTION_EXPIRE, lambda c, item: c.questions.expire_due(item.ref)),
+    TimerKind(INPUTS_RELEASE, lambda c, item: c.store.release_held_due()),
+    TimerKind(RETENTION_CLEANUP, lambda c, item: retention_due(c.store), timeout_seconds=600),
+)
+
+
+class HostTimerDirectory:
+    """Tenants as the host timer sees them: every enabled tenant's due rows, the
+    tenant resolved through the context cache for the handler's duration (pinned, so
+    it can't be closed under the firing). Hub tenants' rows are in the control schema;
+    a pinned local tenant has its own queue."""
+
+    def __init__(self, tenants: HostTenants) -> None:
+        self.tenants = tenants
+        self._queues: dict[int, Any] = {}  # id(queue) -> hub, or the local tenant's name
+
+    def sources(self) -> list[tuple[Any, list[str]]]:
+        out = []
+        enabled = self.tenants.enabled()
+        for hub in self.tenants.hubs():
+            queue = hub.due_queue()
+            self._queues[id(queue)] = hub
+            keys = [tenant.key for tenant in enabled if tenant.hub is hub]
+            if keys:
+                out.append((queue, keys))
+        for tenant in enabled:
+            if tenant.hub is not None:
+                continue
+            context = self.tenants.cache.cached(tenant.name)
+            if context is not None and context.timer_target is not None:
+                queue = context.timer_target.queue
+                self._queues[id(queue)] = tenant.name
+                out.append((queue, [context.key]))
+        return out
+
+    @contextlib.asynccontextmanager
+    async def tenant(self, queue: Any, key: str):
+        owner = self._queues.get(id(queue))
+        if isinstance(owner, str):
+            name = owner
+        else:
+            tenant = self.tenants.by_key(owner, key) if owner is not None else None
+            name = tenant.name if tenant is not None else None
+        if name is None:
+            yield None
+            return
+        async with self.tenants.use(name) as context:
+            yield None if context is None else context.timer_target
+
+
+class HostServices:
+    """What every tenant on the host shares (role-split-design.md, steps 2 and 3): one
+    bus, one MCP app with host-wide run tokens, one routed HTTP app, the Crontal tool
+    discovery cache, the tenant context cache, and the host loops: the timer over due
+    work, the claim loop over due threads, the outbox loop over due deliveries, and
+    the workspace backstop. No tenant has a task or an app of its own.
+
+    A lone `instance_runtime` with none given makes its own: the same code path, one
+    tenant."""
+
+    def __init__(self, env: Mapping[str, str], directory: Any = None, *,
+                 sync_interval: float = 300.0, gate: RunGate | None = None,
+                 integrations: IntegrationRegistry | None = None) -> None:
+        self.bus = RunEventBus()
+        self.tokens = RunTokens()
+        self.mcp = create_mcp_app(None, self.tokens)
+        # Every integration a tenant here may enable: their routes are the app's.
+        self.integrations = integrations or default_registry
+        self.app = create_routed_app(self.mcp, self.integrations)
+        self.crontal_discovery = CrontalDiscovery(**discovery_settings(env))
+        self.cache = ContextCache(
+            max_size=int(env.get("HANDLER_TENANT_CACHE_SIZE", str(DEFAULT_CACHE_SIZE))),
+            ttl_seconds=float(env.get("HANDLER_TENANT_CACHE_TTL_SECONDS",
+                                      str(DEFAULT_CACHE_TTL_SECONDS))))
+        self.tenants = HostTenants(self.cache)
+        self.gate = gate
+        self.runner = HostRunner(self.tenants, gate, **runner_settings(env))
+        self.outbox = HostOutbox(self.tenants, **outbox_settings(env))
+        self.directory = directory if directory is not None else HostTimerDirectory(self.tenants)
+        self.timer = HostTimer(self.directory, **timer_settings(env))
+        self.workspaces = WorkspaceBackstop(sync_interval)
+        self.on_tenant_changed: list = []  # e.g. the registry host re-reads the row
+        self._stop: asyncio.Event | None = None
+        self._tasks: list[asyncio.Task] = []
+
+    def attach_hub(self, hub: PostgresHub) -> None:
+        """One LISTEN for the whole host: due work wakes the timer, a schema's work the
+        claim and outbox loops, a tenant change drops its context."""
+        hub.on_due = self.timer.wake
+
+        def work(schema: str) -> None:
+            self.runner.hint_schema(hub, schema)
+            tenant = self.tenants.by_key(hub, schema) if schema else None
+            self.outbox.hint(tenant.name if tenant is not None else "")
+
+        def changed(schema: str) -> None:
+            self.tenants.changed(hub, schema)
+            for listener in self.on_tenant_changed:
+                listener(hub, schema)
+
+        hub.on_work = work
+        hub.on_tenant_changed = changed
+
+    def serve_local(self, context: TenantContext) -> None:
+        """A tenant on a store with its own connections: only this process hears it, so
+        its context stays built (pinned) for the host's lifetime."""
+        self.cache.pin(context)
+        clock = getattr(context.store, "_clock", None)
+        self.tenants.serve(ServedTenant(context.name, context.key, clock=clock))
+        self.runner.local.register(context.name, clock)
+        self.outbox.local.register(context.name, clock)
+
+    def wire(self, name: str, store: Any, outbox: Any) -> None:
+        """A built context's in-process signals go to the host loops."""
+        signal = getattr(store, "_wake", None)
+        if hasattr(signal, "listener"):
+            signal.listener = lambda: self.runner.hint(name)
+        store.on_delivery_due = lambda: self.outbox.hint(name)
+        outbox.on_wake = lambda: self.outbox.hint(name)
+
+    def start(self) -> None:
+        self._stop = asyncio.Event()
+        self._mcp_stop = asyncio.Event()
+        stop, mcp_stop = self._stop, self._mcp_stop
+
+        async def own_mcp() -> None:
+            # MCP uses AnyIO cancel scopes: enter AND exit its lifespan in one task.
+            async with self.mcp.lifespan():
+                await mcp_stop.wait()
+
+        self._mcp_task = asyncio.create_task(own_mcp(), name="host-mcp")
+        self._tasks = [asyncio.create_task(self.timer.run(stop), name="host-timer"),
+                       asyncio.create_task(self.runner.run(stop), name="host-runner"),
+                       asyncio.create_task(self.outbox.run(stop), name="host-outbox"),
+                       asyncio.create_task(self.workspaces.run(stop),
+                                           name="workspace-backstop")]
+
+    async def stop(self) -> None:
+        if self._stop is None:
+            return
+        self._stop.set()
+        await asyncio.gather(*self._tasks, return_exceptions=True)  # runs drained first
+        self._mcp_stop.set()
+        await asyncio.gather(self._mcp_task, return_exceptions=True)
+        self._stop = None
+
+
 def instance_configs(args: argparse.Namespace, env: Mapping[str, str]):
     """Resolve immutable instance inputs without ever rebinding process env."""
     raw = env.get("HANDLER_INSTANCES", "").strip()
@@ -537,7 +696,7 @@ def _host_run_gate(env: Mapping[str, str]) -> RunGate:
 
 
 def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs: list) -> FastAPI:
-    """Host tenants from `handler_control` and start each only when it has work."""
+    """Host tenants from `handler_control`; each is context, built when it has work."""
     platform_key, sealing_key = env.get(PLATFORM_KEY_ENV), env.get(TENANT_SECRET_ENV)
     if not args.database_url or not platform_key or not sealing_key:
         raise ValueError(f"{REGISTRY_ENV} needs DATABASE_URL, {PLATFORM_KEY_ENV} "
@@ -581,18 +740,33 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
         gate.configure(tenant.name, tenant.plan, _plan_limit(tenant))
         return resolve_limits(tenant.plan, tenant.limits, plan_table)
 
-    def runtime_for(tenant: Tenant):
-        name, cfg, scoped, base = tenant_instance_config(args, env, tenant, box)
-        return instance_runtime(cfg, scoped, base_path=base, instance_name=name, hub=hub, gate=gate,
-                                plan_limits=LiveLimits(limits_for(tenant)),
-                                allowed_harnesses=allowed_harnesses)
+    services = HostServices(env, sync_interval=args.sync_interval, gate=gate)
+    services.attach_hub(hub)
 
-    tenants = TenantHost(
-        registry, runtime_for, limits_for=limits_for,
-        max_active=int(env.get("HANDLER_MAX_ACTIVE_TENANTS", str(DEFAULT_MAX_ACTIVE))),
-        idle_seconds=float(env.get("HANDLER_TENANT_IDLE_SECONDS", "600")),
-        scan_seconds=float(env.get("HANDLER_TENANT_SCAN_SECONDS", "15")),
-        boot_grace_seconds=float(env.get("HANDLER_TENANT_BOOT_GRACE_SECONDS", "120")))
+    async def build(name: str) -> TenantContext:
+        # Read afresh: a context is built from the row as it is now (new secrets,
+        # plan and integrations apply from the next build).
+        tenant = await registry.get(name)
+        if tenant is None or not tenant.enabled:
+            raise LookupError(f"tenant {name!r} is not enabled")
+        name, cfg, scoped, base = tenant_instance_config(args, env, tenant, box)
+        # One LiveLimits per tenant across rebuilds: a context still in use (an open
+        # stream, a running run) follows the new plan too, so a call from an older
+        # tool view is refused at once.
+        limits = live_limits.get(name)
+        if limits is None:
+            limits = live_limits[name] = LiveLimits(limits_for(tenant))
+        else:
+            limits.current = limits_for(tenant)
+        return await build_tenant_context(
+            cfg, scoped, base_path=base, instance_name=name, hub=hub,
+            plan_limits=limits,
+            allowed_harnesses=allowed_harnesses, host=services)
+
+    live_limits: dict[str, LiveLimits] = {}
+    services.cache.build = build
+    tenants = TenantHost(registry, services, hub, limits_for=limits_for,
+                         scan_seconds=float(env.get("HANDLER_TENANT_SCAN_SECONDS", "15")))
 
     @contextlib.asynccontextmanager
     async def lifespan(host):
@@ -601,10 +775,14 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
             await registry.import_once(_imported_tenants(args, env, configs, registry))
             validate(await registry.list())
             await tenants.load()
-            tenants.start()  # in the background: the port must bind within Heroku's limit
+            await tenants.boot()  # every tenant due once: backfill, work left by a restart
+            tenants.start()
+            services.start()
             yield
         finally:
+            await services.stop()
             await tenants.shutdown()
+            await services.cache.close()
             await hub.close()
             await asyncio.to_thread(shutdown_readers)
 
@@ -613,6 +791,7 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
                                         allowed_harnesses=allowed_harnesses))
     host.mount("/", tenants)
     host.state.tenants, host.state.registry, host.state.run_gate = tenants, registry, gate
+    host.state.services = services
     return host
 
 
@@ -630,54 +809,56 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
     # registry gives them when it imports them (Tenant's defaults).
     gate = _host_run_gate(env)
     for name, *_ in configs:
-        gate.configure(name, Tenant.plan, None)
+        gate.configure(name or "main", Tenant.plan, None)
+    services = HostServices(env, sync_interval=args.sync_interval, gate=gate)
+    for hub in hubs.values():
+        services.attach_hub(hub)
+    by_name = {name or "main": (name, cfg, scoped, base) for name, cfg, scoped, base in configs}
+    if configs[0][0]:
+        for key, (_, cfg, _, _) in by_name.items():
+            services.tenants.set_admin_key(key, cfg.admin_key)  # keys name their tenant
+
+    async def build(key: str) -> TenantContext:
+        name, cfg, scoped, base = by_name[key]
+        return await build_tenant_context(
+            cfg, scoped, base_path=base, instance_name=name,
+            hub=hubs.get(cfg.database_url), allowed_harnesses=allowed_harnesses,
+            host=services)
+
+    services.cache.build = build
 
     @contextlib.asynccontextmanager
     async def lifespan(host):
-        stop = asyncio.Event()
-        tasks = []
-
-        async def own_runtime(name, cfg, scoped, base, ready):
-            # MCP uses AnyIO cancel scopes: enter AND exit each instance in the
-            # same task. Separate owner tasks let them drain concurrently.
-            try:
-                async with instance_runtime(cfg, scoped, base_path=base, instance_name=name,
-                                            hub=hubs.get(cfg.database_url), gate=gate,
-                                            allowed_harnesses=allowed_harnesses) as app:
-                    ready.set_result(app)
-                    await stop.wait()
-            except BaseException as exc:
-                if not ready.done():
-                    ready.set_exception(exc)
-                raise
-
         try:
-            for name, cfg, scoped, base in configs:
-                ready = asyncio.get_running_loop().create_future()
-                tasks.append(asyncio.create_task(own_runtime(name, cfg, scoped, base, ready),
-                                                  name=f"instance-{name or 'default'}"))
-                app = await ready
-                host.mount(base or "/", app)
+            for key, (name, cfg, _, _) in by_name.items():
+                hub = hubs.get(cfg.database_url)
+                if hub is None:
+                    # Its own store (SQLite, or a lone Postgres instance): only this
+                    # process hears it, so its context stays built.
+                    services.serve_local(await build(key))
+                else:
+                    services.tenants.serve(ServedTenant(key, cfg.db_schema or "public", hub=hub))
+            for hub in hubs.values():
+                # Env tenants get tenant_state rows too: one code path. Due at once,
+                # so each is looked at once at boot (backfill, work a restart left).
+                await hub.register_tenants([(t.name, t.key) for t in services.tenants.all()
+                                            if t.hub is hub])
             if configs[0][0]:
-                async def unknown_instance(path: str = ""):
-                    raise HTTPException(404, "instance not found")
-                host.add_api_route("/i/{path:path}", unknown_instance,
-                                   methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
-                main = next(route.app for route in host.routes if getattr(route, "path", "") == "/i/main")
-                host.mount("/", main)
+                host.mount("/", EnvRouter(services.tenants, services.mcp))
+            else:
+                host.mount("/", services.cache.cached("main").app)
+            services.start()
             yield
         finally:
-            stop.set()
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, BaseException):
-                    logger.error("instance lifecycle failed", exc_info=result)
+            await services.stop()
+            await services.cache.close()
             for hub in hubs.values():
                 await hub.close()
             await asyncio.to_thread(shutdown_readers)
 
     host = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     host.state.run_gate = gate
+    host.state.services = services
     return host
 
 
@@ -691,20 +872,44 @@ async def serve(args: argparse.Namespace) -> None:
         raise RuntimeError("handler host failed to start")
 
 
-@contextlib.asynccontextmanager
-async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
-                           base_path: str = "", instance_name: str = "",
-                           registry: IntegrationRegistry | None = None,
-                           hub: PostgresHub | None = None, gate: RunGate | None = None,
-                           plan_limits: LiveLimits | None = None,
-                           allowed_harnesses: frozenset[str] | None = None):
-    """Own one instance and close all its resources when the host stops.
+async def build_tenant_context(args: argparse.Namespace, env: Mapping[str, str], *,
+                               host: "HostServices", base_path: str = "",
+                               instance_name: str = "",
+                               registry: IntegrationRegistry | None = None,
+                               hub: PostgresHub | None = None,
+                               plan_limits: LiveLimits | None = None,
+                               allowed_harnesses: frozenset[str] | None = None) -> TenantContext:
+    """Build one tenant's context (tenancy/contexts.py): its store, settings, gateway,
+    executor, sinks, timer handlers and HTTP sub-app. Starts no long-lived task: runs,
+    timer firings and deliveries are the host loops', MCP is the host's one app. The
+    only tasks are integration start-up work that ends by itself (Crontal tool
+    discovery, until 3b moves it into context loading); `close()` stops them.
 
     `allowed_harnesses` is the host's HANDLER_ALLOWED_HARNESSES (None: all).
     """
-    # Everything this instance runs (its tasks, and through TenantScope its
-    # requests) shares host pools such as the reader pool as this tenant.
     tenant_token = set_current_tenant(instance_name or "main")
+    try:
+        return await _build_tenant_context(
+            args, env, host=host, base_path=base_path, instance_name=instance_name,
+            registry=registry, hub=hub, plan_limits=plan_limits,
+            allowed_harnesses=allowed_harnesses)
+    finally:
+        reset_current_tenant(tenant_token)
+
+
+class _TenantRuns:
+    """A tenant's view of the host claim loop (what its dispatcher used to report)."""
+
+    def __init__(self, runner: HostRunner, name: str) -> None:
+        self._runner, self._name = runner, name
+
+    @property
+    def active_count(self) -> int:
+        return self._runner.running(self._name)
+
+
+async def _build_tenant_context(args, env, *, host, base_path, instance_name, registry, hub,
+                                plan_limits, allowed_harnesses) -> TenantContext:
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     env = dict(env)
@@ -718,9 +923,15 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         # Integrations see the same values the legacy wiring reads; CRONTAL_URL
         # comes from args so `--crontal-url` still wins.
         integration_env = {**env, "CRONTAL_URL": args.crontal_url or ""}
-        integrations = (registry or default_registry).load(
+        served = set(host.integrations.names())
+        foreign = [n for n in integration_names if n not in served]
+        if registry is not None and foreign:
+            raise ValueError(f"{instance_name or 'main'}: integration(s) {foreign} are not "
+                             "registered with the host, so their routes would not be served")
+        integrations = (registry or host.integrations).load(
             integration_names, instance_name=instance_name, env=integration_env,
-            base_path=base_path, reserved_thread_types=CORE_THREAD_TYPES)
+            base_path=base_path, reserved_thread_types=CORE_THREAD_TYPES,
+            reserved_timer_kinds=frozenset(kind.name for kind in CORE_TIMER_KINDS))
         logger.info("integrations enabled", extra={"instance": instance_name or "main",
                                                    "integrations": integrations.names})
         if "crontal" not in integrations.names and (args.crontal_url
@@ -740,6 +951,13 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
              else SQLiteStore(data_dir / "handler.db"))
     if plan_limits is not None:
         store.limits = plan_limits
+    store.on_due_changed = host.timer.wake  # its due-work writes wake the host timer
+    name = instance_name or "main"
+    if hasattr(store, "_check_tenant"):  # Postgres (tests may stand in other stores)
+        store.tenant = name  # every transaction checks the work in progress is this tenant's
+    target: TimerTarget | None = None
+    workspace_sync: WorkspaceSync | None = None
+    workspace_limit = None
     try:
         # Runs a dead worker left at 'running' (e.g. the dyno restarted mid-run).
         swept = await store.sweep_abandoned_runs()
@@ -752,7 +970,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             log_run_failed(instance_name, row["thread_key"], row["thread_type"], row["run_id"],
                            row["attempts"], row["error"], row["event_ids"],
                            failed_before_upgrade=True)
-        bus = RunEventBus()
+        bus = host.bus.for_tenant(instance_name or "main")
 
         settings = SettingsService(
             store, InstanceDefaults(args.model, args.reasoning_effort),
@@ -803,6 +1021,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                             instance=instance_name)
         memory_tools = MemoryTools(store, settings)
         scheduler = Scheduler(store, default_harness=settings.harness_source("automation"))
+        scheduler.on_wake = host.timer.wake
         if plan_limits is not None:
             scheduler.paused = lambda: not plan_limits.current.automations
             async def tell_skipped(schedule, over) -> None:
@@ -825,8 +1044,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         # Registered on every plan: each run's tool view and every call follow the
         # live plan (GrantPolicy.excluded), so an upgrade or downgrade needs no restart.
         gateway.register(AutomationTools(store, scheduler))
-        tokens = RunTokens()
-        mcp_app = create_mcp_app(gateway, tokens)
+        tokens = host.tokens  # one MCP app for the host; a token names its gateway
 
         config = RunConfig(data_dir=data_dir, reasoning_effort=args.reasoning_effort,
                            timeout_seconds=float(limits_cfg["run_timeout_seconds"]),
@@ -880,17 +1098,15 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         workspace_sync = WorkspaceSync(file_store, data_dir)
         executor = RunExecutor(
             store, harnesses, bus, config, PriceTable.from_yaml(),
-            tokens=tokens, mcp_url=f"http://{local_host}:{args.port}{base_path}/mcp/",
+            # The host's one MCP route: the run token alone names the tenant.
+            tokens=tokens, mcp_url=f"http://{local_host}:{args.port}/mcp/",
             settings=settings, memory_tools=memory_tools,
             workspace_sync=workspace_sync,
             crontal_identity=crontal_id, crontal_catalog=crontal_catalog,
         )
-        dispatcher = Dispatcher(
-            store, executor, lease_seconds=config.lease_seconds,
-            max_concurrent=args.max_concurrent, gate=gate, gate_tenant=instance_name,
-            lane_capacity={Lane.INTERACTIVE: int(limits_cfg["interactive_capacity"]),
-                           Lane.BACKGROUND: int(limits_cfg["background_capacity"])},
-        )
+        executor.gateway = gateway
+        lane_capacity = {Lane.INTERACTIVE: int(limits_cfg["interactive_capacity"]),
+                         Lane.BACKGROUND: int(limits_cfg["background_capacity"])}
 
         trusted_user = env.get("HANDLER_TRUSTED_USER", "").strip() or None
         trusted_devices = _trusted_device_users(env.get("HANDLER_TRUSTED_DEVICE_USERS", ""))
@@ -905,81 +1121,58 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             (lambda: plan_limits.current.max_upload_bytes) if plan_limits is not None else None))
         if plan_limits is not None:
             # Counted once here, off the event loop; writes then keep the totals current.
-            await register_workspace_limit(
-                config.workspaces_dir, lambda: plan_limits.current.max_workspace_bytes).prime()
+            workspace_limit = register_workspace_limit(
+                config.workspaces_dir, lambda: plan_limits.current.max_workspace_bytes)
+            await workspace_limit.prime()
             await uploads.used.prime()
-        app = create_app(store, bus, auth, default_harness=settings.harness_source("chat"),
-                         uploads=uploads, instance_name=instance_name)
-        app.mount("/mcp", mcp_app)
-        app.include_router(approvals_router(gateway, store, auth))
-        app.include_router(memory_recovery_router(gateway, store, auth))
-        app.include_router(questions_router(questions, store, auth))
-        app.include_router(tasks_router(store, bus, auth))
-        app.include_router(usage_router(store, auth))
-        app.include_router(automation_dashboard_router(store, auth, settings))
         store.on_routed = lambda event, spec: publish_queued(bus, event, spec)
+
         async def effective_tool_names(ctx):
             return {spec.name for spec in await gateway.specs_for(ctx)}
 
-        app.include_router(settings_router(settings, auth, memory_tools,
-                                           crontal_identity=crontal_id,
-                                           crontal_catalog=crontal_catalog,
-                                           available_tools=lambda: {s.name for s in gateway.specs()},
-                                           available_tools_for=effective_tool_names))
-        app.include_router(admin_router(store, auth, scheduler=scheduler, gateway=gateway,
-                                        uploads=uploads, log_file=_log_file(args),
-                                        artifact_store=artifact_store, outbox=outbox))
         email_secret = env.get("HANDLER_EMAIL_SECRET")
         intake_observers: list = []  # integrations add theirs below
+        routes: dict[str, Any] = {}  # the host app's route groups this tenant is served
         if email_secret:
-            app.include_router(email_ingest_router(store, email_secret, settings, workspace_sync,
-                                                   harness=settings.harness_source("email"),
-                                                   crontal_identity=crontal_id,
-                                                   observers=intake_observers))
+            routes[EMAIL_INGEST] = EmailIngest(
+                store, email_secret, settings, workspace_sync,
+                harness=settings.harness_source("email"), crontal_identity=crontal_id,
+                observers=intake_observers)
         else:
             logger.info("email intake off: set HANDLER_EMAIL_SECRET to enable /ingest/email")
         google_oauth = google_oauth_from_env(store, env=env)  # None unless GOOGLE_OAUTH_* are set
-        app.include_router(google_router(google_oauth, auth, plan_limits=plan_limits,
-                                         return_to_origins=env.get("HANDLER_RETURN_TO_ORIGINS", "")))
+        google = (google_oauth, plan_limits,
+                  parse_origins(env.get("HANDLER_RETURN_TO_ORIGINS", "")))
         if google_oauth is not None:
             gateway.register(GmailTools(
                 google_oauth,
                 workspace_for=lambda key: config.workspaces_dir / thread_slug(key),
                 owner_for=lambda ctx: (user_owner(ctx.user_id)
                                        if ctx.user_id else INSTANCE_OWNER)))
-        webhook_secret = env.get("HANDLER_WEBHOOK_SECRET")
-        if webhook_secret and legacy_crontal:
-            app.include_router(crontal_ingest_router(store, webhook_secret,
-                                                     harness=settings.harness_source("crontal")))
-        app.include_router(ui_manifest_router(integrations, auth))
-        if plan_limits is not None:
-            app.add_middleware(ConsoleGuard, limits=plan_limits)
-        if plan_limits is not None and not plan_limits.current.connected_mail:
-            @app.post("/api/mailboxes")
-            async def mailboxes_not_in_plan(_principal: Principal = Depends(auth.require_admin)):
-                return JSONResponse(upgrade_required("mailbox", plan_limits.current), status_code=403)
 
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
+        # Grants: a save in this process applies at once (settings listener); one
+        # made elsewhere is picked up by the version check before each run.
+        grants_seen = {"version": grants_version}
 
-        async def housekeeping() -> None:
-            """Expire stale approvals and questions; pick up grant changes from settings."""
-            version = grants_version
-            while not stop.is_set():
-                try:
-                    if plan_limits is not None:
-                        await store.release_held_inputs()
-                    await gateway.expire_stale()
-                    await questions.expire_stale()
-                    grants, latest = await settings.get("grants")
-                    if latest != version:
-                        gateway.set_policy(GrantPolicy(grants, plan_limits=plan_limits))
-                        version = latest
-                        logger.info("grants reloaded", extra={"version": latest})
-                except Exception:
-                    logger.exception("housekeeping failed")
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=15)
+        def take_grants(value: dict, version: int | None) -> None:
+            if version == grants_seen["version"]:
+                return
+            gateway.set_policy(GrantPolicy(value, plan_limits=plan_limits))
+            grants_seen["version"] = version
+            logger.info("grants reloaded", extra={"version": version})
+
+        def grants_saved(section: str, stored) -> None:
+            if section == "grants":
+                take_grants(stored.value, stored.version)
+
+        settings.on_saved.append(grants_saved)
+
+        def settings_saved(section: str, stored) -> None:
+            # Every section feeds the context (limits, threads, grants): the next use
+            # builds afresh. Other processes hear NOTIFY handler_tenant_changed.
+            host.cache.invalidate(name)
+
+        settings.on_saved.append(settings_saved)
 
         crontal_token = env.get("CRONTAL_AGENT_TOKEN")
         if legacy_crontal and args.crontal_url and crontal_token:
@@ -987,78 +1180,188 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
                 crontal_base_url(args.crontal_url), crontal_token,
                 workspace_for=lambda key: config.workspaces_dir / thread_slug(key)))
 
-        async def start_crontal_connector() -> None:
-            """Discover Crontal's tools (retrying until reachable), then expose them."""
-            if legacy_crontal:
-                await run_crontal_connector(args.crontal_url, env.get("CRONTAL_AGENT_TOKEN"),
-                                            gateway, stop)
+        def tools_changed() -> None:
+            config.available_tools = frozenset(s.name for s in gateway.specs())
 
         # Integration contributions, after all core wiring so duplicates of core
-        # routes and tools are reported with the integration's name.
+        # tools are reported with the integration's name.
+        integration_ctx = IntegrationContext(
+            instance_name=instance_name, base_path=base_path, env=env, store=store,
+            bus=bus, settings=settings, gateway=gateway, outbox=outbox,
+            notifier=notifier, auth=auth, workspaces_dir=config.workspaces_dir,
+            workspace_sync=workspace_sync, file_store=file_store, services=host,
+            extra={"on_tools_changed": tools_changed})
         contributions = integrations.collect_runtime(
-            IntegrationContext(
-                instance_name=instance_name, base_path=base_path, env=env, store=store,
-                bus=bus, settings=settings, gateway=gateway, outbox=outbox,
-                notifier=notifier, auth=auth, workspaces_dir=config.workspaces_dir,
-                workspace_sync=workspace_sync, file_store=file_store),
-            reserved_routes=set(route_keys(app)),
-            reserved_tools={spec.name for spec in gateway.specs()})
+            integration_ctx, reserved_tools={spec.name for spec in gateway.specs()})
         for _, tool_set in contributions.tool_sets:
             gateway.register(tool_set)
-        config.available_tools = frozenset(s.name for s in gateway.specs())
-        config.available_tools_for = effective_tool_names
         for _, sink in contributions.sinks:
             outbox.register(sink)
         intake_observers.extend(o for _, o in contributions.email_intake_observers)
-        for _, router in contributions.routers:
-            app.include_router(router)
-        app.add_middleware(TenantScope, tenant=instance_name or "main")
-        app.state.integrations = integrations
-        app.state.gateway, app.state.outbox = gateway, outbox
-        app.state.lifecycle = SimpleNamespace(dispatcher=dispatcher, store=store, outbox=outbox,
-                                              workspace_sync=workspace_sync, limits=plan_limits,
-                                              tokens=tokens, bus=bus, uploads=uploads,
-                                              workspaces_dir=config.workspaces_dir,
-                                              scheduler=scheduler)
-        app.state.identity_provider = (contributions.identity_provider[1]
-                                       if contributions.identity_provider else None)
+        routes.update(contributions.route_bindings)
+        webhook_secret = env.get("HANDLER_WEBHOOK_SECRET")
+        if webhook_secret and legacy_crontal:
+            # Legacy wiring is served the crontal integration's `/ingest/crontal`,
+            # from the same variables (`CRONTAL_*`, `HANDLER_WEBHOOK_SECRET`).
+            legacy = CrontalIntegration()
+            legacy.configure(IntegrationConfig(instance_name, {
+                **env, "CRONTAL_URL": args.crontal_url or ""}, base_path))
+            routes[route_group("crontal")] = (legacy, integration_ctx)
 
-        async with mcp_app.lifespan():
-            tasks = [
-                asyncio.create_task(start_crontal_connector(), name="crontal-connector"),
-                asyncio.create_task(dispatcher.run_forever(stop), name="dispatcher"),
-                asyncio.create_task(scheduler.run_forever(stop), name="scheduler"),
-                asyncio.create_task(housekeeping(), name="housekeeping"),
-                asyncio.create_task(outbox.run_forever(stop), name="outbox"),
-                asyncio.create_task(workspace_sync.run_periodic(stop, args.sync_interval),
-                                    name="workspace-sync"),
-            ]
-            tasks.extend(asyncio.create_task(task.run(stop), name=f"{owner}:{task.name}")
-                         for owner, task in contributions.background_tasks)
-            logger.info("handler-rt serving", extra={"url": f"http://{args.host}:{args.port}/login",
-                                                      "data_dir": str(data_dir),
-                                                      "tools": [s.name for s in gateway.specs()]})
-            try:
-                yield app
-            finally:
-                stop.set()
-                deadline = loop.time() + SHUTDOWN_BUDGET_SECONDS
-                await _flush_until(workspace_sync, deadline - loop.time())
+        # Loading work: Crontal's curated tools from the host's cached discovery
+        # (legacy wiring and the integration alike), then each integration's `load`.
+        # Anything not done yet is tried again before the next run.
+        pending: list[tuple[str, Callable[[], Awaitable[bool]]]] = []
+        if legacy_crontal and args.crontal_url:
+            legacy_tools = crontal_tools(integration_ctx, args.crontal_url, crontal_token)
+            pending.append(("crontal", legacy_tools.ensure))
+        for integration in integrations.integrations:
+            pending.append((integration.name,
+                            lambda integration=integration: integration.load(integration_ctx)))
+
+        async def load_pending() -> None:
+            for owner, load in list(pending):
                 try:
-                    await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True),
-                                           timeout=max(deadline - loop.time() - 5, 1))
-                except TimeoutError:
-                    logger.warning("shutdown: tasks still running at the deadline")
-                finally:
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    await _flush_until(workspace_sync, deadline - loop.time())
+                    done = await load()
+                except Exception:
+                    logger.exception("integration load failed",
+                                     extra={"tenant": name, "integration": owner})
+                    done = False
+                if done:
+                    pending.remove((owner, load))
 
-    finally:
-        unregister_workspace_limit(data_dir / "workspaces")
+        await load_pending()
+        tools_changed()
+        config.available_tools_for = effective_tool_names
+
+        async def before_run() -> None:
+            await take_grants_now()  # a backstop for a save NOTIFY missed
+            if pending:
+                await load_pending()
+
+        async def take_grants_now() -> None:
+            take_grants(*await settings.get("grants"))
+
+        executor.before_run = before_run
+        lifecycle = SimpleNamespace(dispatcher=_TenantRuns(host.runner, name), store=store,
+                                    outbox=outbox,
+                                    workspace_sync=workspace_sync, limits=plan_limits,
+                                    tokens=tokens, bus=bus, uploads=uploads,
+                                    workspaces_dir=config.workspaces_dir,
+                                    scheduler=scheduler, gateway=gateway, questions=questions,
+                                    executor=executor,
+                                    # The host app's handlers read these (web/host_app.py).
+                                    auth=auth, settings=settings, memory_tools=memory_tools,
+                                    crontal_identity=crontal_id,
+                                    crontal_catalog=crontal_catalog,
+                                    available_tools=lambda: {s.name for s in gateway.specs()},
+                                    effective_tool_names=effective_tool_names,
+                                    log_file=_log_file(args), artifact_store=artifact_store,
+                                    google=google, integrations=integrations,
+                                    email_ingest=routes.get(EMAIL_INGEST))
+
+        # Time-driven work: the host timer calls these for this tenant's due rows.
+        target = TimerTarget(instance_name, store.due_tenant, store.due_queue())
+        for kind in CORE_TIMER_KINDS:
+            if kind.name == INPUTS_RELEASE and not hasattr(store, "release_held_due"):
+                continue  # held inputs exist on registry (Postgres) tenants only
+            target.bind(kind, lifecycle)
+        for _, kind in integrations.timer_kinds.values():
+            target.bind(kind, integration_ctx)
+
+        async def backfill_due() -> None:
+            """Make this tenant's due rows match its data (at start, and when its plan
+            changes). Idempotent; a missed schedule fires once, not per interval."""
+            if plan_limits is not None:
+                # What a new month or plan allows runs now; the rest waits for the
+                # `inputs.release` row at the month boundary.
+                await store.release_held_inputs()
+            await store.backfill_due_work(schedules=not scheduler._is_paused(),
+                                          held=plan_limits is not None)
+            for owner, kind in integrations.timer_kinds.values():
+                if kind.backfill is not None:
+                    try:
+                        await kind.backfill(integration_ctx)
+                    except Exception:
+                        logger.exception("timer backfill failed",
+                                         extra={"integration": owner, "kind": kind.name})
+
+        lifecycle.backfill_due = backfill_due
+        await backfill_due()
+        host.workspaces.register(name, workspace_sync)
+        host.wire(name, store, outbox)
+    except BaseException:
+        if workspace_sync is not None:
+            host.workspaces.unregister(workspace_sync)
+        unregister_workspace_limit(data_dir / "workspaces", workspace_limit)
         await store.close()
-        reset_current_tenant(tenant_token)
+        raise
+
+    async def close() -> None:
+        """Evicted, invalidated or shut down: nothing of this tenant stays running."""
+        await _flush_until(workspace_sync, SHUTDOWN_BUDGET_SECONDS)
+        if not workspace_sync.dirty:  # else the host backstop keeps retrying it
+            host.workspaces.unregister(workspace_sync)
+        unregister_workspace_limit(data_dir / "workspaces", workspace_limit)
+        await store.close()
+
+    logger.info("tenant context ready", extra={"tenant": name, "data_dir": str(data_dir),
+                                               "tools": len(gateway.specs())})
+    context = TenantContext(
+        name=name, key=store.due_tenant, store=store, executor=executor,
+        gateway=gateway, outbox=outbox, settings=settings, limits=plan_limits,
+        timer_target=target, workspace_sync=workspace_sync, lifecycle=lifecycle,
+        lane_capacity=lane_capacity, max_concurrent=args.max_concurrent,
+        lease_seconds=config.lease_seconds, close=close, instance_name=instance_name,
+        routes=routes)
+    # The tenant's view of the host's one app (tests and the spool replay call it).
+    context.app = TenantApp(host.app, context, SimpleNamespace(
+        lifecycle=lifecycle, integrations=integrations, gateway=gateway, outbox=outbox,
+        timer_target=target, identity_provider=(contributions.identity_provider[1]
+                                                if contributions.identity_provider
+                                                else None)))
+    return context
+
+
+@contextlib.asynccontextmanager
+async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
+                           base_path: str = "", instance_name: str = "",
+                           registry: IntegrationRegistry | None = None,
+                           hub: PostgresHub | None = None, gate: RunGate | None = None,
+                           plan_limits: LiveLimits | None = None,
+                           allowed_harnesses: frozenset[str] | None = None,
+                           host: HostServices | None = None):
+    """One instance's app, for as long as the block runs.
+
+    Without `host` this is a lone instance: it makes its own host services and runs
+    them (the same host loops, one tenant). With one, the context is pinned in that
+    host (a tenant on its own store, which only this process hears).
+    """
+    own_host = host is None
+    if host is None:
+        host = HostServices(env, sync_interval=args.sync_interval, gate=gate,
+                            integrations=registry)
+        if hub is not None:
+            host.attach_hub(hub)
+    context = await build_tenant_context(
+        args, env, host=host, base_path=base_path, instance_name=instance_name,
+        registry=registry, hub=hub, plan_limits=plan_limits,
+        allowed_harnesses=allowed_harnesses)
+    if hub is not None:
+        host.tenants.serve(ServedTenant(context.name, context.key, hub=hub))
+        host.cache.pin(context)
+        await hub.register_tenants([(context.name, context.key)])
+    else:
+        host.serve_local(context)
+    try:
+        if own_host:
+            host.start()
+        yield context.app
+    finally:
+        if own_host:
+            await host.stop()
+        host.tenants.drop(context.name)
+        await context.close()
 
 
 SHUTDOWN_BUDGET_SECONDS = 25.0

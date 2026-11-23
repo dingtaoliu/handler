@@ -14,6 +14,12 @@ Design reference: `docs/agent-runtime-design.md` (§3 thread types, §6 gateway 
 
 ## F. Automations and scheduler
 
+> Since role-split step 2 (November 2026) the scheduler has no loop of its own:
+> `run_forever` and `max_sleep_seconds` are gone, each enabled schedule is a
+> `schedule.fire` due row written with it, and the host timer calls
+> `Scheduler.fire_due(schedule_id)` (role-split-design.md, integrations.md "Timer kinds").
+> `wake()` only hints the timer. The rest of this section is the original brief.
+
 **Files**: `store/sqlite_schedules.py`, `store/schema_schedules.sql`, `runtime/scheduler.py`, `runtime/tools/__init__.py`, `runtime/tools/automation.py`, `tests/runtime/scheduler/`.
 
 - **`ScheduleMixin`** implementing `ScheduleStore` (read every docstring). `fire_schedule` must reuse the same event-insert + thread-routing logic as `SQLiteCore.put` inside one transaction, guarded by a compare-and-set on `next_run_at`.

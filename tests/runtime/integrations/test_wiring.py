@@ -15,8 +15,8 @@ from .fakes import Alpha, registry
 async def serving(env, monkeypatch):
     async def idle(self, stop, *args):
         await stop.wait()
-    monkeypatch.setattr(server.Dispatcher, "run_forever", idle)
-    monkeypatch.setattr(server.Scheduler, "run_forever", idle)
+    monkeypatch.setattr(server.HostRunner, "run", idle)
+    monkeypatch.setattr(server.HostTimer, "run", idle)
 
     def no_codex():
         raise FileNotFoundError("test has no codex")
@@ -30,11 +30,11 @@ async def serving(env, monkeypatch):
 
 
 def instance_app(host, name):
-    return next(r.app for r in host.routes if getattr(r, "path", "") == f"/i/{name}")
+    return host.state.services.cache.cached(name).app  # SQLite: built at start
 
 
 async def test_fake_integration_is_wired_only_where_enabled(tmp_path, monkeypatch):
-    Alpha.started.clear()
+    Alpha.loaded.clear()
     env = {**config(tmp_path), "HANDLER_I_BSS__INTEGRATIONS": "alpha",
            "HANDLER_I_BSS__ALPHA_TOKEN": "bss-token"}
     async with serving(env, monkeypatch) as (client, host):
@@ -53,8 +53,8 @@ async def test_fake_integration_is_wired_only_where_enabled(tmp_path, monkeypatc
         assert main.state.integrations.thread_types == {}
         assert bss.state.identity_provider is not None
         assert main.state.identity_provider is None
-        # Background task started under the instance lifespan.
-        assert Alpha.started == ["bss"]
+        # Loading work ran while the context loaded (no background task).
+        assert Alpha.loaded == ["bss"]
 
         # Manifest: authenticated, per instance.
         assert (await client.get("/i/bss/api/ui/manifest")).status_code == 401

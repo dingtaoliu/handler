@@ -18,7 +18,8 @@ or `google=error&reason=...`.
 from __future__ import annotations
 
 import os
-from typing import Iterable
+from collections.abc import Callable
+from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -115,9 +116,17 @@ def _iso(value) -> str | None:
 def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *, plan_limits=None,
                   return_to_origins: str | Iterable[str] | None = None) -> APIRouter:
     """`return_to_origins` defaults to the HANDLER_RETURN_TO_ORIGINS env var."""
-    router = APIRouter()
     origins = parse_origins(os.environ.get(RETURN_TO_ORIGINS_ENV, "")
                             if return_to_origins is None else return_to_origins)
+    return google_router_for(lambda: (oauth, plan_limits, origins), auth)
+
+
+def google_router_for(binding: Callable[[], tuple[GoogleOAuth | None, Any, frozenset[str]]],
+                      auth: Authenticator) -> APIRouter:
+    """The Google connection routes for the tenant `binding()` returns, read once per
+    request: its OAuth client (None when not configured), live plan limits and
+    allowed return origins."""
+    router = APIRouter()
     user = Depends(auth.require_principal)
 
     def owner_for(principal: Principal) -> str:
@@ -126,7 +135,7 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *, plan_limits
         # admin key acting as a user all get an isolated account.
         return user_owner(principal.user_id) if principal.user_id else INSTANCE_OWNER
 
-    def configured() -> GoogleOAuth:
+    def configured(oauth: GoogleOAuth | None) -> GoogleOAuth:
         if oauth is None:
             raise HTTPException(503, "Google OAuth is not configured: set "
                                 "GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET")
@@ -134,6 +143,7 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *, plan_limits
 
     @router.get("/api/connections/google")
     async def status(request: Request, principal: Principal = user) -> dict:
+        oauth, _, _ = binding()
         if oauth is None:
             return {"configured": False, "connection": None}
         connection = await oauth.connection(owner_for(principal))
@@ -153,9 +163,10 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *, plan_limits
     @router.post("/api/connections/google/start")
     async def start(request: Request, body: StartRequest | None = None,
                     principal: Principal = user) -> dict:
+        oauth, plan_limits, origins = binding()
         if plan_limits is not None and not plan_limits.current.connected_mail:
             return JSONResponse(upgrade_required("gmail", plan_limits.current), status_code=403)
-        google = configured()
+        google = configured(oauth)
         return_to = (body.return_to or "").strip() if body else ""
         if return_to and not allowed_return_to(return_to, origins):
             raise HTTPException(400, "return_to must be an http(s) URL whose origin is "
@@ -171,6 +182,7 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *, plan_limits
     async def callback(request: Request, state: str = "", code: str = "", error: str = "") -> RedirectResponse:
         # The state is signed, but re-check the allowlist anyway: it may have
         # shrunk since the flow started, and an unknown target falls back home.
+        oauth, _, origins = binding()
         return_to = oauth.state_return_to(state) if oauth is not None else None
         if return_to and not allowed_return_to(return_to, origins):
             return_to = None
@@ -199,7 +211,7 @@ def google_router(oauth: GoogleOAuth | None, auth: Authenticator, *, plan_limits
 
     @router.delete("/api/connections/google/{connection_id}")
     async def disconnect(connection_id: str, principal: Principal = user) -> dict:
-        google = configured()
+        google = configured(binding()[0])
         connection = await google.get_connection(connection_id)
         if connection is None or connection.owner != owner_for(principal):
             raise HTTPException(404, "connection not found")

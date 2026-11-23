@@ -14,7 +14,8 @@ Crontal  ──/api/v1/handler/connections/mailboxes──▶  Handler /api/mail
                                                        │
                      mail_accounts (+ encrypted password in `secrets`)
                                                        │
-   MailboxPoller (1 task per instance) ──imaplib/TLS──▶ IMAP  (poll every N s, UIDs)
+   host timer: mailbox.poll row per enabled mailbox
+     └─ MailboxPoller.poll_due ──imaplib/TLS──▶ IMAP  (poll every N s, UIDs)
         │ new message
         ▼
    MailboxService.ingest ── parse (GB18030/RFC 2047) ── mail_messages / mail_refs / mail_conversations
@@ -27,14 +28,22 @@ Crontal  ──/api/v1/handler/connections/mailboxes──▶  Handler /api/mail
 
 Code: `src/handler/runtime/integrations/mailbox/`.
 
+Polling (since role-split step 2): each enabled mailbox has one `mailbox.poll` due row,
+written in the same transaction as its account (`MailStore.put_mailbox` keeps an existing
+due time; a disabled or deleted mailbox has none). The host timer calls
+`MailboxPoller.poll_due`, which polls once and returns when the mailbox is due again: its
+interval, 5 s while a backfill or burst is pending, or a backoff after a failure. Saving,
+enabling or **Sync now** moves the row to now. Each start runs the kind's backfill: a row
+for every enabled mailbox (new ones staggered over 10 s), none for others.
+
 | File | Role |
 |---|---|
-| `__init__.py` | `MailboxIntegration`: thread type, routers, tools, poller, UI entries, prompt hints |
+| `__init__.py` | `MailboxIntegration`: thread type, routers, tools, the `mailbox.poll` timer kind, UI entries, prompt hints |
 | `config.py` | `Mailbox` record, API input models (`MailboxCreate`/`Update`/`Test`), provider presets |
 | `transport.py` | `MailTransport` interface and `StdlibTransport` (imaplib + smtplib, TLS only), modified UTF-7 folder names, error messages without secrets |
 | `message.py` | Raw message → `MailMessage`: charset fallbacks, RFC 2047/2231, 8-bit headers, attachments |
 | `service.py` | Sync algorithm, ingest, threading, wake rules, send, draft copies, connection test |
-| `poller.py` | Per-instance scheduler, process-wide IMAP concurrency, backoff, login-failure notice |
+| `poller.py` | `mailbox.poll` handler (one poll, returns the next due time), backfill, process-wide IMAP concurrency, backoff, login-failure notice |
 | `store.py` | `mail_*` tables on the instance's own store (SQLite or Postgres), created on first use |
 | `tools.py` | `mail_*` agent tools |
 | `api.py` | `/api/mailboxes` admin API |
@@ -222,7 +231,7 @@ Errors are specific: certificate not verified (with the self-signed hint), TLS v
 
 | Item | Estimate |
 |---|---|
-| Idle | One poller task per instance, at well under 1 MB. No IMAP connection is held between polls |
+| Idle | No task: each enabled mailbox is one due row for the host's one timer (role-split step 2). No IMAP connection is held between polls |
 | Per poll | One TLS session plus one message in memory at a time. Typical business mail (50 KB–2 MB) adds a few MB at peak |
 | Worst case | A 25 MB message parsed in memory is about 3× its size, so ~75 MB per concurrent poll. With `HANDLER_MAIL_CONCURRENCY=2` that is ~150 MB transient, process-wide. Lower `HANDLER_MAIL_MAX_MESSAGE_BYTES` (e.g. 10 MB) or the concurrency to 1 if memory is tight |
 | CPU | A TLS handshake + login + SEARCH is about 50–200 ms of CPU per poll, so <0.2% of a core for a mailbox at 120 s. Parsing is milliseconds per message. A 14-day backfill of a few hundred messages finishes in a few minutes at 100 messages per poll |

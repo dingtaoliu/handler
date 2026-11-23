@@ -1,5 +1,28 @@
 # Handoff: handler rebuild
 
+## 2026-11-22 shared runtime step 3b (not deployed)
+
+- **Branch `feat/shared-runtime-step3b`** (from `feat/shared-runtime` at d3f2eae). Details,
+  numbers and the test list: [step3b-progress.md](step3b-progress.md). No schema change and
+  no feature switch: rollback is the previous Heroku release.
+- **What changed:** one routed HTTP app for the host (routers registered once, the request's
+  tenant in a context variable); the tenant comes from the credentials and `/i/<name>` is a
+  hint (another tenant's admin key: 401 before any build); a tenant's store refuses work for
+  another tenant; one MCP route `/mcp/` keyed by the run token (harnesses now get it;
+  `/i/<name>/mcp/` still takes that tenant's tokens); the integration contract's request side
+  (`routers(TenantRoutes)` once per host, `serves_routes`, `load`; `background_tasks`
+  removed); Crontal tool discovery in context loading with a host-wide cache; a context-cache
+  race fixed (a fresh build could be closed under its waiters when tenants outnumber slots).
+- **Registry switch-on (runbook stage 1) is ready:** rehearsed on production's shape
+  (`store_pg/test_registry_switch_on.py`) and with `deploy/registry-switch-on.sh` against a
+  local server. Procedure and the exact config production must set: tenant-registry.md,
+  "Switching the registry on in production". It needs this branch deployed first.
+- **New settings** (defaults fit): `HANDLER_CRONTAL_DISCOVERY_TTL_SECONDS` (3600),
+  `HANDLER_CRONTAL_DISCOVERY_TIMEOUT_SECONDS` (10).
+- **Watch after deploy:** `crontal tools discovered` once per Crontal URL and `crontal tools
+  registered` per tenant; no `TenantMismatch`; `/healthz` and `/i/{main,bss,yeup}/healthz` 200;
+  main's admin key 401 on `/i/bss`.
+
 ## 2026-11-21 shared runtime Release 2 (Handler v65)
 
 - **Handler v65** (`main` at `133cf3f`, merging `feat/shared-runtime`; image
@@ -323,13 +346,13 @@ Repo and code layout:
 
 | Area | Where | Notes |
 |---|---|---|
-| Event queue, threads, leases | `store/` (SQLite + Postgres mixins), `dispatcher.py` | Thread types: chat, gmail, automation, crontal. One harness session per thread |
+| Event queue, threads, leases | `store/` (SQLite + Postgres mixins), `runner.py` (the host claim loop; `dispatcher.py` is it over one store) | Thread types: chat, gmail, automation, crontal. One harness session per thread |
 | Run lifecycle | `run.py` (`RunExecutor`, `_plan`) | Model/effort come from the newest chat message's override, then the thread, then per-type settings, then instance defaults. Lost sessions recover by replaying a recap of the transcript |
 | **Harnesses** | `harness/codex.py`, `harness/openai_agents.py` | See §3 |
 | Gateway | `gateway/` | MCP server at `/mcp/`; per-run tokens; `GrantPolicy` (exact action → glob → risk default); approvals; audit |
 | Crontal access | `gateway/crontal_api.py` (generic REST), `gateway/crontal.py` (older curated MCP tools) | See §4 |
 | Memory, settings, prompts | `memory.py`, `settings.py`, `instructions.py`, `web/settings_api.py` | Memory kinds, links, `memory_search`, run-start memory and lost-save recovery: `memory-kinds.md`. Settings are versioned in the store. Thread-type `harness`/`model`/`reasoning_effort` are enums (dropdowns). `GET /api/settings/{s}` returns `defaults`; `GET /api/settings/prompt?thread_type=` returns the rendered prompt |
-| Workspace sync | `workspaces.py`, `files.py` | A run marks its thread dirty and, when it ends (completed or failed), starts a background upload of that thread (`WorkspaceSync.flush_soon`); neither the reply nor the run slot waits for it. A failed upload stays dirty for the periodic flush every `HANDLER_SYNC_INTERVAL_SECONDS` (300); the shutdown flush on SIGTERM also waits for uploads under way and covers runs cancelled at shutdown. Uploads skip harness caches (`.tmp/` etc.), send only files whose content hash changed, and run 16 transfers in parallel |
+| Workspace sync | `workspaces.py`, `files.py` | A run marks its thread dirty and, when it ends (completed or failed), starts a background upload of that thread (`WorkspaceSync.flush_soon`); neither the reply nor the run slot waits for it. A failed upload stays dirty for the host's one workspace backstop (`WorkspaceBackstop`, every `HANDLER_SYNC_INTERVAL_SECONDS`, 300; role-split step 2); the shutdown flush on SIGTERM also waits for uploads under way and covers runs cancelled at shutdown. Uploads skip harness caches (`.tmp/` etc.), send only files whose content hash changed, and run 16 transfers in parallel |
 | Web UI | `web/static/app/` (full UI), `login.html`, `timeline.html` | Tabs: chat (model/effort selects, attachments), memory, automations, activity, usage, approvals, notifications, settings (prompt preview, "Default (…)" labels), tools, files, logs, connections, users |
 | Admin APIs | `web/admin_api.py`, `uploads.py` | Memory, automations, usage, tools, uploads, logs, connections |
 | Auth | `auth.py`, `web/auth_api.py` | Admin key (+ `X-Handler-User` to act as a user), per-user tokens, `/login` |
@@ -374,6 +397,7 @@ Repo and code layout:
   - Uploads take a workspace file through `upload_file`.
 - `crontal_api.*` and `crontal.*` are granted `allow` on the Heroku instance, because the owner wants full access for now. A proper authorization system for users and the agent is planned; the `actor: agent` claim is the hook for it.
 - Webhooks come in at `/ingest/crontal` (HMAC `X-Crontal-Signature`) and create `crontal:{entity_type}:{entity_id}` threads.
+- Legacy AI chats are carried over with `POST /api/threads/import` (bare admin key; the owner must already exist, so provision with `POST /api/users` first; history only, no input counted). See `legacy-chat-import.md`.
 
 ## 5. Deployments
 

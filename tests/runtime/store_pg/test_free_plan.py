@@ -63,7 +63,8 @@ AS_PROXY = {"Authorization": "Bearer admin-42", "X-Handler-User": "owner"}
 
 
 def lifecycle(app, name="m42"):
-    return slot(app, name).runtime.app.state.lifecycle
+    context = app.state.services.cache.cached(name)
+    return context.lifecycle if context is not None else None
 
 
 # --- the review's bug: max_runs in the plan table ----------------------------
@@ -367,11 +368,30 @@ async def test_run_event_bus_does_not_cross_tenants(two):
 
 async def test_mcp_run_tokens_do_not_cross_tenants(two):
     app, client = two
-    token = lifecycle(app, "m1").tokens.issue(RunContext(run_id="r", thread_key="chat:u:1"), 60)
+    m1 = app.state.services.cache.cached("m1")
+    token = lifecycle(app, "m1").tokens.issue(RunContext(run_id="r", thread_key="chat:u:1"), 60,
+                                              gateway=m1.gateway, tenant="m1")
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"}
     assert (await client.post("/i/m2/mcp/", json=body, headers=headers)).status_code == 401
     assert (await client.post("/i/m1/mcp/", json=body, headers=headers)).status_code != 401
+
+
+async def test_the_host_mcp_route_needs_no_main_tenant(two):
+    """Harnesses are given `/mcp/`: on a registry host with no `main`, the run token
+    alone still names the tenant (and a disabled or unknown one is refused)."""
+    app, client = two
+    assert app.state.tenants._slot("main") is None
+    m1 = app.state.services.cache.cached("m1")
+    token = lifecycle(app, "m1").tokens.issue(RunContext(run_id="r", thread_key="chat:u:1"), 60,
+                                              gateway=m1.gateway, tenant="m1")
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"}
+    response = await client.post("/mcp/", json=body, headers=headers)
+    assert response.status_code == 200, response.text
+    assert "memory_delete" in {tool["name"] for tool in response.json()["result"]["tools"]}
+    assert (await client.post("/mcp/", json=body, headers={
+        **headers, "Authorization": "Bearer admin-1"})).status_code == 401
 
 
 async def test_uploads_do_not_cross_tenants_even_with_hostile_ids(two):
@@ -495,14 +515,17 @@ async def test_signed_webhooks_and_mail_wake_it(base_env, spy):
         assert spy.starts["m42"] == 2
 
 
-async def test_an_anonymous_probe_does_not_keep_a_tenant_awake(base_env):
+async def test_an_anonymous_probe_does_not_build_a_tenant_context(base_env, spy):
     async with serve(base_env) as (app, client):
         await create(client)
-        await activate(client)
-        before = slot(app).last_activity
-        await asyncio.sleep(0.05)
-        await client.get("/i/m42/api/threads")  # no credential, tenant awake
-        assert slot(app).last_activity == before
+        await app.state.services.cache.settle()
+        builds = spy.starts.get("m42", 0)
+        if app.state.services.cache.cached("m42") is not None:
+            app.state.services.cache.invalidate("m42")
+            await app.state.services.cache.settle()
+        assert (await client.get("/i/m42/api/threads")).status_code == 401  # no credential
+        assert app.state.services.cache.cached("m42") is None
+        assert spy.starts.get("m42", 0) == builds
 
 
 async def test_unknown_names_cost_no_query(base_env, monkeypatch):
@@ -532,44 +555,6 @@ async def test_a_tenant_made_by_another_process_becomes_known(base_env, pg_dsn):
         app.state.tenants._names_read_at = 0
         await until(lambda: "other" in app.state.tenants._slots)
         assert (await client.get("/i/other/healthz")).status_code == 200
-
-
-@pytest.fixture
-def capped(base_env):
-    base_env["HANDLER_MAX_ACTIVE_TENANTS"] = "2"
-    return base_env
-
-
-async def test_the_cap_stops_the_least_recently_used_quiescent_tenant(capped, spy):
-    async with serve(capped) as (app, client):
-        for n in (1, 2, 3):
-            await create(client, n)
-        await activate(client, 1)
-        await asyncio.sleep(0.02)
-        await activate(client, 2)
-        await activate(client, 3)
-        assert slot(app, "m1").runtime is None  # least recently used went first
-        assert slot(app, "m2").runtime is not None and slot(app, "m3").runtime is not None
-        assert sum(spy.live.values()) == 2
-
-
-async def test_at_the_cap_with_nothing_quiescent_requests_wait_and_mail_is_spooled(capped, pg_dsn):
-    FakeHarness.gate = asyncio.Event()
-    async with serve(capped) as (app, client):
-        for n in (1, 2, 3):
-            await create(client, n, secrets={"HANDLER_ADMIN_KEY": f"admin-{n}",
-                                             "HANDLER_EMAIL_SECRET": f"mail-{n}"})
-        for n in (1, 2):
-            await activate(client, n)
-            await live_store(app, f"m{n}").put(chat(f"busy{n}"), SPEC)
-        await until(lambda: len(FakeHarness.runs) == 2)
-        response = await client.get("/i/m3/api/me", headers=admin("admin-3"))
-        assert response.status_code == 503
-        mail = await post_mail(client, "/i/m3/ingest/email", secret="mail-3")
-        assert mail.status_code == 202 and mail.json()["status"] == "spooled"
-        assert [r[0] for r in spooled(pg_dsn)] == ["m3"]
-        FakeHarness.gate.set()
-        FakeHarness.gate = None
 
 
 # --- spool retries are bounded ----------------------------------------------------
@@ -745,7 +730,7 @@ async def test_automations_are_refused_at_every_entry_point_on_free(base_env):
             response = await call(client, method, path, AS_PROXY)
             assert response.status_code == 403, (method, path)
             assert response.json()["feature"] == "automations"
-        gateway = slot(app).runtime.app.state.gateway
+        gateway = lifecycle(app).gateway
         offered = {spec.name for spec in await gateway.specs_for(RunContext("r", SPEC.key))}
         assert not {name for name in offered if name.startswith("automation_")}
         refused = await gateway.call(RunContext("r", SPEC.key, user_id="u"), "automation_list", {})
@@ -756,7 +741,7 @@ async def test_paid_tenants_get_the_automation_tools(base_env):
     async with serve(base_env) as (app, client):
         await create(client)
         await activate(client)
-        gateway = slot(app).runtime.app.state.gateway
+        gateway = lifecycle(app).gateway
         offered = {spec.name for spec in await gateway.specs_for(RunContext("r", SPEC.key))}
         assert "automation_create" in offered
 
@@ -770,10 +755,9 @@ class ToolViewHarness(FakeHarness):
     app = None
 
     async def run(self, req):
-        lifecycle_ = slot(ToolViewHarness.app).runtime.app.state.lifecycle
-        gateway = slot(ToolViewHarness.app).runtime.app.state.gateway
+        tokens = ToolViewHarness.app.state.services.tokens
         token = req.mcp_servers[0].headers["Authorization"].partition(" ")[2]
-        ctx = lifecycle_.tokens.resolve(token)
+        ctx, gateway = tokens.resolve_with_gateway(token)  # the run's own tenant's gateway
         ToolViewHarness.views.append({spec.name for spec in await gateway.specs_for(ctx)})
         result = await gateway.call(ctx, "automation_create", {
             "name": "digest", "prompt": "send the digest", "schedule": "every 1h"})
@@ -816,12 +800,13 @@ def tool_view(monkeypatch):
 
 async def test_an_upgrade_offers_automation_tools_on_the_next_run_without_a_restart(
         base_env, pg_dsn, spy, tool_view):
-    """Codex review finding 1: an open SSE stream kept the runtime (and its tools) alive."""
+    """Codex review finding 1: an open SSE stream kept the runtime (and its tools) alive.
+    Now the change retires the tenant's context (NOTIFY handler_tenant_changed); the
+    stream finishes on the old one, the next run builds from the new plan."""
     async with serve(base_env) as (app, client):
         tool_view.app = app
         await create(client, plan="free")
         await activate(client)
-        runtime = slot(app).runtime
         async with open_stream(app):
             await live_store(app).put(chat("before"), SPEC)
             await until(lambda: tool_view.created)
@@ -829,10 +814,11 @@ async def test_an_upgrade_offers_automation_tools_on_the_next_run_without_a_rest
             response = await client.put("/platform/tenants/42", headers=PLATFORM,
                                         json={"plan": "paid"})
             assert response.status_code == 200
-            await until(lambda: slot(app).runtime.app.state.lifecycle.limits.current.automations)
+            await until(lambda: lifecycle(app) is not None
+                        and lifecycle(app).limits.current.automations)
             await live_store(app).put(chat("after"), SPEC)
             await until(lambda: len(tool_view.created) == 2)
-            assert slot(app).runtime is runtime and spy.starts["m42"] == 1  # no restart
+            assert spy.starts["m42"] >= 2  # a fresh context, no process restart
             assert "automation_create" in tool_view.views[1] and tool_view.created[1] is True
         assert rows(pg_dsn, "SELECT name FROM handler_m42.schedules") == [("digest",)]
 
@@ -842,16 +828,17 @@ async def test_a_downgrade_removes_automation_tools_on_the_next_run(base_env, sp
         tool_view.app = app
         await create(client)
         await activate(client)
-        gateway = slot(app).runtime.app.state.gateway
+        gateway = lifecycle(app).gateway
         async with open_stream(app):
             await live_store(app).put(chat("before"), SPEC)
             await until(lambda: tool_view.created)
             assert "automation_create" in tool_view.views[0] and tool_view.created == [True]
             await client.put("/platform/tenants/42", headers=PLATFORM, json={"plan": "free"})
-            await until(lambda: not slot(app).runtime.app.state.lifecycle.limits.current.automations)
+            await until(lambda: lifecycle(app) is not None
+                        and not lifecycle(app).limits.current.automations)
             await live_store(app).put(chat("after"), SPEC)
             await until(lambda: len(tool_view.created) == 2)
-            assert spy.starts["m42"] == 1
+            assert spy.starts["m42"] >= 2
             assert not {n for n in tool_view.views[1] if n.startswith("automation_")}
             assert tool_view.created[1] is False  # a call from an older view is refused
             stale = await gateway.call(RunContext("r", SPEC.key, user_id="u"), "automation_create",
@@ -869,16 +856,15 @@ async def test_a_downgraded_tenants_schedules_are_kept_paused_and_resume(base_en
                             created_by="u", harness="openai_agents")
         await store.create_schedule(schedule)
         await client.put("/platform/tenants/42", headers=PLATFORM, json={"plan": "free"})
-        await until(lambda: slot(app).runtime is None
-                    or not slot(app).runtime.app.state.lifecycle.limits.current.automations)
+        await until(lambda: lifecycle(app) is None
+                    or not lifecycle(app).limits.current.automations)
         await asyncio.sleep(1.5)
         assert rows(pg_dsn, "SELECT count(*) FROM handler_m42.events "
                             "WHERE type = 'automation.fired'")[0][0] == 0
         assert rows(pg_dsn, "SELECT enabled FROM handler_m42.schedules") == [(True,)]
-        if slot(app).runtime is not None:
-            await until(lambda: not slot(app).runtime.app.state.lifecycle.dispatcher.active_count)
+        if lifecycle(app) is not None:
+            await until(lambda: not lifecycle(app).dispatcher.active_count)
             await asleep(app)
-        assert state(pg_dsn)[1] is None  # the paused schedule doesn't wake it
         await client.put("/platform/tenants/42", headers=PLATFORM, json={"plan": "paid"})
         await until(lambda: rows(pg_dsn, "SELECT count(*) FROM handler_m42.events "
                                          "WHERE type = 'automation.fired'")[0][0] == 1, timeout=20)

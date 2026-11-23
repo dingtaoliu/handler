@@ -29,8 +29,12 @@ from ..tenancy.limits import (
     next_reset,
     period_of,
 )
-from .postgres_hub import CONTROL_SCHEMA, SCHEMA_LOCK, SHARED_CHANNEL, PostgresHub
+from .postgres_hub import (
+    CONTROL_SCHEMA, SCHEMA_LOCK, SHARED_CHANNEL, PostgresHub,
+)
+from .base import WorkSignal, WorkState
 from .usage import PostgresUsage
+from .due_work import LOCAL_PG_DDL, DueWriter
 from .run_failures import (
     ALREADY_REPLAYED,
     FAILED_BEFORE_UPGRADE,
@@ -40,6 +44,7 @@ from .run_failures import (
     failure_row,
 )
 from .tasks import announce_routed
+from ..context import current_tenant
 from ..types import (
     ABANDONED_ERROR,
     Event,
@@ -119,6 +124,31 @@ async def _insert(conn: AsyncConnection, table: str, values: dict[str, Any]) -> 
     await conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", values)
 
 
+# Marks the tenant's wake in handler_control.tenant_state, inside the transaction
+# that wrote the work (step 3): the host's claim loop reads only that table to find
+# due tenants. LEAST keeps the earliest due time (the wait counts from then); the
+# version tells the loop a writer came after its read.
+MARK_WAKE_SQL = (f"UPDATE {CONTROL_SCHEMA}.tenant_state SET next_wake_at = "
+                 "LEAST(next_wake_at, now()), wake_version = wake_version + 1 "
+                 "WHERE schema_name = %s")
+
+# One tenant's claim outlook (store.work_state): which lanes `claim` would find now,
+# and when the next pending thread that isn't claimable now becomes so.
+WORK_STATE_SQL = (
+    "SELECT lane, bool_or(ready) AS ready, MIN(CASE WHEN NOT ready THEN "
+    "GREATEST(COALESCE(available_at, pending_since), COALESCE(lease_until, pending_since)) "
+    "END) AS later FROM (SELECT lane, available_at, lease_until, pending_since, "
+    "(available_at IS NULL OR available_at <= %(now)s) "
+    "AND (lease_until IS NULL OR lease_until < %(now)s) AS ready FROM threads "
+    "WHERE pending_since IS NOT NULL AND NOT dead) pending GROUP BY lane")
+
+
+def work_state_of(rows) -> WorkState:
+    lanes = frozenset(Lane(row["lane"]) for row in rows if row["ready"])
+    later = [row["later"] for row in rows if row["later"] is not None]
+    return WorkState(lanes, min(later) if later else None)
+
+
 async def earliest_work_at(conn: AsyncConnection, sinks: Sequence[str] | None,
                            *, schedules: bool = True) -> datetime | None:
     """When this schema next needs a runtime: queued work, schedules, outbox, expiries.
@@ -184,7 +214,8 @@ async def _latest_on_thread(conn: AsyncConnection, key: str, run_id: str,
 
 
 async def _charge_input(conn: AsyncConnection, event: Event, thread: ThreadSpec,
-                        limits: PlanLimits, action: str, now: datetime) -> OverLimit | None:
+                        limits: PlanLimits, action: str, now: datetime,
+                        due_table: str = f"{CONTROL_SCHEMA}.due_work") -> OverLimit | None:
     """Count this new input, or apply the plan's action if the month is used up.
 
     Runs after the insert won the idempotency check, in its transaction. The
@@ -208,6 +239,12 @@ async def _charge_input(conn: AsyncConnection, event: Event, thread: ThreadSpec,
     elif action == HOLD:
         await conn.execute("UPDATE events SET status = %s WHERE id = %s",
                            (EventStatus.HELD.value, event.id))
+        # The host timer releases it at the month boundary (inputs.release); same
+        # transaction, tenant from the search_path this transaction is scoped to.
+        await conn.execute(
+            f"INSERT INTO {due_table} (tenant, kind, ref, due_at, created_at, "
+            "updated_at) VALUES (current_schema(), 'inputs.release', '-', %s, %s, %s) "
+            "ON CONFLICT DO NOTHING", (next_reset(now), now, now))
         await conn.execute(
             "INSERT INTO held_inputs (event_id, thread_spec, held_at) VALUES (%s, %s, %s)",
             (event.id, Jsonb({"key": thread.key, "type": thread.type.value,
@@ -265,6 +302,7 @@ async def _release_held(conn: AsyncConnection, limits: PlanLimits,
 async def _put_event(
     conn: AsyncConnection, event: Event, thread: ThreadSpec | None, now: datetime,
     limits: PlanLimits | None = None, released: list | None = None,
+    due_table: str = f"{CONTROL_SCHEMA}.due_work",
 ) -> bool | OverLimit:
     """Insert an event idempotently and route its thread; False if a duplicate."""
     values = _values(event)
@@ -284,14 +322,18 @@ async def _put_event(
             if limits.at_limit == "hold" and released is not None:
                 # A new month's allowance goes to held inputs first, oldest first.
                 released.extend(await _release_held(conn, limits, now))
-            over = await _charge_input(conn, event, thread, limits, action, now)
+            over = await _charge_input(conn, event, thread, limits, action, now, due_table)
             if over is not None:
                 return over
         await _route(conn, thread, event.type, now)
     return True
 
 
-class PostgresCore(PostgresUsage):
+class TenantMismatch(RuntimeError):
+    """A tenant's store was used while working for another tenant."""
+
+
+class PostgresCore(DueWriter, PostgresUsage):
     """Core tables (events, threads, runs, messages, steps) on Postgres.
 
     Domain mixins use self._conn() for a pooled transaction, self._clock and
@@ -320,13 +362,27 @@ class PostgresCore(PostgresUsage):
             dsn, min_size=min_size, max_size=max_size, open=False,
             kwargs={"row_factory": dict_row, "options": self._options},
         )
-        self._wake = asyncio.Event()
+        self._wake = WorkSignal()
         self._ready: asyncio.Task[None] | None = None
         self._listener: asyncio.Task[None] | None = None
         self._listening = asyncio.Event()
         self._closed = False
         self.limits: LiveLimits | None = None  # set for registry-hosted tenants only
-        self._marks_wake = False  # a registry's tenant_state exists for a store on its own
+        # The tenant this store serves (set by the context build). Every transaction
+        # checks it against the tenant of the work in progress (context.current_tenant,
+        # set per request, run, firing and delivery pass): a mismatch fails here,
+        # before any statement runs (role-split-design.md, "Isolation").
+        self.tenant: str | None = None
+        # A store on its own connections marks a registry's tenant_state when one
+        # exists: None (no table), "legacy" (rows found by joining tenants, as in
+        # v65) or "schema" (tenant_state.schema_name and wake_version, step 3).
+        self._marks_wake: str | None = None
+
+    @property
+    def _due_table(self) -> str:
+        """Where this store's due work lives (store/due_work.py): the control schema
+        on a hub, or this store's own schema for a store with its own connections."""
+        return f"{CONTROL_SCHEMA}.due_work" if self._hub is not None else "due_work"
 
     # --- plumbing ---------------------------------------------------------
     async def _setup(self) -> None:
@@ -346,9 +402,15 @@ class PostgresCore(PostgresUsage):
                     sql.Identifier(self._schema)))
             for text in ddl:
                 await conn.execute(text)
+            await conn.execute(LOCAL_PG_DDL)  # the timer's rows, in this schema (due_work.py)
             cursor = await conn.execute(
-                "SELECT to_regclass(%s) AS state", (f"{CONTROL_SCHEMA}.tenant_state",))
-            self._marks_wake = (await cursor.fetchone())["state"] is not None
+                "SELECT to_regclass(%s) AS state, EXISTS (SELECT 1 FROM "
+                "information_schema.columns WHERE table_schema = %s "
+                "AND table_name = 'tenant_state' AND column_name = 'wake_version') AS v",
+                (f"{CONTROL_SCHEMA}.tenant_state", CONTROL_SCHEMA))
+            row = await cursor.fetchone()
+            self._marks_wake = (None if row["state"] is None
+                                else "schema" if row["v"] else "legacy")
         self._listener = asyncio.create_task(self._listen())
         await self._listening.wait()
 
@@ -409,9 +471,16 @@ class PostgresCore(PostgresUsage):
     def _conn(self) -> contextlib.AbstractAsyncContextManager[AsyncConnection]:
         return self._connection()
 
+    def _check_tenant(self) -> None:
+        here = current_tenant()
+        if self.tenant is not None and here is not None and here != self.tenant:
+            raise TenantMismatch(
+                f"store of tenant {self.tenant!r} used while working for {here!r}")
+
     @contextlib.asynccontextmanager
     async def _scoped(self):
         """A pooled transaction, scoped to this tenant before any other statement."""
+        self._check_tenant()
         async with self._pool.connection() as conn:
             if self._scope is not None:
                 await conn.execute(self._scope)
@@ -430,11 +499,16 @@ class PostgresCore(PostgresUsage):
         CLI process reaches a server that listens through a hub.
         """
         if self._hub is not None:
+            # Commits with the work: the host's claim loop finds the tenant from
+            # handler_control alone, even if nobody heard the NOTIFY.
+            await conn.execute(MARK_WAKE_SQL, (self._tenant_schema,))
             await conn.execute("SELECT pg_notify(%s, %s)", (SHARED_CHANNEL, self._tenant_schema))
             return
         await conn.execute("SELECT pg_notify(%s || '_' || current_schema(), ''), "
                            "pg_notify(%s, current_schema())", (CHANNEL, SHARED_CHANNEL))
-        if self._marks_wake:
+        if self._marks_wake == "schema":
+            await conn.execute(MARK_WAKE_SQL, (self._tenant_schema,))
+        elif self._marks_wake:
             # Commits with the work: the wake survives a NOTIFY nobody heard.
             await conn.execute(
                 sql.SQL("UPDATE {0}.tenant_state s SET next_wake_at = LEAST(s.next_wake_at, now()) "
@@ -487,7 +561,7 @@ class PostgresCore(PostgresUsage):
         released: list[tuple[Event, ThreadSpec]] = []
         async with self._conn() as conn:
             stored = await _put_event(conn, event, thread, self._clock(), self._plan_limits(),
-                                      released)
+                                      released, self._due_table)
             routed = bool(stored) and not isinstance(stored, OverLimit)
             if routed or released:
                 await self._notify(conn)
@@ -536,6 +610,15 @@ class PostgresCore(PostgresUsage):
                 await self._notify(conn)
         self._announce_released(released)
         return len(released)
+
+    async def release_held_due(self) -> datetime | None:
+        """The `inputs.release` handler (host timer): release what this month allows,
+        and come back at the next month boundary while anything is still held."""
+        await self.release_held_inputs()
+        async with self._conn() as conn:
+            cursor = await conn.execute("SELECT EXISTS (SELECT 1 FROM held_inputs) AS any")
+            held = (await cursor.fetchone())["any"]
+        return next_reset(self._clock()) if held else None
 
     async def claim(
         self, owner: str, lane: Lane, limit: int, lease_seconds: float
@@ -786,6 +869,12 @@ class PostgresCore(PostgresUsage):
         async with self._conn() as conn:
             return await earliest_work_at(conn, sinks, schedules=schedules)
 
+    async def work_state(self) -> WorkState:
+        now = self._clock()
+        async with self._conn() as conn:
+            cursor = await conn.execute(WORK_STATE_SQL, {"now": now})
+            return work_state_of(await cursor.fetchall())
+
     async def has_claimable(self, lane: Lane) -> bool:
         async with self._conn() as conn:
             now = self._clock()
@@ -896,6 +985,24 @@ class PostgresCore(PostgresUsage):
                  RunStatus.RUNNING.value),
             )
             return bool(cursor.rowcount)
+
+    async def request_run_cancel(self, run_id: str, by: str | None) -> bool:
+        """Set the run's cancel flag; False unless it is still running."""
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "UPDATE runs SET cancel_requested_at = COALESCE(cancel_requested_at, %s), "
+                "cancel_requested_by = COALESCE(cancel_requested_by, %s) "
+                "WHERE id = %s AND status = %s",
+                (self._clock(), by, run_id, RunStatus.RUNNING.value))
+            return bool(cursor.rowcount)
+
+    async def run_cancel_requested(self, run_id: str) -> bool:
+        async with self._conn() as conn:
+            cursor = await conn.execute(
+                "SELECT cancel_requested_at IS NOT NULL AS flagged FROM runs WHERE id = %s",
+                (run_id,))
+            row = await cursor.fetchone()
+            return bool(row and row["flagged"])
 
     async def sweep_abandoned_runs(self, thread_key: str | None = None) -> list[str]:
         now = self._clock()
@@ -1008,7 +1115,7 @@ class PostgresCore(PostgresUsage):
             with contextlib.suppress(Exception):
                 await self._ready
             if self._hub is not None:
-                self._hub.detach(self._tenant_schema)
+                self._hub.detach(self._tenant_schema, self._wake)
             else:
                 await self._pool.close()
 
@@ -1029,13 +1136,15 @@ from .postgres_domains import (  # noqa: E402
 from .deliveries import PostgresDeliveries  # noqa: E402
 from .tasks import TaskQueries  # noqa: E402
 from .task_outcomes import TaskOutcomeStore  # noqa: E402
+from .thread_imports import PostgresThreadImports  # noqa: E402
 from .thread_metadata import PostgresThreadMetadata  # noqa: E402
+from .due_work import PostgresDueWork  # noqa: E402
 
 
 class PostgresStore(
-    TaskOutcomeStore, TaskQueries, RunFailures, PostgresThreadMetadata, PostgresDeliveries, ScheduleMixin, ApprovalMixin,
+    TaskOutcomeStore, TaskQueries, RunFailures, PostgresThreadImports, PostgresThreadMetadata, PostgresDeliveries, ScheduleMixin, ApprovalMixin,
     QuestionMixin, AuditMixin,
     MemoryMixin, SettingsMixin,
-    NotificationMixin, ConnectionMixin, UsersMixin, PostgresCore,
+    NotificationMixin, ConnectionMixin, UsersMixin, PostgresDueWork, PostgresCore,
 ):
     """The full Postgres store: core plus every domain mixin."""

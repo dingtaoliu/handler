@@ -28,6 +28,7 @@ from .test_tenant_registry import (  # noqa: F401  (fixtures)
     FakeHarness,
     RuntimeSpy,
     activate,
+    context,
     admin,
     asleep,
     base_env,
@@ -234,7 +235,7 @@ async def drained(app, pg_dsn, name="m42"):
     schema = app.state.tenants._slots[name].tenant.schema_name
     await until(lambda: rows(pg_dsn, f"SELECT count(*) FROM {schema}.threads "
                                      "WHERE pending_since IS NOT NULL")[0][0] == 0)
-    await until(lambda: not slot(app, name).runtime.app.state.lifecycle.dispatcher.active_count)
+    await until(lambda: not app.state.services.runner.running(name))
 
 
 async def _available(*args):
@@ -464,10 +465,12 @@ async def test_held_inputs_do_not_block_deactivation_and_wake_at_reset(base_env,
         await activate(client)
         await fill_and_hold(live_store(app), 1)
         await drained(app, pg_dsn)
-        await asleep(app)  # asserts the stop succeeded
+        await asleep(app)  # held inputs keep no context
         now = datetime.now(timezone.utc)
         first = datetime(now.year + (now.month == 12), now.month % 12 + 1, 1, tzinfo=timezone.utc)
-        assert state(pg_dsn) == (None, first)
+        assert state(pg_dsn)[1] is None  # nothing for the claim loop until then
+        assert rows(pg_dsn, "SELECT due_at FROM handler_control.due_work "
+                            "WHERE kind = 'inputs.release'") == [(first,)]  # the timer's
 
 
 async def test_a_tenant_without_the_new_tables_can_still_be_stopped_and_swept(tenant, pg_dsn):
@@ -492,7 +495,7 @@ async def test_sleeping_tenant_is_woken_for_its_reset_and_runs_held_work(base_en
         with psycopg.connect(pg_dsn) as conn:  # the reset has arrived
             conn.execute("UPDATE handler_control.tenant_state SET next_wake_at = now() "
                          "WHERE name = 'm42'")
-        await until(lambda: slot(app).runtime is not None and consumed(pg_dsn, "held0"))
+        await until(lambda: context(app) is not None and consumed(pg_dsn, "held0"))
         assert rows(pg_dsn, "SELECT count(*) FROM handler_m42.held_inputs")[0][0] == 0
 
 
@@ -508,8 +511,7 @@ async def test_upgrade_releases_held_work_promptly_on_a_running_tenant(base_env,
         response = await client.put("/platform/tenants/42", headers=PLATFORM, json={"plan": "paid", "limits": {}})
         assert response.status_code == 200
         assert rows(pg_dsn, "SELECT count(*) FROM handler_m42.held_inputs")[0][0] == 0
-        assert spy.starts["m42"] == 1  # no restart was needed
-        assert store.limits.current.plan == "paid"
+        assert store.limits.current.plan == "paid"  # the running run's context follows too
         FakeHarness.gate.set()
 
 
@@ -692,7 +694,6 @@ async def test_mail_to_a_disabled_tenant_is_spooled_and_replayed_on_enable(base_
 
 
 async def test_mail_during_a_failed_activation_is_spooled_and_replayed(base_env, pg_dsn, spy, monkeypatch):
-    monkeypatch.setattr("handler.runtime.tenancy.host.ACTIVATION_RETRY_SECONDS", 0.2)
     async with serve(base_env) as (app, client):
         await create(client, secrets=MAIL_SECRETS)
         await activate(client)

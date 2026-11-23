@@ -30,6 +30,7 @@ from ..tasks import decode_cursor, encode_cursor
 from ..settings import HarnessSource, ModelName, ReasoningEffort, resolve_harness
 from ..types import Event, Lane, RunStatus, ThreadSpec, ThreadType
 from .auth_api import auth_router
+from .thread_import_api import thread_import_router
 
 logger = logging.getLogger("handler.runtime.web")
 
@@ -46,8 +47,16 @@ def _csv_values(values: list[str] | None) -> list[str] | None:
     return [part for part in flat if part] or None
 
 
-def render_page(path: Path, request: Request, instance_name: str, build: str) -> HTMLResponse:
+Name = str | Callable[[], str]  # an instance name, or a getter of the request's
+
+
+def name_of(instance_name: Name) -> str:
+    return instance_name if isinstance(instance_name, str) else instance_name()
+
+
+def render_page(path: Path, request: Request, instance_name: Name, build: str) -> HTMLResponse:
     base = request.scope.get("root_path", "").rstrip("/")
+    instance_name = name_of(instance_name)
     # Serialize trusted server config, keeping script contexts safe even under
     # an externally supplied ASGI root path.
     config = json.dumps({"base": base, "instance": instance_name, "build": build}).replace("<", "\\u003c")
@@ -57,7 +66,7 @@ def render_page(path: Path, request: Request, instance_name: str, build: str) ->
     return HTMLResponse(content, headers={"Cache-Control": "no-store"})
 
 
-def public_pages(instance_name: str, build: str) -> APIRouter:
+def public_pages(instance_name: Name, build: str) -> APIRouter:
     """The sign-in page and app shell: no credentials, no store, no runtime needed."""
     router = APIRouter()
 
@@ -81,15 +90,6 @@ def public_pages(instance_name: str, build: str) -> APIRouter:
         return render_page(TIMELINE_HTML.with_name("login.html"), request, instance_name, build)
 
     return router
-
-
-def public_shell(instance_name: str) -> FastAPI:
-    """The public pages alone, so a sleeping tenant can show them without waking."""
-    build = ui_build()
-    shell = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    shell.add_middleware(BuildHeaderMiddleware, build=build)
-    shell.include_router(public_pages(instance_name, build))
-    return shell
 
 
 def ui_build() -> str:
@@ -190,7 +190,8 @@ async def sse_stream(
 def create_app(
     store: Store, bus: RunEventBus, auth: Authenticator, *, default_harness: HarnessSource = "codex",
     uploads: UploadStore | None = None,
-    instance_name: str = "",
+    instance_name: Name = "",
+    cancel_wake: Callable[[str], None] | None = None,
 ) -> FastAPI:
     # No interactive docs / OpenAPI: the API is authenticated, its schema needn't be public.
     app = FastAPI(title="handler runtime", docs_url=None, redoc_url=None, openapi_url=None)
@@ -401,6 +402,20 @@ def create_app(
         await requeue_failed_run(run_id, f"retry:{user_id}", latest_only=True)
         return {"run_id": run_id, "thread_key": thread.key, "status": "queued"}
 
+    @router.post("/api/runs/{run_id}/cancel", status_code=202)
+    async def cancel_run(run_id: str, principal: Principal = principal_dep) -> Any:
+        """Stop a running run. The flag is stored on the run; the run checks it
+        between steps (at once in this process, through `cancel_wake`), ends as
+        `cancelled` and consumes its events. Anyone who can see the thread may cancel."""
+        run = await store.get_run(run_id)
+        if run is None or not can_see_thread(principal, run.thread_key):
+            raise HTTPException(404, "run not found")
+        if not await store.request_run_cancel(run_id, principal.identity):
+            raise HTTPException(409, f"run is {run.status.value}, not running")
+        if cancel_wake is not None:
+            cancel_wake(run_id)
+        return {"run_id": run_id, "thread_key": run.thread_key, "status": "cancel_requested"}
+
     @router.get("/api/runs/{run_id}")
     async def get_run(run_id: str, principal: Principal = principal_dep) -> Any:
         run = await store.get_run(run_id)
@@ -508,6 +523,8 @@ def create_app(
     async def timeline(request: Request, _: Principal = principal_dep) -> HTMLResponse:
         return html(TIMELINE_HTML, request)
 
+    # Before `router`: its greedy /api/threads/{key:path} routes must not shadow it.
+    app.include_router(thread_import_router(store, bus, auth, default_harness=default_harness))
     app.include_router(router)
     app.include_router(public_pages(instance_name, build))
     app.include_router(auth_router(auth, instance_name))

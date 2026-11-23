@@ -447,6 +447,7 @@ class RunExecutor:
         self.crontal_catalog = crontal_catalog
         self.tokens = tokens
         self.mcp_url = mcp_url
+        self.gateway: Any = None  # this tenant's gateway, carried by its run tokens
         self.settings = settings
         self.memory_tools = memory_tools
         self.harnesses = harnesses
@@ -456,8 +457,33 @@ class RunExecutor:
         self.raw_sink = RawSink(config.raw_dir)
         self.uploads = UploadStore(config.data_dir / "uploads")
         self.workspace_sync = workspace_sync or WorkspaceSync(None, config.data_dir)
+        # Run before each claimed thread runs: e.g. the grants version check, so a
+        # grants change saved by another process applies from the next run.
+        self.before_run: Callable[[], Awaitable[None]] | None = None
+        self._cancel_wakes: dict[str, asyncio.Event] = {}  # running runs in this process
+
+    def wake_cancel(self, run_id: str) -> None:
+        """A cancel was stored for this run: check the flag now, not at the next beat."""
+        wake = self._cancel_wakes.get(run_id)
+        if wake is not None:
+            wake.set()
+
+    async def _cancel_requested(self, run_id: str) -> bool:
+        check = getattr(self.store, "run_cancel_requested", None)
+        if check is None:
+            return False
+        try:
+            return await check(run_id)
+        except Exception:  # noqa: BLE001 - checked again at the next beat
+            logger.warning("cancel flag check failed", exc_info=True)
+            return False
 
     async def execute(self, lease: Lease) -> None:
+        if self.before_run is not None:
+            try:
+                await self.before_run()
+            except Exception:  # noqa: BLE001 - the run goes ahead with what it has
+                logger.warning("pre-run refresh failed", exc_info=True)
         thread = await self.store.get_thread(lease.thread_key)
         if thread is not None:
             await self._enforce_plan_harness(thread)
@@ -551,21 +577,40 @@ class RunExecutor:
     ) -> None:
         work = asyncio.create_task(self._run(lease, thread, run, events, repair=repair))
         lost = asyncio.Event()
+        cancelled = asyncio.Event()
+        wake = self._cancel_wakes[run.id] = asyncio.Event()
+
+        async def stop_work() -> None:
+            harness = self.harnesses.get(thread.harness)
+            if harness is not None:
+                # Stop the harness first: an SDK run left going would keep
+                # writing to the session after we hand it over.
+                with contextlib.suppress(Exception):
+                    await harness.interrupt(run.id)
+            work.cancel()
 
         async def heartbeat() -> None:
+            # Between steps of the run: the stored cancel flag (POST
+            # /api/runs/{id}/cancel) is read at every beat, and at once on a wake.
             current = lease
+            loop = asyncio.get_running_loop()
+            due = loop.time() + self.config.heartbeat_seconds
             while True:
-                await asyncio.sleep(self.config.heartbeat_seconds)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(wake.wait(), max(0.0, due - loop.time()))
+                wake.clear()
+                if await self._cancel_requested(run.id):
+                    cancelled.set()
+                    work.cancel()  # first: a harness error from the interrupt is no failure
+                    await stop_work()
+                    return
+                if loop.time() < due:
+                    continue
+                due = loop.time() + self.config.heartbeat_seconds
                 renewed = await self._renew(current)
                 if renewed is None:
                     lost.set()
-                    harness = self.harnesses.get(thread.harness)
-                    if harness is not None:
-                        # Stop the harness first: an SDK run left going would
-                        # keep writing to the session after we hand it over.
-                        with contextlib.suppress(Exception):
-                            await harness.interrupt(run.id)
-                    work.cancel()
+                    await stop_work()
                     return
                 current = renewed
 
@@ -573,9 +618,12 @@ class RunExecutor:
         try:
             await work
         except asyncio.CancelledError:
+            if cancelled.is_set():
+                await self._finish_cancelled(lease, thread, run)
+                return
             if not lost.is_set():
-                # Shutdown or user cancellation: the run cannot finish. The lease is
-                # still ours, so the shutdown flush may upload what it wrote.
+                # Shutdown: the run cannot finish. The lease is still ours, so
+                # the shutdown flush may upload what it wrote.
                 self.workspace_sync.mark_dirty(thread_slug(thread.key))
                 await self._abandon(thread, run, "abandoned: the runtime stopped mid-run")
                 raise
@@ -584,6 +632,23 @@ class RunExecutor:
             self._publish(thread.key, run.id, "run_finished", {"status": "abandoned"})
         finally:
             hb.cancel()
+            self._cancel_wakes.pop(run.id, None)
+
+    async def _finish_cancelled(self, lease: Lease, thread: Thread, run: Run) -> None:
+        """A cancelled run ends as `cancelled`; its events are consumed by it, so
+        they don't run again (a person can send the message again)."""
+        self.workspace_sync.mark_dirty(thread_slug(thread.key))
+        run.status, run.finished_at = RunStatus.CANCELLED, utcnow()
+        run.error = run.error or "cancelled on request"
+        try:
+            if not (await self.store.finish_run(lease, run)
+                    and await self.store.complete(lease, run.id, run.trigger_event_ids)):
+                logger.warning("lease lost while recording a cancel: %s", thread.key)
+        except Exception:  # noqa: BLE001 - the lease lapses; the sweep marks the run
+            logger.exception("could not record the cancelled run")
+        logger.info("run cancelled", extra={"thread_key": thread.key, "run_id": run.id})
+        self._publish(thread.key, run.id, "run_finished", {"status": "cancelled"})
+        await self._publish_task(thread, run.id)
 
     async def _unsaved(self, thread_key: str, messages: list[Message]) -> list[Message]:
         """Drop event messages already saved by an earlier failed attempt."""
@@ -663,7 +728,8 @@ class RunExecutor:
                                user_id=thread.owner_user_id,
                                acting_as=current.acting_as if current is not None
                                and current.run_id == run.id else thread.owner_user_id),
-                    ttl_seconds=plan.timeout_seconds + 300,
+                    ttl_seconds=plan.timeout_seconds + 300, gateway=self.gateway,
+                    tenant=self.config.instance_name,
                 )
                 mcp_servers.append(McpServerSpec(
                     name="handler", url=self.mcp_url,
