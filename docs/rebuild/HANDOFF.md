@@ -1,5 +1,28 @@
 # Handoff: handler rebuild
 
+## 2026-11-23 shared runtime Release 4 (Handler v68)
+
+- **Handler v68** (branch `release/shared-runtime-r4` at `8f1913a`: `main` `09a2bd8` +
+  `feat/shared-runtime` `80c0559` (steps 2, 3a, 3b and the legacy chat import) + the
+  mailbox conversations commit `c8fcd3f`; image `83dcf480fcfd`). Backup **b048**.
+  **Rollback: v66** (mailbox conversations only) or v65; schema changes are additive
+  (`due_work`, `runs.cancel_requested_*`, `thread_imports`). Registry still **off**.
+- **v67 incident:** v67 (`c4633289ed8c`, shared runtime without `c8fcd3f`) was released
+  3.5 minutes after another session released v66 (`c8fcd3f`, searchable mailbox
+  conversations), dropping it for about 5 minutes. v68 merges both. Before releasing,
+  re-read `heroku releases` right before `container:release`.
+- **Verified:** suite on `8f1913a` 1,761 passed / 5 skipped; `/healthz` and
+  `/i/{main,bss,yeup}/healthz` 200, unknown instance 404; no key and main's admin key 401
+  on `/i/bss`; `/i/bss/api/mailboxes/conversations` 200; `crontal tools discovered` once
+  and `crontal tools registered` for main, bss and yeup; no ERROR after start.
+- **`main` not yet advanced:** the main checkout has uncommitted copies of `c8fcd3f`'s
+  files. Once that is cleaned up, fast-forward `main` to `release/shared-runtime-r4`.
+- **Watch:** R14. v65 reached 320 MB RSS + 140 MB swap after 14 h and logged R14 on BSS
+  mail runs from about 09:30 UTC on November 23. Compare v68 over the next day before
+  adding free tenants.
+- **Next:** registry switch-on (`tenant-registry.md`, "Switching the registry on in
+  production"), then Crontal's `docs/handler-full-cutover.md` stage 2.
+
 ## 2026-11-22 shared runtime step 3b (not deployed)
 
 - **Branch `feat/shared-runtime-step3b`** (from `feat/shared-runtime` at d3f2eae). Details,
