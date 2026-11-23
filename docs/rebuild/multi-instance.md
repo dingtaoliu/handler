@@ -21,11 +21,14 @@ thread, run and event ids in different instances do not share records. This is
 application namespace isolation inside a shared process, database and OS account.
 Since role-split step 2 the host also shares one run event bus (each instance publishes
 and subscribes through its own tenant view of it), one timer for every instance's due
-work, and one workspace backstop. Since step 3 (3a) an instance is a **context** in
+work, and one workspace backstop. Since step 3 an instance is a **context** in
 the host's cache, like a registry tenant (tenant-registry.md, "Lifecycle"): one claim
 loop runs every instance's threads, one outbox loop delivers for all of them, one MCP
-app serves every run (a run token names its instance and is refused under another's
-URL), and `/i/<name>` is routed to the instance's context, built on demand. Instances
+route serves every run (`/mcp/`, keyed by the run token alone; `/i/<name>/mcp/` takes
+only that instance's tokens), and one routed HTTP app serves every instance (3b):
+`/i/<name>` is a hint, the request runs with that instance's context (built on demand)
+in a context variable, and another instance's admin key is refused with 401 before
+anything is built (tenant-registry.md, "Which tenant a request is for"). Instances
 on a shared hub get `handler_control.tenant_state` rows like registry tenants; an
 instance on its own store (SQLite, or the single-instance Postgres deployment) is
 built at start and kept, with its wake record in memory.
@@ -256,7 +259,9 @@ own merchant's AI user.
 Use `https://handler.example/i/bss` as BSS's Handler base URL in the associated
 Crontal deployment. Its proxy, webhook destination and API requests append their
 paths to that base. Existing main callers can continue using the root base URL.
-Internal harness MCP URLs use the respective `/i/<name>/mcp/` route.
+Internal harness MCP URLs use the host's one route, `/mcp/` on loopback: the run token
+names the instance (step 3b; before it, each instance's `/i/<name>/mcp/`, which is still
+accepted for that instance's tokens).
 
 Browser login, assets, API calls, downloads, SSE and timeline links preserve their
 instance prefix. Tokens and UI preferences use separate browser storage keys for
@@ -282,11 +287,11 @@ per instance through `HANDLER_I_BSS__HANDLER_RETURN_TO_ORIGINS`.
 
 ## Startup, shutdown and verification
 
-The host starts each instance's MCP manager and background services once before
-accepting traffic. A startup failure closes stores and unwinds started instances.
-On SIGTERM, Uvicorn allows HTTP requests two seconds to close (including SSE), then
-signals all instance owner tasks together. They flush workspaces, drain runs and
-flush again within concurrent 25-second budgets, before closing stores and MCP.
+The host starts its one MCP manager and its loops (timer, claim loop, outbox loop,
+workspace backstop) once before accepting traffic; instances are contexts, built on
+first use, and start no task. On SIGTERM, Uvicorn allows HTTP requests two seconds to
+close (including SSE), then the host stops its loops (runs drain first), closes every
+context (each flushes its workspaces within a 25-second budget) and then MCP.
 
 Run the runtime suite before deploying:
 

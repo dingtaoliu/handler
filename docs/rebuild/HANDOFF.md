@@ -1,5 +1,28 @@
 # Handoff: handler rebuild
 
+## 2026-11-22 shared runtime step 3b (not deployed)
+
+- **Branch `feat/shared-runtime-step3b`** (from `feat/shared-runtime` at d3f2eae). Details,
+  numbers and the test list: [step3b-progress.md](step3b-progress.md). No schema change and
+  no feature switch: rollback is the previous Heroku release.
+- **What changed:** one routed HTTP app for the host (routers registered once, the request's
+  tenant in a context variable); the tenant comes from the credentials and `/i/<name>` is a
+  hint (another tenant's admin key: 401 before any build); a tenant's store refuses work for
+  another tenant; one MCP route `/mcp/` keyed by the run token (harnesses now get it;
+  `/i/<name>/mcp/` still takes that tenant's tokens); the integration contract's request side
+  (`routers(TenantRoutes)` once per host, `serves_routes`, `load`; `background_tasks`
+  removed); Crontal tool discovery in context loading with a host-wide cache; a context-cache
+  race fixed (a fresh build could be closed under its waiters when tenants outnumber slots).
+- **Registry switch-on (runbook stage 1) is ready:** rehearsed on production's shape
+  (`store_pg/test_registry_switch_on.py`) and with `deploy/registry-switch-on.sh` against a
+  local server. Procedure and the exact config production must set: tenant-registry.md,
+  "Switching the registry on in production". It needs this branch deployed first.
+- **New settings** (defaults fit): `HANDLER_CRONTAL_DISCOVERY_TTL_SECONDS` (3600),
+  `HANDLER_CRONTAL_DISCOVERY_TIMEOUT_SECONDS` (10).
+- **Watch after deploy:** `crontal tools discovered` once per Crontal URL and `crontal tools
+  registered` per tenant; no `TenantMismatch`; `/healthz` and `/i/{main,bss,yeup}/healthz` 200;
+  main's admin key 401 on `/i/bss`.
+
 ## 2026-11-21 shared runtime Release 2 (Handler v65)
 
 - **Handler v65** (`main` at `133cf3f`, merging `feat/shared-runtime`; image

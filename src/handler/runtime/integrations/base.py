@@ -1,23 +1,36 @@
 """The integration interface.
 
 An integration is an external app (Crontal, email intake, Google) that
-contributes inputs, outputs, tools, identity, settings, prompt fragments, UI
-entries and background tasks to one instance. Every hook is optional and
-returns an empty contribution by default.
+contributes inputs, outputs, tools, identity, settings, prompt fragments and UI
+entries to tenants. Every hook is optional and returns an empty contribution by
+default. Integrations provide handlers and factories; the host owns every loop and
+the one HTTP app (role-split-design.md, "Integration contract").
 
-Lifecycle per instance:
+Once per host:
+- `routers(TenantRoutes)` is called on an instance that is **not configured**: the
+  host's one app registers the routes once. A handler finds the request's tenant
+  through the `TenantRoutes` it was given (`integration()`, that tenant's configured
+  instance; `context()`, its `IntegrationContext`). The routes are served only to
+  tenants that enable the integration and whose instance `serves_routes`; any other
+  tenant gets a 404.
+
+Per tenant context (built on demand, tenancy/contexts.py):
 1. the registry instantiates the class (no arguments);
-2. `configure(IntegrationConfig)` reads the integration's own namespaced config
-   and raises `ValueError` naming the missing variable when required config is
-   absent;
+2. `configure(IntegrationConfig)` reads the tenant's own config and raises
+   `ValueError` naming the missing variable when required config is absent;
 3. static hooks (`thread_types`, `settings_sections`, `settings_defaults`,
    `prompt_fragments`, `ui_entries`) are collected and checked for duplicates;
-4. runtime hooks (`routers`, `tool_sets`, `sinks`, `identity_provider`,
-   `background_tasks`) receive an `IntegrationContext` holding the instance's
-   core services;
+4. factories (`tool_sets`, `sinks`, `identity_provider`, `email_intake_observers`,
+   `serves_routes`) receive the tenant's `IntegrationContext` and return objects that
+   live as long as the context; they start nothing. Then `load(ctx)` is awaited for
+   loading work such as tool discovery, and called again before a run while it
+   reports it is not done;
 5. timer kinds (`timer_kinds`, static): the host's one timer calls a kind's
    handler with the tenant's `IntegrationContext` when one of its due rows is due
-   (see TimerKind). Integrations provide handlers; the host owns the loop.
+   (see TimerKind).
+
+There are no background tasks: time-driven work is a timer kind, and start-up work
+belongs in a factory (the Crontal tools are discovered while the context loads).
 
 The interface deliberately avoids importing core internals at runtime (only
 under TYPE_CHECKING) so integrations can later move to an entry-point package.
@@ -30,9 +43,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    import asyncio
-
     from fastapi import APIRouter
+
+    from ..tenancy.routing import TenantRoutes
 
     from ..gateway.base import ToolProvider, ToolSpec
     from ..sinks import Sink
@@ -72,6 +85,7 @@ class IntegrationContext:
     workspaces_dir: Any = None
     workspace_sync: Any = None
     file_store: Any = None
+    services: Any = None  # the host's shared services (e.g. crontal_discovery)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -150,19 +164,6 @@ class TimerKind:
     timeout_seconds: float = 120.0
 
 
-@dataclass(frozen=True)
-class BackgroundTask:
-    """A long-running coroutine started under the instance lifespan.
-
-    Not for time-driven work: that is a TimerKind. Left for the Crontal connector's
-    tool discovery, which moves into context loading in step 3 of
-    role-split-design.md. `run(stop)` must return soon after `stop` is set.
-    """
-
-    name: str
-    run: Callable[[asyncio.Event], Awaitable[None]]
-
-
 class Integration:
     """Base class; override `name` and the hooks you need."""
 
@@ -191,9 +192,16 @@ class Integration:
     def ui_entries(self) -> list[UIManifestEntry]:
         return []
 
-    # ---- runtime contributions --------------------------------------
-    def routers(self, ctx: IntegrationContext) -> list[APIRouter]:
+    # ---- the host's one app (once per host, not configured) ----------
+    def routers(self, tenant: TenantRoutes) -> list[APIRouter]:
+        """Routes registered once for the host. Handlers read the request's tenant
+        through `tenant`; never read `self`'s config here (it has none)."""
         return []
+
+    # ---- per-tenant factories ---------------------------------------
+    def serves_routes(self, ctx: IntegrationContext) -> bool:
+        """Whether this tenant is served this integration's routes (else 404)."""
+        return True
 
     def tool_sets(self, ctx: IntegrationContext) -> list[ToolProvider | ToolSpec]:
         return []
@@ -201,12 +209,16 @@ class Integration:
     def sinks(self, ctx: IntegrationContext) -> list[Sink]:
         return []
 
+    async def load(self, ctx: IntegrationContext) -> bool:
+        """Work while the tenant's context loads (awaited; start no task), e.g. tool
+        discovery. Return False to be called again before the tenant's next run (the
+        work is not done yet, such as tools a service hasn't listed); an exception is
+        logged and the context loads without it."""
+        return True
+
     def identity_provider(self, ctx: IntegrationContext) -> Any | None:
         """Where users come from and how to act as them. At most one per instance."""
         return None
-
-    def background_tasks(self, ctx: IntegrationContext) -> list[BackgroundTask]:
-        return []
 
     def timer_kinds(self) -> list[TimerKind]:
         """Kinds of due work this integration handles (static, like thread types)."""

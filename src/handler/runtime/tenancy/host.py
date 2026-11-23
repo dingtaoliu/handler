@@ -1,11 +1,24 @@
-"""The registry host's front door: requests to tenants, which are context.
+"""The host's front door: which tenant each request is for.
 
-A tenant has no runtime to start or stop (step 3, role-split-design.md): its context
-is built on demand into the host's cache (tenancy/contexts.py) and dropped when idle
-or changed; runs, timer firings and deliveries are the host loops'. This module keeps
-the request side until 3b replaces it with one routed app: routing by `/i/<name>`,
-who may cause a context to be built (only a credential that checks out), email a
-tenant cannot take (spooled, then replayed), and reacting to registry changes.
+The host has one routed app (web/host_app.py); this module decides, per request,
+which tenant's context it is served with (tenancy/routing.py `serving`):
+
+- `/i/<name>` (or no prefix, for `main`) is only a hint. A request's credentials must
+  be that tenant's: an admin key of another tenant is refused here (401) before
+  anything is built; a user token, sign-in ticket, webhook or email signature, OAuth
+  state or run token is checked against the hinted tenant's own and fails (401) if
+  it is another's. An unknown name is a 404.
+- MCP (`/mcp/`, and `/i/<name>/mcp/` as harnesses were given before) goes to the
+  host's one MCP app, which finds the tenant from the run token alone; under a
+  prefix the token must be that tenant's.
+- Unauthenticated public routes resolve the tenant from the hint only and never
+  touch its data: health (answered here on the registry host), the app shell and
+  sign-in pages (served with no context).
+
+`TenantHost` is the registry host's front: it also decides who may cause a context
+to be built (only a credential that checks out), keeps email a tenant cannot take
+(spooled, then replayed), and reacts to registry changes. `EnvRouter` is the
+env-defined host's.
 """
 
 from __future__ import annotations
@@ -31,8 +44,8 @@ from starlette.responses import JSONResponse
 
 from ..gateway.google_oauth import CALLBACK_PATH
 from ..gateway.secret_box import SecretBox
+from ..context import reset_current_tenant, set_current_tenant
 from ..store.sqlite_users import hash_token
-from ..web.app import public_shell
 from ..web.auth_api import ticket_hash
 from ..web.email_ingest import MAX_EMAIL_BYTES, sign_email, verify_email
 from ..web.ingest import verify as verify_crontal
@@ -87,6 +100,45 @@ def _is_public_page(path: str) -> bool:
     return path in ("/", "/app", "/app/", "/login") or path.startswith("/app/static/")
 
 
+def _is_mcp(scope) -> bool:
+    path = get_route_path(scope)
+    return path == "/mcp" or path.startswith("/mcp/")
+
+
+def _hinted(scope) -> bool:
+    """Whether the request named its tenant (`/i/<name>`), rather than the root alias."""
+    path = get_route_path(scope)
+    return path == "/i" or path.startswith("/i/")
+
+
+async def serve_mcp(mcp: Any, name: str | None, scope, receive, send) -> None:
+    """The host's MCP app. Under `/i/<name>` the run token must be that tenant's
+    (gateway/mcp_server.py compares it with the current tenant); at the root the
+    token alone names it."""
+    token = set_current_tenant(name)
+    try:
+        await mcp({**scope, "root_path": scope.get("root_path", "") + "/mcp"},
+                  receive, send)
+    finally:
+        reset_current_tenant(token)
+
+
+def names_another_tenant(tenants: Any, name: str, scope) -> bool:
+    """The request carries another tenant's admin key."""
+    owner = tenants.admin_key_owner(_bearer(scope, _headers(scope)))
+    return owner is not None and owner != name
+
+
+async def serve_public(app: Any, name: str, scope, receive, send) -> None:
+    """A public page for a tenant whose context isn't built: the host app with no
+    context (it serves only the public pages then), named for the tenant."""
+    token = set_current_tenant(name)
+    try:
+        await app(scope, receive, send)
+    finally:
+        reset_current_tenant(token)
+
+
 def _replaying(body: bytes, receive):
     """A `receive` that gives the already-read body, then defers to the real one."""
     delivered = False
@@ -104,7 +156,6 @@ def _replaying(body: bytes, receive):
 @dataclass
 class _Slot:
     tenant: Tenant
-    shell: Any = None  # the public pages, built when first asked for
     limits: Any = None  # PlanLimits for the tenant as last read, resolved on change only
     limits_key: tuple | None = None
     replay: asyncio.Task[Any] | None = None
@@ -143,10 +194,24 @@ class TenantHost:
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] not in ("http", "websocket"):
             return
+        if not _hinted(scope) and _is_mcp(scope):
+            # The host's one MCP route: the run token alone names the tenant (a host
+            # need not have a `main` for it).
+            await serve_mcp(self.services.mcp, None, scope, receive, send)
+            return
         name, child = self._route(scope)
         slot = self._slots.get(name) if name else None  # never a query: see load()
         if slot is None:
             await self._refuse(scope, receive, send, 404, "instance not found")
+            return
+        if _is_mcp(child):
+            if not slot.tenant.enabled:
+                await self._refuse(scope, receive, send, 404, "instance not found")
+                return
+            await serve_mcp(self.services.mcp, name, child, receive, send)
+            return
+        if names_another_tenant(self.services.tenants, name, child):
+            await self._refuse(scope, receive, send, 401, "authentication required")
             return
         limits = self._plan(slot)
         if limits is not None and not limits.email and self._is_email_ingest(child):
@@ -237,9 +302,7 @@ class TenantHost:
             await JSONResponse(refusal, 403)(scope, receive, send)
             raise _Answered
         if scope["type"] == "http" and scope["method"] in ("GET", "HEAD") and _is_public_page(path):
-            if slot.shell is None:
-                slot.shell = public_shell(slot.tenant.name)
-            await slot.shell(scope, receive, send)
+            await serve_public(self.services.app, slot.tenant.name, scope, receive, send)
             raise _Answered
         headers = _headers(scope)
         secrets = self.registry.unseal(slot.tenant)
@@ -281,6 +344,8 @@ class TenantHost:
             slot, "sign_in_tickets", "ticket_hash", ticket_hash(slot.tenant.name, ticket))
 
     async def _token_checks_out(self, slot: _Slot, token: str, secrets: dict[str, str]) -> bool:
+        if self.services.tenants.admin_key_owner(token) == slot.tenant.name:
+            return True
         admin_key = secrets.get("HANDLER_ADMIN_KEY", "")
         if admin_key and hmac.compare_digest(token.encode(), admin_key.encode()):
             return True
@@ -441,6 +506,14 @@ class TenantHost:
         limits_changed = before is not None and before != key
         config_changed = before_at is not None and tenant.updated_at != before_at
         slot.tenant = tenant
+        if before_at is None or config_changed:
+            # Admin keys name their tenant at the front door (names_another_tenant).
+            try:
+                admin_key = self.registry.unseal(tenant).get("HANDLER_ADMIN_KEY")
+            except Exception:  # noqa: BLE001 - an unreadable row is refused at build
+                logger.exception("tenant secrets unreadable", extra={"tenant": tenant.name})
+                admin_key = None
+            self.services.tenants.set_admin_key(tenant.name, admin_key)
         if key != slot.limits_key:
             slot.limits_key = key
             slot.limits = self._limits_for(tenant) if self._limits_for is not None else None
@@ -543,17 +616,29 @@ class TenantHost:
 
 class EnvRouter:
     """ASGI front of an env-defined host: `/i/<name>` (or `/` for main) to that
-    tenant's context, built on demand and pinned for the request."""
+    tenant's context, built on demand and pinned for the request. Admin keys of
+    every instance are known, so another tenant's key is refused before any build;
+    MCP goes to the host's one MCP app."""
 
-    def __init__(self, tenants: Any) -> None:
+    def __init__(self, tenants: Any, mcp: Any = None) -> None:
         self.tenants = tenants
+        self.mcp = mcp
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] not in ("http", "websocket"):
             return
+        if self.mcp is not None and not _hinted(scope) and _is_mcp(scope):
+            await serve_mcp(self.mcp, None, scope, receive, send)  # the token alone
+            return
         name, child = TenantHost._route(scope)
         if name is None or self.tenants.get(name) is None:
             await TenantHost._refuse(scope, receive, send, 404, "instance not found")
+            return
+        if self.mcp is not None and _is_mcp(child):
+            await serve_mcp(self.mcp, name, child, receive, send)
+            return
+        if names_another_tenant(self.tenants, name, child):
+            await TenantHost._refuse(scope, receive, send, 401, "authentication required")
             return
         async with self.tenants.use(name) as context:
             if context is None:

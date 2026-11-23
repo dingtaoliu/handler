@@ -16,7 +16,6 @@ from typing import Any
 
 from ..types import ThreadType
 from .base import (
-    BackgroundTask,
     Integration,
     IntegrationConfig,
     IntegrationContext,
@@ -50,10 +49,11 @@ def enabled_names(env: Mapping[str, str]) -> list[str] | None:
 
 @dataclass
 class RuntimeContributions:
-    routers: list[tuple[str, Any]] = field(default_factory=list)
+    """One tenant context's share of its integrations (factories' results)."""
+
     tool_sets: list[tuple[str, Any]] = field(default_factory=list)
     sinks: list[tuple[str, Any]] = field(default_factory=list)
-    background_tasks: list[tuple[str, BackgroundTask]] = field(default_factory=list)
+    route_bindings: dict[str, tuple[Any, Any]] = field(default_factory=dict)
     email_intake_observers: list[tuple[str, Any]] = field(default_factory=list)
     identity_provider: tuple[str, Any] | None = None
 
@@ -80,24 +80,17 @@ class LoadedIntegrations:
         return self.instance_name or "instance"
 
     def collect_runtime(self, ctx: IntegrationContext, *,
-                        reserved_routes: set[tuple[str, str]] = frozenset(),
                         reserved_tools: set[str] = frozenset()) -> RuntimeContributions:
-        """Call the runtime hooks and reject duplicate routes, tools and providers."""
+        """Call the per-tenant factories and reject duplicate tools, sinks and
+        providers. Routes are the host's (`host_routers`): here each integration only
+        says whether this tenant is served them."""
         out = RuntimeContributions()
-        routes: dict[tuple[str, str], str] = {key: "core" for key in reserved_routes}
         tools: dict[str, str] = {name: "core" for name in reserved_tools}
         sinks: dict[str, str] = {}
-        tasks: dict[str, str] = {}
         for integration in self.integrations:
             name = integration.name
-            for router in integration.routers(ctx):
-                for key in route_keys(router):
-                    if key in routes:
-                        raise IntegrationError(
-                            f"{self._where()}: route {key[0]} {key[1]} from {name!r} "
-                            f"duplicates one from {routes[key]!r}")
-                    routes[key] = name
-                out.routers.append((name, router))
+            if integration.serves_routes(ctx):
+                out.route_bindings[route_group(name)] = (integration, ctx)
             for tool_set in integration.tool_sets(ctx):
                 for spec in tool_specs(tool_set):
                     if spec.name in tools:
@@ -113,13 +106,6 @@ class LoadedIntegrations:
                         f"duplicates one from {sinks[sink.name]!r}")
                 sinks[sink.name] = name
                 out.sinks.append((name, sink))
-            for task in integration.background_tasks(ctx):
-                if task.name in tasks:
-                    raise IntegrationError(
-                        f"{self._where()}: background task {task.name!r} from {name!r} "
-                        f"duplicates one from {tasks[task.name]!r}")
-                tasks[task.name] = name
-                out.background_tasks.append((name, task))
             out.email_intake_observers.extend(
                 (name, observer) for observer in integration.email_intake_observers(ctx))
             provider = integration.identity_provider(ctx)
@@ -139,6 +125,35 @@ class LoadedIntegrations:
                               "requires": list(i.requires)} for i in self.integrations],
             "entries": [entry.to_dict(name) for name, entry in self.ui_entries],
         }
+
+
+def route_group(integration: str) -> str:
+    """The route group an integration's routes are served under (tenancy/routing.py)."""
+    return f"integration:{integration}"
+
+
+def host_routers(registry: IntegrationRegistry, auth: Any, *,
+                 reserved_routes: set[tuple[str, str]] = frozenset()
+                 ) -> list[tuple[str, list[Any]]]:
+    """Every registered integration's routers, built once for the host's app on an
+    unconfigured instance; a route two integrations (or one and the core) both
+    declare is refused, whether or not any tenant enables both."""
+    from ..tenancy.routing import TenantRoutes
+
+    routes: dict[tuple[str, str], str] = {key: "core" for key in reserved_routes}
+    out = []
+    for name in registry.names():
+        integration = registry.create(name)
+        routers = list(integration.routers(TenantRoutes(name, auth)))
+        for router in routers:
+            for key in route_keys(router):
+                if key in routes:
+                    raise IntegrationError(
+                        f"route {key[0]} {key[1]} from {name!r} duplicates one from "
+                        f"{routes[key]!r}")
+                routes[key] = name
+        out.append((name, routers))
+    return out
 
 
 def route_keys(router: Any) -> list[tuple[str, str]]:
@@ -174,6 +189,10 @@ class IntegrationRegistry:
 
     def names(self) -> list[str]:
         return sorted(self._factories)
+
+    def create(self, name: str) -> Integration:
+        """A fresh, unconfigured instance (for the host's routes)."""
+        return self._factories[name]()
 
     def load(self, names: list[str], *, instance_name: str = "",
              env: Mapping[str, str] | None = None, base_path: str = "",

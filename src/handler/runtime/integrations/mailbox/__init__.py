@@ -7,7 +7,8 @@ Connects any number of password-authenticated mailboxes to one instance:
   (`mail:<mailbox_id>:<conversation_id>`) with a `mail.received` event;
 - tools: `mail_list_mailboxes`, `mail_search`, `mail_read`, `mail_read_thread`,
   `mail_get_attachment`, `mail_draft_reply`, `mail_send` (always approved);
-- HTTP: `/api/mailboxes` admin API (Crontal proxies it);
+- HTTP: `/api/mailboxes` admin API (Crontal proxies it), registered once on the
+  host's app and served to tenants that enable `mailbox`;
 - email intake copies: with `/ingest/email` on (`HANDLER_EMAIL_SECRET`), each
   accepted message is also stored under the read-only `intake` account
   (`intake.py`; `HANDLER_EMAIL_INTAKE_ADDRESS` names it until mail arrives);
@@ -157,11 +158,16 @@ class MailboxIntegration(Integration):
         self.service, self.mail_store, self.poller = service, mail_store, poller
         return self._built[key]
 
-    def routers(self, ctx: IntegrationContext) -> list[Any]:
+    def routers(self, tenant) -> list[Any]:
+        """Registered once for the host: each request uses its tenant's service,
+        store and poller (that tenant's configured instance builds them)."""
         from .api import mailboxes_router
 
-        service, mail_store, poller = self._parts(ctx)
-        return [mailboxes_router(service, mail_store, poller, ctx.auth)]
+        def piece(index: int):
+            return tenant.local(lambda integration, ctx: integration._parts(ctx)[index],
+                                ("service", "mail_store", "poller")[index])
+
+        return [mailboxes_router(piece(0), piece(1), piece(2), tenant.auth)]
 
     def tool_sets(self, ctx: IntegrationContext) -> list[Any]:
         from ...run import thread_slug

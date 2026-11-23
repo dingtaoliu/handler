@@ -1,7 +1,8 @@
 # Shared host resources: inbox, runner and outbox
 
-Status: **owner decisions settled November 15, 2026 (decision 6 revised November 21); steps 0, 1, 2 and 4 built on
-`feat/shared-runtime`, step 3a (the runtime core of step 3) on `feat/shared-runtime-step3a`**
+Status: **owner decisions settled November 15, 2026 (decision 6 revised November 21); steps 0, 1, 2, 3a and 4 built on
+`feat/shared-runtime`, step 3b (the request side, which completes step 3) on
+`feat/shared-runtime-step3b`**
 (not deployed; see Build order). First written
 November 14, 2026 as a split into separate processes. Rewritten November 15, 2026 after
 review with the owner, who narrowed the goal to a single host. Follows
@@ -299,7 +300,7 @@ the same database; rollback is flipping it.
 | 0 | Native-only host setting and registry check. Workspace flush when a run ends. `client_message_id` from the Crontal frontend | Codex cannot be enabled on production; a restart loses no finished run's files |
 | 1 | Failed runs recorded and replayable, threads never blocked; redeliver for dead deliveries; operator alerts on both | No failure blocks a thread, and every failure reaches the operator with a way to replay |
 | 2 | One timer over `handler_control.due_work`; one housekeeping pass, including the 90-day retention cleanup (owner decision 9); one bus for the host; cancel as a stored flag | No per-tenant scheduler, housekeeping or poller tasks remain. **Built** on `feat/shared-runtime-step2` (not deployed; see Progress) |
-| 3 | One claim loop across tenants; one host `RunGate` for every tenant, env-defined ones included, ranking interactive before background across tenants (**done**); tenant context cache; a tool view built per run from live entitlements, so a plan change takes effect on the next run (**done**); one routed app and one MCP route; the new integration contract; `TenantHost` lifecycle removed. Then switch on the registry and import `main`, `bss` and `yeup`. Split in two: **3a, the runtime core** (context cache, one claim loop, one outbox loop, `TenantHost` lifecycle removed): **built** on `feat/shared-runtime-step3a`; **3b, the request side** (one routed app and MCP route, routers, tool sets and sinks as context factories, the Crontal connector): next (see Progress) | With 50 idle tenants, the process issues no tenant-scoped queries; a busy tenant cannot delay another's chat; the three tenants run unchanged from the registry |
+| 3 | One claim loop across tenants; one host `RunGate` for every tenant, env-defined ones included, ranking interactive before background across tenants (**done**); tenant context cache; a tool view built per run from live entitlements, so a plan change takes effect on the next run (**done**); one routed app and one MCP route; the new integration contract; `TenantHost` lifecycle removed. Then switch on the registry and import `main`, `bss` and `yeup`. Split in two: **3a, the runtime core** (context cache, one claim loop, one outbox loop, `TenantHost` lifecycle removed): **built** on `feat/shared-runtime-step3a`; **3b, the request side** (one routed app and MCP route, routers, tool sets and sinks as context factories, the Crontal connector, the registry switch-on rehearsal): **built** on `feat/shared-runtime-step3b` (see Progress). Step 3 is done; the switch-on itself is an operator step (tenant-registry.md) | With 50 idle tenants, the process issues no tenant-scoped queries; a busy tenant cannot delay another's chat; the three tenants run unchanged from the registry |
 | 4 | Reader pool as child processes, with email parsing and image downscaling moved in; size caps in the main process; memory logged per run | A synthetic oversized PDF kills only its child, and the tool call reports an error. **Built** on `feat/shared-runtime-readers` (not deployed), with the review follow-up: no idle reader processes, fairness at admission only, an RSS cap per reader. Defaults 1 reader at 220 MB for the 512 MB dyno; measurements in [multi-instance.md](multi-instance.md#memory-budget-measured-november-17-amd64-linux-python-312-release-image). PDF text now comes from PyMuPDF (page blocks) instead of MarkItDown, which needed more than 220 MB even for 2 pages; 2- to 400-page PDFs read at a 164 MB reader peak (on `feat/shared-runtime`). Not behind `HANDLER_SHARED_RUNTIME` |
 | 5 | Idempotent tool side effects | A run retried after a crash does not repeat a sent email or a Crontal write |
 | 6 | Outbox subscriptions and one delivery pool with per-tenant limits | A failing sink for one tenant does not delay another tenant's deliveries |
@@ -421,11 +422,42 @@ Progress (branch `feat/shared-runtime`, November 15, 2026):
     email and its replay, reacting to registry changes). At boot every tenant is due
     once. `RegistryTimerDirectory` and the env `TenantDirectory` wiring are replaced by
     `HostTimerDirectory` over the cache. Env hosts route through `EnvRouter`.
-  - **Remains for 3b:** one routed app instead of a FastAPI sub-app per context; the
-    MCP route keyed by token alone (the app is already one); routers, tool sets and
-    sinks as tenant-context factories; Crontal tool discovery in context loading (it
-    is still a start-up task per context until it succeeds, cancelled when the context
-    closes); then the registry switch-on and import of `main`, `bss` and `yeup`.
+  - **Remained for 3b** (done, below): one routed app, the MCP route keyed by token
+    alone, the integration contract's request side, Crontal discovery in context
+    loading, and the registry switch-on.
+
+- **Step 3b: built** on `feat/shared-runtime-step3b` (November 22, 2026, not deployed;
+  details, numbers and test list in [step3b-progress.md](step3b-progress.md)). No
+  feature switch and no schema change: rollback is the Heroku release.
+  - **One routed app** (`web/host_app.py`, `tenancy/routing.py`): `HostServices.app` is
+    built once; every router is registered once with proxies (`TenantLocal`,
+    `TenantAuth`) that read the request tenant's objects from the context the front
+    serves it with (`serving`: a context variable plus `current_tenant`). Routes only
+    some tenants have are route groups (`email_ingest`, `integration:<name>`), refused
+    with 404 by `TenantGuard`, which also applies the plan's refusals. A tenant's
+    `context.app` is a view of the one app, not an app; the per-tenant public shell is
+    gone (public pages are the app served with no context).
+  - **Routing by credentials** (`tenancy/host.py`): `/i/<name>` is a hint; another
+    tenant's admin key is a 401 before any build (env and registry hosts); tokens,
+    tickets, signatures and OAuth state are checked against the hinted tenant's own;
+    unknown names are 404.
+  - **Isolation in the store:** a tenant's store refuses a transaction while the work
+    in progress is another tenant's (`TenantMismatch`, checked against
+    `current_tenant` before any statement).
+  - **One MCP route:** `/mcp/`, keyed by the run token alone, is what harnesses get;
+    `/i/<name>/mcp/` is accepted for that tenant's tokens.
+  - **Integration contract, request side:** `routers(TenantRoutes)` once per host,
+    `serves_routes`, `load(ctx)`; tool sets and sinks are context factories;
+    `background_tasks` removed; Crontal and mailbox ported (integrations.md).
+  - **Crontal discovery** in context loading, cached once per Crontal URL for the host
+    with a TTL and a host-wide backoff; each tenant's connector uses its own token; a
+    tenant without the listing yet works without the tools.
+  - **Found and fixed under load** (from 3a): the context cache could close a fresh
+    build before its waiters took it, when tenants outnumber cache slots.
+  - **Checks:** the registry switch-on rehearsal on production's shape, isolation tests
+    for the routed app (env and registry), the discovery cache, and a 50-tenant load
+    test (all runs complete, at most 12 connections and 6 runs, chats before a busy
+    tenant's background flood, idle again afterwards).
 
 The tenant registry (multi-tenant stage 2) is switched on only at the end of step 3, so
 production never runs the activation lifecycle this design removes.

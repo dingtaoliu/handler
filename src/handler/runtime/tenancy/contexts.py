@@ -3,7 +3,7 @@
 `TenantContext` is everything a run, a timer firing, a delivery or a request needs for
 one tenant: its store on the shared hub, settings and grant policy, live plan limits,
 gateway, executor, sinks, timer handlers, workspace and file store, integration
-context, and the tenant's HTTP sub-app. Building one starts no long-lived task and
+context, and the route groups of the host's one app it is served. Building one starts no long-lived task and
 opens no connection of its own on a hub (the store borrows the hub's pool).
 
 `ContextCache` keeps built contexts in an LRU with a TTL. A context in use (a run, a
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -42,7 +43,7 @@ class TenantContext:
     name: str
     key: str  # its due-work and tenant_state key: the schema name, or "local" (SQLite)
     store: Any
-    app: Any = None  # the tenant's HTTP sub-app (3b replaces it with one routed app)
+    app: Any = None  # its view of the host's one app (tenancy/routing.py TenantApp)
     executor: Any = None
     gateway: Any = None
     outbox: Any = None  # the tenant's sinks (the host outbox loop delivers for it)
@@ -55,6 +56,13 @@ class TenantContext:
     max_concurrent: int | None = None
     lease_seconds: float = 120.0
     close: Callable[[], Awaitable[None]] | None = None
+    instance_name: str = ""  # as configured: "" for a lone instance, else its name
+    routes: dict = field(default_factory=dict)  # route group -> what its handlers use
+
+    @property
+    def parts(self) -> Any:
+        """The tenant's objects the host app's handlers read (web/host_app.py)."""
+        return self.lifecycle
 
 
 @dataclass
@@ -66,6 +74,17 @@ class _Entry:
     users: int = 0
     last_used: float = 0.0
     retired: bool = False
+    closed: bool = False
+    build: "_Build | None" = None  # the build it came from, while users wait on it
+
+
+@dataclass
+class _Build:
+    """One context build and the users waiting for it. Until they resume and take
+    the entry it has no user, so it must not be trimmed, expired or closed."""
+
+    task: "asyncio.Task[_Entry] | None" = None
+    waiters: int = 0
 
 
 Builder = Callable[[str], Awaitable[TenantContext]]
@@ -81,7 +100,7 @@ class ContextCache:
         self._clock = clock
         self._entries: OrderedDict[str, _Entry] = OrderedDict()
         self._generations: dict[str, int] = {}
-        self._building: dict[str, asyncio.Task[_Entry]] = {}
+        self._building: dict[str, _Build] = {}
         self._closing: set[asyncio.Task[None]] = set()
         self._closed = False
         self.builds = 0  # for tests and logs
@@ -116,22 +135,38 @@ class ContextCache:
             entry.users += 1
             self._entries.move_to_end(name)
             return entry
-        task = self._building.get(name)
-        if task is None:
-            task = asyncio.create_task(self._build(name), name=f"context-build:{name}")
-            self._building[name] = task
-            task.add_done_callback(lambda _t, name=name: self._building.pop(name, None))
-        entry = await asyncio.shield(task)
-        entry.users += 1
+        build = self._building.get(name)
+        if build is None:
+            build = _Build()
+            build.task = asyncio.create_task(self._build(name, build),
+                                             name=f"context-build:{name}")
+            self._building[name] = build
+            build.task.add_done_callback(lambda _t, name=name, build=build: (
+                self._building.pop(name, None) if self._building.get(name) is build else None))
+        build.waiters += 1
+        try:
+            entry = await asyncio.shield(build.task)
+        finally:
+            build.waiters -= 1
+        if entry.closed:  # backstop: never hand out a closed context
+            return await self._acquire(name)
+        entry.users += 1  # no await since the wait ended: nothing closed it in between
+        if build.waiters <= 0:
+            entry.build = None
         return entry
 
-    async def _build(self, name: str) -> _Entry:
+    @staticmethod
+    def _idle(entry: _Entry) -> bool:
+        """Nobody holds it or is about to."""
+        return entry.users <= 0 and (entry.build is None or entry.build.waiters <= 0)
+
+    async def _build(self, name: str, build: _Build) -> _Entry:
         if self.build is None:
             raise LookupError(f"tenant {name!r} is not served here")
         generation = self._generations.get(name, 0)
         context = await self.build(name)
         self.builds += 1
-        entry = _Entry(name, generation, context, last_used=self._clock())
+        entry = _Entry(name, generation, context, last_used=self._clock(), build=build)
         old = self._entries.pop(name, None)
         if old is not None:
             self._retire(old)
@@ -145,7 +180,7 @@ class ContextCache:
     def _release(self, entry: _Entry) -> None:
         entry.users -= 1
         entry.last_used = self._clock()
-        if entry.users <= 0 and entry.retired:
+        if entry.retired and self._idle(entry):
             self._close(entry)
             return
         self._trim()
@@ -170,14 +205,14 @@ class ContextCache:
 
     def _retire(self, entry: _Entry) -> None:
         entry.retired = True
-        if entry.users <= 0:
+        if self._idle(entry):
             self._close(entry)
 
     def expire(self) -> int:
         """Close unused contexts older than the TTL; returns how many (no queries)."""
         now = self._clock()
         stale = [entry for entry in self._entries.values()
-                 if not entry.pinned and entry.users <= 0
+                 if not entry.pinned and self._idle(entry)
                  and now - entry.last_used >= self.ttl_seconds]
         for entry in stale:
             del self._entries[entry.name]
@@ -187,7 +222,7 @@ class ContextCache:
     def _trim(self) -> None:
         while len(self._entries) > self.max_size:
             victim = next((entry for entry in self._entries.values()
-                           if not entry.pinned and entry.users <= 0), None)
+                           if not entry.pinned and self._idle(entry)), None)
             if victim is None:
                 return  # everything is in use: over the size until something is released
             del self._entries[victim.name]
@@ -195,6 +230,9 @@ class ContextCache:
 
     def _close(self, entry: _Entry) -> None:
         entry.retired = True
+        if entry.closed:
+            return
+        entry.closed = True
         close = entry.context.close
         if close is None:
             return
@@ -214,14 +252,18 @@ class ContextCache:
         """Wait for contexts being closed (tests, shutdown)."""
         while self._closing:
             await asyncio.gather(*list(self._closing), return_exceptions=True)
+            # Gathering finished tasks need not yield, and their done callbacks (which
+            # leave _closing) only run when this does.
+            await asyncio.sleep(0)
 
     async def close(self) -> None:
         self._closed = True
         if self._building:
-            await asyncio.gather(*list(self._building.values()), return_exceptions=True)
+            await asyncio.gather(*(b.task for b in list(self._building.values())),
+                                 return_exceptions=True)
         for entry in list(self._entries.values()):
             del self._entries[entry.name]
-            if entry.users <= 0:
+            if self._idle(entry):
                 self._close(entry)
             else:
                 entry.retired = True
@@ -247,7 +289,22 @@ class HostTenants:
         self.cache = cache
         self._served: dict[str, ServedTenant] = {}
         self._by_key: dict[tuple[int, str], str] = {}
+        self._admin_keys: dict[bytes, str] = {}  # sha256(admin key) -> tenant
         self.on_hint: Callable[[str], None] | None = None  # the host loops' wake
+
+    # --- credentials that name a tenant (the front door, tenancy/host.py) ------
+    def set_admin_key(self, name: str, key: str | None) -> None:
+        """Remember which tenant an admin key belongs to (only its digest is kept)."""
+        for digest in [d for d, owner in self._admin_keys.items() if owner == name]:
+            del self._admin_keys[digest]
+        if key:
+            self._admin_keys[hashlib.sha256(key.encode()).digest()] = name
+
+    def admin_key_owner(self, credential: str | None) -> str | None:
+        """The tenant whose admin key this is, if it is one."""
+        if not credential:
+            return None
+        return self._admin_keys.get(hashlib.sha256(credential.encode()).digest())
 
     def serve(self, tenant: ServedTenant) -> None:
         old = self._served.get(tenant.name)
@@ -257,6 +314,7 @@ class HostTenants:
         self._by_key[(id(tenant.hub), tenant.key)] = tenant.name
 
     def drop(self, name: str) -> None:
+        self.set_admin_key(name, None)
         old = self._served.pop(name, None)
         if old is not None:
             self._by_key.pop((id(old.hub), old.key), None)

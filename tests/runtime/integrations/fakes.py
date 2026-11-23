@@ -1,14 +1,11 @@
 """Fake integrations used by the integration registry tests."""
 from __future__ import annotations
 
-import asyncio
-
 from fastapi import APIRouter
 
 from handler.runtime.gateway.base import ToolSpec
 from handler.runtime.types import Risk
 from handler.runtime.integrations import (
-    BackgroundTask,
     Integration,
     IntegrationRegistry,
     ThreadTypeSpec,
@@ -45,7 +42,7 @@ class Alpha(Integration):
 
     name = "alpha"
     label = "Alpha"
-    started: list[str] = []
+    loaded: list[str] = []
 
     def configure(self, config):
         super().configure(config)
@@ -57,13 +54,13 @@ class Alpha(Integration):
     def ui_entries(self):
         return [UIManifestEntry("connection", "alpha", "Alpha")]
 
-    def routers(self, ctx):
+    def routers(self, tenant):
         router = APIRouter()
-        token = self.token
 
         @router.get("/ingest/alpha")
         async def ingest():
-            return {"instance": ctx.instance_name, "token": token}
+            return {"instance": tenant.context().instance_name,
+                    "token": tenant.integration().token}
 
         return [router]
 
@@ -77,11 +74,9 @@ class Alpha(Integration):
     def identity_provider(self, ctx):
         return object()
 
-    def background_tasks(self, ctx):
-        async def run(stop: asyncio.Event):
-            Alpha.started.append(ctx.instance_name)
-            await stop.wait()
-        return [BackgroundTask("poller", run)]
+    async def load(self, ctx):
+        Alpha.loaded.append(ctx.instance_name)
+        return True
 
 
 class Beta(Integration):

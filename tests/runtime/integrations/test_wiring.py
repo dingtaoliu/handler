@@ -34,7 +34,7 @@ def instance_app(host, name):
 
 
 async def test_fake_integration_is_wired_only_where_enabled(tmp_path, monkeypatch):
-    Alpha.started.clear()
+    Alpha.loaded.clear()
     env = {**config(tmp_path), "HANDLER_I_BSS__INTEGRATIONS": "alpha",
            "HANDLER_I_BSS__ALPHA_TOKEN": "bss-token"}
     async with serving(env, monkeypatch) as (client, host):
@@ -53,8 +53,8 @@ async def test_fake_integration_is_wired_only_where_enabled(tmp_path, monkeypatc
         assert main.state.integrations.thread_types == {}
         assert bss.state.identity_provider is not None
         assert main.state.identity_provider is None
-        # Background task started under the instance lifespan.
-        assert Alpha.started == ["bss"]
+        # Loading work ran while the context loaded (no background task).
+        assert Alpha.loaded == ["bss"]
 
         # Manifest: authenticated, per instance.
         assert (await client.get("/i/bss/api/ui/manifest")).status_code == 401

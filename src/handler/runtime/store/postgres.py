@@ -44,6 +44,7 @@ from .run_failures import (
     failure_row,
 )
 from .tasks import announce_routed
+from ..context import current_tenant
 from ..types import (
     ABANDONED_ERROR,
     Event,
@@ -328,6 +329,10 @@ async def _put_event(
     return True
 
 
+class TenantMismatch(RuntimeError):
+    """A tenant's store was used while working for another tenant."""
+
+
 class PostgresCore(DueWriter, PostgresUsage):
     """Core tables (events, threads, runs, messages, steps) on Postgres.
 
@@ -363,6 +368,11 @@ class PostgresCore(DueWriter, PostgresUsage):
         self._listening = asyncio.Event()
         self._closed = False
         self.limits: LiveLimits | None = None  # set for registry-hosted tenants only
+        # The tenant this store serves (set by the context build). Every transaction
+        # checks it against the tenant of the work in progress (context.current_tenant,
+        # set per request, run, firing and delivery pass): a mismatch fails here,
+        # before any statement runs (role-split-design.md, "Isolation").
+        self.tenant: str | None = None
         # A store on its own connections marks a registry's tenant_state when one
         # exists: None (no table), "legacy" (rows found by joining tenants, as in
         # v65) or "schema" (tenant_state.schema_name and wake_version, step 3).
@@ -461,9 +471,16 @@ class PostgresCore(DueWriter, PostgresUsage):
     def _conn(self) -> contextlib.AbstractAsyncContextManager[AsyncConnection]:
         return self._connection()
 
+    def _check_tenant(self) -> None:
+        here = current_tenant()
+        if self.tenant is not None and here is not None and here != self.tenant:
+            raise TenantMismatch(
+                f"store of tenant {self.tenant!r} used while working for {here!r}")
+
     @contextlib.asynccontextmanager
     async def _scoped(self):
         """A pooled transaction, scoped to this tenant before any other statement."""
+        self._check_tenant()
         async with self._pool.connection() as conn:
             if self._scope is not None:
                 await conn.execute(self._scope)

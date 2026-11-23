@@ -90,6 +90,26 @@ async def test_store_code_that_skips_scoping_fails(tenants):
         await a.get_thread("x")
 
 
+async def test_a_store_refuses_work_for_another_tenant(tenants):
+    """The isolation layer in the process: a tenant's store checks, before any statement,
+    that the work in progress (context.current_tenant) is its tenant's."""
+    from handler.runtime.context import reset_current_tenant, set_current_tenant
+    from handler.runtime.store.postgres import TenantMismatch
+
+    a, b = tenants
+    a.tenant, b.tenant = "a", "b"
+    token = set_current_tenant("a")
+    try:
+        assert await a.get_thread("x") is None
+        with pytest.raises(TenantMismatch, match="store of tenant 'b' used while working for 'a'"):
+            await b.get_thread("x")
+        with pytest.raises(TenantMismatch):
+            await b.list_threads()
+    finally:
+        reset_current_tenant(token)
+    assert await b.get_thread("x") is None  # outside any tenant's work: no check
+
+
 async def test_control_schema_holds_no_tenant_tables(tenants, pg_dsn):
     found = {r[0] for r in rows(
         pg_dsn, "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
