@@ -55,6 +55,8 @@ removed, about 26 added).
 
 ## Next (3b)
 
+Done on `feat/shared-runtime-step3b`: see [step3b-progress.md](step3b-progress.md).
+
 - One routed app instead of a FastAPI sub-app per context; MCP keyed by token alone.
 - Routers, tool sets and sinks as tenant-context factories.
 - Crontal tool discovery in context loading (still a start-up task per context until

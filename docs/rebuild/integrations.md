@@ -16,17 +16,48 @@ Everything specific to an external app, such as Crontal, Gmail or email intake, 
 
 | Contribution | Mechanism |
 |---|---|
-| **Inputs** | Thread types (`ThreadTypeSpec`: name, lane, visibility, acts-as rule, turn renderer, default instructions) and the HTTP routers that write their events (ingest, callbacks). |
+| **Inputs** | Thread types (`ThreadTypeSpec`: name, lane, visibility, acts-as rule, turn renderer, default instructions) and the HTTP routers that write their events (ingest, callbacks). Routers are the host's (see "Request side" below). |
 | **Outputs** | Sinks: `name`, `accepts(event)`, `async deliver(payload)`, retry policy. Domain events (`notification.created`, `task.status_changed`, `message.assistant`, …) are fanned out to the accepting sinks through the generic durable `deliveries` outbox, keyed by (sink, idempotency key). |
 | **Tools** | Tool sets registered with the gateway, still subject to grants and audit. |
 | **Identity** | An optional identity provider: where users come from, how a handler user maps to the app's user, and minting credentials to act as them. At most one per instance. |
 | **Settings and prompt** | Settings sections (pydantic models) and fragments added to the persona/instructions. |
 | **UI** | Entries in the manifest returned by `GET /api/ui/manifest`: nav items, settings sections, thread types under Settings → Threads, Connections cards. The UI renders only what the manifest lists. |
 | **Timer kinds** | Time-driven work (polls, expiries): `timer_kinds()` returns `TimerKind`s whose handlers the host's one timer calls with the tenant's `IntegrationContext` when one of the kind's due rows is due. See "Timer kinds" below. Integrations provide handlers; the host owns the loop. |
-| **Lifecycle** | `background_tasks`: long-running coroutines under the instance lifespan. Not for time-driven work (use a timer kind); left only for the Crontal connector's tool discovery, which moves into context loading in role-split step 3. |
+| **Loading** | `async load(ctx) -> bool`: work while the tenant's context loads (awaited; it starts no task), such as tool discovery. Returning False means "not done yet": the host calls it again before the tenant's next run. There are no background tasks (removed in role-split step 3b). |
 | **Dependencies** | `requires = [...]`. Startup fails with a clear error if a required integration is not enabled. |
 
-Each instance builds its integrations, so nothing is shared between instances (see `multi-instance.md`).
+Each tenant context configures its own instances of its integrations, so no tenant's
+configuration or objects are shared with another (see `multi-instance.md`).
+
+## Request side: routers once, factories per tenant (role-split step 3b)
+
+The host has one HTTP app (`web/host_app.py`). An integration's contributions split in two:
+
+- **Once per host:** `routers(tenant: TenantRoutes)` is called on an instance that is
+  **not configured** (it has no tenant), for every integration registered with the
+  host, and its routes are added to the one app. A route two integrations (or one and
+  the core) declare is refused at start even if no tenant enables both. A handler finds
+  the request's tenant through `tenant`: `tenant.integration()` is that tenant's
+  configured instance, `tenant.context()` its `IntegrationContext`, and
+  `tenant.local(lambda integration, ctx: ...)` a proxy for an object of theirs (the
+  mailbox router's service, store and poller); `tenant.auth` is the request tenant's
+  authenticator. The routes are served only to tenants that enable the integration and
+  whose instance returns True from `serves_routes(ctx)` (Crontal: only with a webhook
+  secret); any other tenant gets a 404.
+- **Per tenant context:** `tool_sets`, `sinks`, `identity_provider`,
+  `email_intake_observers` and `serves_routes` are factories that take the tenant's
+  `IntegrationContext` and return objects that live as long as the context; then
+  `load(ctx)` runs. Nothing starts a task.
+
+The Crontal integration's curated MCP tools are discovered in `load`, from a listing the
+host caches once per Crontal URL (`integrations/crontal/connector.py`: TTL
+`HANDLER_CRONTAL_DISCOVERY_TTL_SECONDS`, 3600; attempt timeout
+`HANDLER_CRONTAL_DISCOVERY_TIMEOUT_SECONDS`, 10; after a failure no tenant tries again
+for 5 s, doubling to 5 minutes, and an expired listing is kept). Each tenant's
+connector uses its own agent token. Until a listing exists the tenant works without
+those tools and logs `crontal tools not available yet` once per context; the next
+context load or run tries again. Legacy Crontal wiring (no `HANDLER_INTEGRATIONS`) uses
+the same discovery and is served the integration's `/ingest/crontal`.
 
 ## Configuration
 

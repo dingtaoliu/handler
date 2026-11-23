@@ -93,8 +93,13 @@ registry on in production and import `main`, `bss` and `yeup`.
 
 Suite: 1759 passed, 5 skipped.
 
+13. **Docs:** role-split-design (step 3 done), tenant-registry (routing by credentials;
+    the switch-on procedure with production's exact config, verified), integrations
+    (request side, loading, discovery), multi-instance (routed app, MCP URL, startup),
+    HANDOFF.
+
 ## Next
 
-- Operator procedure for the switch-on (tenant-registry.md).
-- Load test: 50 registry tenants.
-- Docs: role-split-design, tenant-registry, multi-instance, integrations, HANDOFF.
+- Owner: review, merge into `feat/shared-runtime`, deploy, then run runbook stage 1 with
+  `deploy/registry-switch-on.sh` (tenant-registry.md, "Switching the registry on in
+  production").
