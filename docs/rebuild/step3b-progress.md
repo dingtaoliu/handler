@@ -91,7 +91,7 @@ registry on in production and import `main`, `bss` and `yeup`.
     due, no context, no reader process, no per-tenant task.
 12. **Operator script** `deploy/registry-switch-on.sh` (`check`, `on`, `verify`, `off`).
 
-Suite: 1759 passed, 5 skipped.
+Suite: 1760 passed, 5 skipped (baseline 1736; 24 added). A registry host without `main` also serves `/mcp/` now (was a 404).
 
 13. **Docs:** role-split-design (step 3 done), tenant-registry (routing by credentials;
     the switch-on procedure with production's exact config, verified), integrations
