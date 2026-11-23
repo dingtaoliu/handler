@@ -76,6 +76,23 @@ registry on in production and import `main`, `bss` and `yeup`.
    their tenant; unknown tenants 404 on every route; route groups per tenant; public
    pages and health by the hint alone.
 
+10. **Context cache race fixed** (`tenancy/contexts.py`, found by the load test, from
+    3a): with more tenants than cache slots, a finished build's entry had no user until
+    its waiters resumed, and another tenant's release could trim and close it in that
+    gap ("PostgresCore is closed" on a chat). Entries are protected by their build's
+    waiter count; a closed entry is never handed out. `settle()` could also spin
+    forever on finished close tasks. `test_context_cache.py` reproduces both.
+11. **Load test** (`store_pg/test_load_fifty.py`): 50 registry tenants (10 paid, 40
+    free) chat at once, 10 of them reading a document through the reader pool, one
+    paid tenant also flooded with 30 background Crontal events; host cap 6, caps
+    free 1 / paid 3, cache 32, one reader. Six runs: all 80 runs complete in 10.6 to
+    11.3 s; chat wait median 1.9 to 2.3 s, max 3.6 to 4.1 s; peak 6 runs; peak 12
+    connections; no background run started while a chat waited; afterwards nothing
+    due, no context, no reader process, no per-tenant task.
+12. **Operator script** `deploy/registry-switch-on.sh` (`check`, `on`, `verify`, `off`).
+
+Suite: 1759 passed, 5 skipped.
+
 ## Next
 
 - Operator procedure for the switch-on (tenant-registry.md).
