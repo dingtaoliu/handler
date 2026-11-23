@@ -45,12 +45,30 @@ registry on in production and import `main`, `bss` and `yeup`.
    connector is built from it with its own token. A tenant without tools yet logs a
    warning once and works; the next context load or run retries.
 
-Suite: 1737 passed, 5 skipped.
+7. **Discovery tests** (`crontal/test_discovery.py`): one listing for 20 tenants at
+   once with each connector on its own token, TTL expiry, host-wide backoff and
+   recovery, an expired listing kept when rediscovery fails, a missing curated tool
+   and a slow Crontal count as failures, a tenant's tools registered once available.
+8. **Switch-on rehearsal** (`store_pg/test_registry_switch_on.py`,
+   `store_pg/production_shape.py`), on a real loopback port: production's env shape
+   (`main`/`handler_crontal`, `bss` with `crontal,mailbox`, `yeup`) seeded with users,
+   tokens, chats, schedules, memory, approvals and a BSS mailbox; registry on; every
+   data table's row count unchanged; registry rows match (schemas, S3 prefixes,
+   merchant ids, plan `paid`, sealed admin keys, webhook secrets, agent tokens, Google
+   client, BSS email secret, config); old URLs, keys and tokens see the same data;
+   Crontal's proxy calls (provisioning, sign-in ticket, panel reads, multipart upload,
+   SSE stream, chat with attachment and context links, duplicate resend, failed run
+   retry, signed webhook); the harness listed its tools over `/mcp/` with its run
+   token; a free tenant through `PUT /platform/tenants/500` (schema `handler_m500`,
+   Terra, 50 inputs, no email, automations, console or mailboxes; chat works while
+   Crontal discovery fails, tools appear on a later run; legacy chat import uncounted);
+   registry off keeps everything (the free tenant 404s, data intact); on again, it is
+   back.
 
 ## Next
 
 - Isolation tests for the routed app (cross-tenant keys, tokens, run tokens; threads,
-  uploads, streams under either URL); discovery tests.
-- Registry switch-on rehearsal (test and operator procedure).
+  uploads, streams under either URL).
+- Operator procedure for the switch-on (tenant-registry.md).
 - Load test: 50 registry tenants.
 - Docs: role-split-design, tenant-registry, multi-instance, integrations, HANDOFF.
