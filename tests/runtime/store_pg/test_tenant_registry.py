@@ -13,7 +13,6 @@ from handler.runtime import server
 from handler.runtime.gateway.secret_box import SecretBox
 from handler.runtime.harness.base import RunEvent, RunEventKind
 from handler.runtime.store.postgres import PostgresStore
-from handler.runtime.store.postgres_hub import PostgresHub
 from handler.runtime.tenancy.run_gate import RunGate
 from handler.runtime.types import Event, Lane, Schedule, ThreadSpec, ThreadType, TokenUsage, utcnow
 from handler.runtime.web.email_ingest import sign_email

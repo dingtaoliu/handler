@@ -28,11 +28,9 @@ freeing wakes the loop at once.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import socket
-from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -313,5 +311,3 @@ def runner_settings(env) -> dict[str, float]:
     return {"poll_seconds": float(env.get("HANDLER_CLAIM_POLL_SECONDS",
                                           str(DEFAULT_POLL_SECONDS)))}
 
-
-Hint = Callable[[str], None]
