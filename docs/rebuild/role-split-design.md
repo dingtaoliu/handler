@@ -1,7 +1,8 @@
 # Shared host resources: inbox, runner and outbox
 
-Status: **owner decisions settled November 15, 2026 (decision 6 revised November 21); steps 0, 1 and 4 built on
-`feat/shared-runtime`, step 2 on `feat/shared-runtime-step2`** (not deployed; see Build order). First written
+Status: **owner decisions settled November 15, 2026 (decision 6 revised November 21); steps 0, 1, 2 and 4 built on
+`feat/shared-runtime`, step 3a (the runtime core of step 3) on `feat/shared-runtime-step3a`**
+(not deployed; see Build order). First written
 November 14, 2026 as a split into separate processes. Rewritten November 15, 2026 after
 review with the owner, who narrowed the goal to a single host. Follows
 [multi-tenant-design.md](multi-tenant-design.md).
@@ -298,7 +299,7 @@ the same database; rollback is flipping it.
 | 0 | Native-only host setting and registry check. Workspace flush when a run ends. `client_message_id` from the Crontal frontend | Codex cannot be enabled on production; a restart loses no finished run's files |
 | 1 | Failed runs recorded and replayable, threads never blocked; redeliver for dead deliveries; operator alerts on both | No failure blocks a thread, and every failure reaches the operator with a way to replay |
 | 2 | One timer over `handler_control.due_work`; one housekeeping pass, including the 90-day retention cleanup (owner decision 9); one bus for the host; cancel as a stored flag | No per-tenant scheduler, housekeeping or poller tasks remain. **Built** on `feat/shared-runtime-step2` (not deployed; see Progress) |
-| 3 | One claim loop across tenants; one host `RunGate` for every tenant, env-defined ones included, ranking interactive before background across tenants (**done**); tenant context cache; a tool view built per run from live entitlements, so a plan change takes effect on the next run (**done**); one routed app and one MCP route; the new integration contract; `TenantHost` lifecycle removed. Then switch on the registry and import `main`, `bss` and `yeup`. **Partly done** on `feat/shared-runtime-gating` (see Progress) | With 50 idle tenants, the process issues no tenant-scoped queries; a busy tenant cannot delay another's chat; the three tenants run unchanged from the registry |
+| 3 | One claim loop across tenants; one host `RunGate` for every tenant, env-defined ones included, ranking interactive before background across tenants (**done**); tenant context cache; a tool view built per run from live entitlements, so a plan change takes effect on the next run (**done**); one routed app and one MCP route; the new integration contract; `TenantHost` lifecycle removed. Then switch on the registry and import `main`, `bss` and `yeup`. Split in two: **3a, the runtime core** (context cache, one claim loop, one outbox loop, `TenantHost` lifecycle removed): **built** on `feat/shared-runtime-step3a`; **3b, the request side** (one routed app and MCP route, routers, tool sets and sinks as context factories, the Crontal connector): next (see Progress) | With 50 idle tenants, the process issues no tenant-scoped queries; a busy tenant cannot delay another's chat; the three tenants run unchanged from the registry |
 | 4 | Reader pool as child processes, with email parsing and image downscaling moved in; size caps in the main process; memory logged per run | A synthetic oversized PDF kills only its child, and the tool call reports an error. **Built** on `feat/shared-runtime-readers` (not deployed), with the review follow-up: no idle reader processes, fairness at admission only, an RSS cap per reader. Defaults 1 reader at 220 MB for the 512 MB dyno; measurements in [multi-instance.md](multi-instance.md#memory-budget-measured-november-17-amd64-linux-python-312-release-image). PDF text now comes from PyMuPDF (page blocks) instead of MarkItDown, which needed more than 220 MB even for 2 pages; 2- to 400-page PDFs read at a 164 MB reader peak (on `feat/shared-runtime`). Not behind `HANDLER_SHARED_RUNTIME` |
 | 5 | Idempotent tool side effects | A run retried after a crash does not repeat a sent email or a Crontal write |
 | 6 | Outbox subscriptions and one delivery pool with per-tenant limits | A failing sink for one tenant does not delay another tenant's deliveries |
@@ -380,6 +381,51 @@ Progress (branch `feat/shared-runtime`, November 15, 2026):
     Postgres's statement log shows only the timer's control-schema reads
     (`store_pg/test_idle_tenants.py`). The dispatcher's 30 s idle claim and the outbox's
     poll (when a sink is registered) are still per tenant until steps 3 and 6.
+
+- **Step 3a: built** on `feat/shared-runtime-step3a` (November 22, 2026, not deployed;
+  details and test results in [step3a-progress.md](step3a-progress.md)). No feature
+  switch: rollback is the Heroku release, and every schema change is additive.
+  - **A tenant is context** (`tenancy/contexts.py`). `build_tenant_context` (was
+    `instance_runtime`'s body) builds the store on the hub, settings, grants, live
+    limits, gateway, executor, sinks, timer handlers and the HTTP sub-app, and starts no
+    long-lived task. `ContextCache`: LRU (`HANDLER_TENANT_CACHE_SIZE`, 32) with a TTL
+    (`HANDLER_TENANT_CACHE_TTL_SECONDS`, 600 s), a context pinned while in use, retired
+    by `invalidate` (generation counter) and closed when its last user leaves (flushes
+    workspaces, detaches the store). Invalidated by `NOTIFY handler_tenant_changed`
+    (payload: schema), sent in the writer's transaction by registry writes and settings
+    saves; a process skips its own notices (it invalidated in process). Grants reload
+    moves here; the version check before each run stays as a backstop. A tenant on its
+    own store (SQLite, a lone Postgres instance) is pinned: only its process hears it.
+  - **One claim loop** (`runner.py` `HostRunner`). Due tenants come from
+    `handler_control.tenant_state` (created by the hub now, env tenants included;
+    additive columns `schema_name`, `wake_version`, `next_delivery_at`,
+    `delivery_version`). Every writer marks `next_wake_at` in its own transaction
+    (`MARK_WAKE_SQL` in the hub store's `_notify`). Per due tenant: one `work_state`
+    query, admission through the host `RunGate` in rank order (interactive first, then
+    paid, fewer running, wait, with aging), `claim()` as before, each run an asyncio task
+    with the context pinned. A tenant with nothing claimable is written back with its
+    next look (a retry's `available_at`, a live lease's `lease_until`), only if no writer
+    came in between (`wake_version`). Hints: stores' in-process `WorkSignal`, `NOTIFY
+    handler_work_shared`; backstop poll `HANDLER_CLAIM_POLL_SECONDS` (5). Locally the
+    same record lives in memory (`wakes.py` `LocalWakes`). `Dispatcher` is this loop
+    over one store.
+  - **One outbox loop** (`sinks.py` `HostOutbox`): due tenants from
+    `next_delivery_at` (marked by enqueue, retry, redeliver), at most
+    `HANDLER_OUTBOX_BATCH` (20) rows per tenant per round, `HANDLER_OUTBOX_CONCURRENCY`
+    (4) tenants at once, round robin; sinks from the tenant's context.
+  - **One MCP app for the host:** run tokens are host-wide and carry their tenant's
+    gateway and name; a token presented under another tenant's URL is refused.
+  - **`TenantHost` lifecycle removed:** activation, eviction, the per-tenant lock, the
+    boot and delayed sweeps, `HANDLER_MAX_ACTIVE_TENANTS`, the idle stop and the
+    mailbox pinning. It keeps the request side (routing, credential admission, spooled
+    email and its replay, reacting to registry changes). At boot every tenant is due
+    once. `RegistryTimerDirectory` and the env `TenantDirectory` wiring are replaced by
+    `HostTimerDirectory` over the cache. Env hosts route through `EnvRouter`.
+  - **Remains for 3b:** one routed app instead of a FastAPI sub-app per context; the
+    MCP route keyed by token alone (the app is already one); routers, tool sets and
+    sinks as tenant-context factories; Crontal tool discovery in context loading (it
+    is still a start-up task per context until it succeeds, cancelled when the context
+    closes); then the registry switch-on and import of `main`, `bss` and `yeup`.
 
 The tenant registry (multi-tenant stage 2) is switched on only at the end of step 3, so
 production never runs the activation lifecycle this design removes.
