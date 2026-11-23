@@ -194,6 +194,11 @@ class TenantHost:
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] not in ("http", "websocket"):
             return
+        if not _hinted(scope) and _is_mcp(scope):
+            # The host's one MCP route: the run token alone names the tenant (a host
+            # need not have a `main` for it).
+            await serve_mcp(self.services.mcp, None, scope, receive, send)
+            return
         name, child = self._route(scope)
         slot = self._slots.get(name) if name else None  # never a query: see load()
         if slot is None:
@@ -203,8 +208,7 @@ class TenantHost:
             if not slot.tenant.enabled:
                 await self._refuse(scope, receive, send, 404, "instance not found")
                 return
-            await serve_mcp(self.services.mcp, name if _hinted(scope) else None,
-                            child, receive, send)
+            await serve_mcp(self.services.mcp, name, child, receive, send)
             return
         if names_another_tenant(self.services.tenants, name, child):
             await self._refuse(scope, receive, send, 401, "authentication required")
@@ -623,12 +627,15 @@ class EnvRouter:
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] not in ("http", "websocket"):
             return
+        if self.mcp is not None and not _hinted(scope) and _is_mcp(scope):
+            await serve_mcp(self.mcp, None, scope, receive, send)  # the token alone
+            return
         name, child = TenantHost._route(scope)
         if name is None or self.tenants.get(name) is None:
             await TenantHost._refuse(scope, receive, send, 404, "instance not found")
             return
         if self.mcp is not None and _is_mcp(child):
-            await serve_mcp(self.mcp, name if _hinted(scope) else None, child, receive, send)
+            await serve_mcp(self.mcp, name, child, receive, send)
             return
         if names_another_tenant(self.tenants, name, child):
             await TenantHost._refuse(scope, receive, send, 401, "authentication required")

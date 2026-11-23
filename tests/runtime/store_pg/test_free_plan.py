@@ -377,6 +377,23 @@ async def test_mcp_run_tokens_do_not_cross_tenants(two):
     assert (await client.post("/i/m1/mcp/", json=body, headers=headers)).status_code != 401
 
 
+async def test_the_host_mcp_route_needs_no_main_tenant(two):
+    """Harnesses are given `/mcp/`: on a registry host with no `main`, the run token
+    alone still names the tenant (and a disabled or unknown one is refused)."""
+    app, client = two
+    assert app.state.tenants._slot("main") is None
+    m1 = app.state.services.cache.cached("m1")
+    token = lifecycle(app, "m1").tokens.issue(RunContext(run_id="r", thread_key="chat:u:1"), 60,
+                                              gateway=m1.gateway, tenant="m1")
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"}
+    response = await client.post("/mcp/", json=body, headers=headers)
+    assert response.status_code == 200, response.text
+    assert "memory_delete" in {tool["name"] for tool in response.json()["result"]["tools"]}
+    assert (await client.post("/mcp/", json=body, headers={
+        **headers, "Authorization": "Bearer admin-1"})).status_code == 401
+
+
 async def test_uploads_do_not_cross_tenants_even_with_hostile_ids(two):
     app, client = two
     await provision(client, 2)
