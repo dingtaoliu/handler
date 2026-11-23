@@ -19,13 +19,17 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
+from ... import documents
 from ...auth import Authenticator, Principal
 from .config import PRESET_DEFAULTS, PRESETS, Mailbox, MailboxCreate, MailboxTest, MailboxUpdate
+from .message import parse_message_file
+from .transport import MailError
 
 logger = logging.getLogger("handler.runtime.mailbox")
 
@@ -73,6 +77,89 @@ def mailboxes_router(service, mail_store, poller, auth: Authenticator) -> APIRou
         if mailbox is None:
             raise HTTPException(404, "mailbox not found")
         return mailbox
+
+    def can_read(mailbox: Mailbox, principal: Principal) -> bool:
+        return mailbox.enabled and (
+            principal.is_admin
+            or (principal.user_id is not None and principal.user_id == mailbox.owner_user_id)
+        )
+
+    async def readable_mailbox(mailbox_id: str, principal: Principal) -> Mailbox:
+        mailbox = await get(mailbox_id)
+        if not can_read(mailbox, principal):
+            raise HTTPException(404, "mailbox not found")
+        return mailbox
+
+    def mailbox_summary(mailbox: Mailbox) -> dict:
+        return {"id": mailbox.id, "email": mailbox.email, "status": mailbox.status,
+                "last_sync_at": mailbox.last_sync_at}
+
+    @router.get("/api/mailboxes/conversations")
+    async def list_conversations(response: Response,
+                                 offset: int = Query(0, ge=0),
+                                 q: str = Query("", max_length=200),
+                                 principal: Principal = Depends(auth.require_principal)):
+        mailboxes = [m for m in await mail_store.list_mailboxes() if can_read(m, principal)]
+        limit = 40
+        rows = await mail_store.list_conversations(
+            [m.id for m in mailboxes], limit=limit + 1, offset=offset, search=q.strip())
+        response.headers["Cache-Control"] = "no-store"
+        return {"mailboxes": [mailbox_summary(m) for m in mailboxes],
+                "threads": rows[:limit],
+                "next_offset": offset + limit if len(rows) > limit else None}
+
+    @router.get("/api/mailboxes/{mailbox_id}/conversations/{conversation_id}")
+    async def read_conversation(mailbox_id: str, conversation_id: str, response: Response,
+                                offset: int = Query(0, ge=0),
+                                principal: Principal = Depends(auth.require_principal)):
+        mailbox = await readable_mailbox(mailbox_id, principal)
+        conversation = await mail_store.get_conversation(mailbox.id, conversation_id)
+        if conversation is None:
+            raise HTTPException(404, "conversation not found")
+        limit = 10
+        rows = await mail_store.page_conversation_messages(
+            mailbox.id, conversation_id, limit=limit + 1, offset=offset)
+        messages = []
+        for row in reversed(rows[:limit]):
+            message = {key: row[key] for key in (
+                "id", "subject", "from_addr", "from_name", "to_addrs", "cc_addrs",
+                "date", "direction", "body_text", "body_truncated")}
+            message["attachments"] = [
+                {key: item[key] for key in ("index", "filename", "size")}
+                for item in row.get("attachments") or []
+            ]
+            messages.append(message)
+        response.headers["Cache-Control"] = "no-store"
+        return {"mailbox": mailbox_summary(mailbox), "subject": conversation["subject"],
+                "messages": messages,
+                "next_offset": offset + limit if len(rows) > limit else None}
+
+    @router.get("/api/mailboxes/{mailbox_id}/messages/{message_id}/attachments/{index}")
+    async def download_attachment(mailbox_id: str, message_id: str, index: int,
+                                  principal: Principal = Depends(auth.require_principal)):
+        mailbox = await readable_mailbox(mailbox_id, principal)
+        row = await mail_store.get_message(message_id)
+        if row is None or row["account_id"] != mailbox.id:
+            raise HTTPException(404, "message not found")
+        meta = next((item for item in row.get("attachments") or []
+                     if item.get("index") == index), None)
+        if meta is None:
+            raise HTTPException(404, "attachment not found")
+        try:
+            raw = await service.fetch_raw(mailbox, row)
+            if len(raw) > service.max_message_bytes:
+                raise HTTPException(413, "message is too large")
+            parsed = await documents.capped_parse("mailbox", parse_message_file, raw)
+        except MailError:
+            raise HTTPException(502, "attachment unavailable from mail server") from None
+        except documents.ReadError:
+            raise HTTPException(502, "attachment could not be read") from None
+        if parsed.message_id != row["message_id"] or not 0 <= index < len(parsed.attachments):
+            raise HTTPException(404, "attachment not found")
+        return Response(parsed.attachments[index].data, media_type="application/octet-stream",
+                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                                 "Content-Disposition": "attachment; filename*=UTF-8''"
+                                 + quote(meta["filename"], safe="")})
 
     @router.get("/api/mailboxes")
     async def list_mailboxes(_p: Principal = Depends(auth.require_principal)):
