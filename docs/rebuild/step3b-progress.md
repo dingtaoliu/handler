@@ -65,10 +65,19 @@ registry on in production and import `main`, `bss` and `yeup`.
    registry off keeps everything (the free tenant 404s, data intact); on again, it is
    back.
 
+9. **Routed app isolation** (`store_pg/test_routed_isolation.py`, env and registry
+   hosts, real loopback port, the same user id in every tenant): every admin key and
+   user token against every tenant URL (main's two URLs included) and the SSE
+   `?access_token=` form: 200 only on its own tenant, else 401; a thread, upload and
+   stream of main are invisible to bss under either of main's URLs (401 with bss's
+   credentials, 404 or empty under bss's own URL, and bss's stream for the same thread
+   key carries nothing of main's run); run tokens at `/mcp/` (any tenant's token) and
+   `/i/<name>/mcp/` (only its own); sign-in tickets and webhook signatures bound to
+   their tenant; unknown tenants 404 on every route; route groups per tenant; public
+   pages and health by the hint alone.
+
 ## Next
 
-- Isolation tests for the routed app (cross-tenant keys, tokens, run tokens; threads,
-  uploads, streams under either URL).
 - Operator procedure for the switch-on (tenant-registry.md).
 - Load test: 50 registry tenants.
 - Docs: role-split-design, tenant-registry, multi-instance, integrations, HANDOFF.
