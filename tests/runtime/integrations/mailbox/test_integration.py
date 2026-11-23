@@ -100,16 +100,23 @@ async def test_api_never_returns_secrets_and_instances_are_isolated(tmp_path, mo
 
         # Ingest on bss: switch to triage, deliver, poll.
         poller = integration(bss_app).poller
-        await poller.wait_idle()
-        fake.deliver(make_mail(subject="New order"))
         patched = await client.patch(f"/i/bss/api/mailboxes/{mailbox_id}",
                                      headers=headers("bss"), json={"wake_mode": "triage"})
         assert patched.json()["wake_mode"] == "triage" and PASSWORD not in patched.text
-        await asyncio.sleep(0.2)
-        await poller.wait_idle()
+        await asyncio.sleep(0.1)
+        await poller.wait_idle()  # a poll that read the mailbox as "off" has finished
+        fake.deliver(make_mail(subject="New order"))
+        # Saving the mailbox makes its poll due now (the host timer's row).
+        await client.patch(f"/i/bss/api/mailboxes/{mailbox_id}", headers=headers("bss"),
+                           json={"wake_mode": "triage"})
         bss_store = integration(bss_app).service.store
-        thread_rows = await bss_store._call(lambda db: [dict(r) for r in db.execute(
-            "SELECT key, type FROM threads")])
+        for _ in range(250):  # the host timer's poll
+            await asyncio.sleep(0.02)
+            await poller.wait_idle()
+            thread_rows = await bss_store._call(lambda db: [dict(r) for r in db.execute(
+                "SELECT key, type FROM threads")])
+            if thread_rows:
+                break
         main_store = integration(main_app).service.store
         main_rows = await main_store._call(lambda db: [dict(r) for r in db.execute(
             "SELECT key FROM threads")])

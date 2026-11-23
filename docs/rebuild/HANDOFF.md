@@ -323,7 +323,7 @@ Repo and code layout:
 
 | Area | Where | Notes |
 |---|---|---|
-| Event queue, threads, leases | `store/` (SQLite + Postgres mixins), `dispatcher.py` | Thread types: chat, gmail, automation, crontal. One harness session per thread |
+| Event queue, threads, leases | `store/` (SQLite + Postgres mixins), `runner.py` (the host claim loop; `dispatcher.py` is it over one store) | Thread types: chat, gmail, automation, crontal. One harness session per thread |
 | Run lifecycle | `run.py` (`RunExecutor`, `_plan`) | Model/effort come from the newest chat message's override, then the thread, then per-type settings, then instance defaults. Lost sessions recover by replaying a recap of the transcript |
 | **Harnesses** | `harness/codex.py`, `harness/openai_agents.py` | See §3 |
 | Gateway | `gateway/` | MCP server at `/mcp/`; per-run tokens; `GrantPolicy` (exact action → glob → risk default); approvals; audit |

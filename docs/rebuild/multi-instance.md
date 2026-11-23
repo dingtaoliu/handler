@@ -15,13 +15,20 @@ configuration and root URLs remain supported.
 | bss | `/i/bss` | `handler_bss` by default | `handler/bss/` by default | `<main-data-dir>/instances/bss` |
 
 The root alias uses the **same** main runtime and MCP lifetime. Unknown `/i/*`
-paths return 404. Instances own their store, dispatcher, scheduler, gateway,
-run tokens, user tokens, settings, memory, uploads and workspaces. Identical user,
+paths return 404. Instances own their store, gateway, user tokens, settings, memory,
+uploads and workspaces. Identical user,
 thread, run and event ids in different instances do not share records. This is
 application namespace isolation inside a shared process, database and OS account.
 Since role-split step 2 the host also shares one run event bus (each instance publishes
 and subscribes through its own tenant view of it), one timer for every instance's due
-work, and one workspace backstop.
+work, and one workspace backstop. Since step 3 (3a) an instance is a **context** in
+the host's cache, like a registry tenant (tenant-registry.md, "Lifecycle"): one claim
+loop runs every instance's threads, one outbox loop delivers for all of them, one MCP
+app serves every run (a run token names its instance and is refused under another's
+URL), and `/i/<name>` is routed to the instance's context, built on demand. Instances
+on a shared hub get `handler_control.tenant_state` rows like registry tenants; an
+instance on its own store (SQLite, or the single-instance Postgres deployment) is
+built at start and kept, with its wake record in memory.
 
 ## Configuration
 
@@ -91,8 +98,8 @@ schema is created automatically and needs no migration.
 Notifications use one channel, `handler_work_shared`, with the schema name as the
 payload.
 
-Run concurrency has one cap for the **whole host**: every instance's dispatcher shares
-one run gate, as on the registry host (see the settings in
+Run concurrency has one cap for the **whole host**: the host's one claim loop admits
+every instance's runs through one run gate, as on the registry host (see the settings in
 [tenant-registry.md](tenant-registry.md#settings)). Env-defined instances count as
 `paid`, the plan the registry gives them on import, so by default the host runs at
 most 6 at once (`HANDLER_GLOBAL_MAX_RUNS`) and each instance at most 3
@@ -302,4 +309,5 @@ Shared connections change no tenant tables, so an image from before them runs
 unchanged against the same database and ignores `handler_control`; leave that schema
 in place. While old and new dynos overlap they do not hear each other's
 notifications, since an old dyno sends only on its per-schema channel. Work is not
-lost: each dispatcher's idle poll claims it within 30 seconds.
+lost: the old image's writes still NOTIFY `handler_work_shared`, which the claim loop
+hears, and every tenant is looked at once at boot.

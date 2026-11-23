@@ -15,9 +15,12 @@ this code.
 | `HANDLER_TENANT_REGISTRY` | off | `1` hosts tenants from the database |
 | `HANDLER_PLATFORM_KEY` | required | Bearer key for `/platform/*`. Never an admin key, never in a tenant's environment |
 | `HANDLER_TENANT_SECRET_KEY` | required | Seals tenants' secrets. Changing it makes them unreadable and stops startup |
-| `HANDLER_TENANT_IDLE_SECONDS` | 600 | Idle time before a tenant stops |
-| `HANDLER_TENANT_SCAN_SECONDS` | 15 | Host scan interval, also the latest a durable wake is noticed |
-| `HANDLER_TENANT_BOOT_GRACE_SECONDS` | 120 | When the second boot sweep runs |
+| `HANDLER_TENANT_CACHE_SIZE` | 32 | Tenant contexts kept built (LRU); a context in use is never closed, so the cache may briefly exceed it |
+| `HANDLER_TENANT_CACHE_TTL_SECONDS` | 600 | An unused context is closed after this |
+| `HANDLER_CLAIM_POLL_SECONDS` | 5 | The claim loop's backstop poll of `tenant_state` (signals wake it at once) |
+| `HANDLER_OUTBOX_POLL_SECONDS` | 5 | The outbox loop's backstop poll |
+| `HANDLER_OUTBOX_BATCH` / `HANDLER_OUTBOX_CONCURRENCY` | 20 / 4 | Deliveries per tenant per round; tenants delivered at once |
+| `HANDLER_TENANT_SCAN_SECONDS` | 15 | Spool replay interval (the host's request-side scan) |
 | `HANDLER_GLOBAL_MAX_RUNS` | 6 | Runs at once, whole process |
 | `HANDLER_PLAN_RUN_CAPS` | `free:1,paid:3` | Runs at once per tenant, by plan. An unknown plan gets the lowest |
 | `HANDLER_RUN_MAX_WAIT_SECONDS` | 60 | After this a waiting free tenant ranks with paid ones, and waiting background work goes ahead of chats (once; its wait then restarts) |
@@ -70,28 +73,33 @@ accepted:
 If `HANDLER_ADMIN_KEY` is omitted at creation one is generated and returned once,
 as `admin_key`. Every check `instance_configs` makes runs on each write, and a
 conflict returns 409. A `HANDLER_DEFAULT_HARNESS` that is unknown or outside
-`HANDLER_ALLOWED_HARNESSES` returns 422. Changes to a running tenant apply when it next restarts,
-which happens as soon as it is quiescent.
+`HANDLER_ALLOWED_HARNESSES` returns 422. A change retires the tenant's cached context
+(`NOTIFY handler_tenant_changed`, heard by every process): the next request, run, firing
+or delivery builds a fresh one with the new secrets, config, integrations and plan.
+Work in progress finishes on the old context, which follows the new plan's limits at
+once (one `LiveLimits` per tenant).
 
-## Lifecycle
+## Lifecycle: a tenant is context (shared runtime step 3)
 
-A tenant runs only while it has a reason to. It **activates** on an HTTP request,
-a notification for its schema, `next_wake_at` being reached, or at boot if
-`active_since` is set. A tenant with an enabled connected mailbox is pinned active (see above).
+A tenant has no runtime to start or stop. Its **context** (store on the shared hub,
+settings and grants, live limits, gateway, executor, sinks, timer handlers, HTTP
+sub-app) is built on demand into the host's LRU cache (`tenancy/contexts.py`) and
+closed when it is unused for the TTL, pushed out by the size, or retired by a change.
+Building starts no long-lived task: runs, timer firings and deliveries belong to the
+host's loops (`runner.py`, `sinks.py` `HostOutbox`, `timer.py`), MCP is one host app.
+A context in use (a run, a firing, a delivery pass, an open request or SSE stream) is
+pinned; a retired one closes when its last user leaves. Closing flushes workspaces
+and detaches the store; nothing of the tenant remains.
 
-It **deactivates** after the idle period when it has no in-flight run, open request
-or SSE stream, due event or due outbox row, and its workspaces flushed cleanly.
-Then, in order: the runtime stops, `next_wake_at` is written, `active_since` is
-cleared. `next_wake_at` is the earliest of schedules, outbox retries, thread retries
-and approval or question expiry.
+`tenant_state` (`handler_control`, created by the hub) records when each tenant next
+needs the claim loop (`next_wake_at`, `wake_version`) and the outbox loop
+(`next_delivery_at`, `delivery_version`). Every writer of pending work marks it in its
+own transaction. At boot every enabled tenant is marked due once, so each is looked
+at once (its build backfills due work, and work a restart left runs); `active_since`
+is no longer written. There is no activation, eviction lock, active-tenant cap or
+pinning: a connected mailbox is a timer row, not a reason to stay built.
 
-Everything that starts or stops one tenant holds that tenant's lock, so it can never
-have two runtimes. A request or notification arriving during a stop waits, then
-starts a fresh runtime. Locks are per tenant, so a slow stop delays no one else.
-Activations run at most four at a time. A clean shutdown leaves `active_since` set,
-so a restart resumes those tenants.
-
-## What may wake a sleeping tenant
+## What may build a tenant's context
 
 Tenant names like `m123` are guessable, so a request alone does not start a tenant:
 
@@ -108,33 +116,27 @@ Tenant names like `m123` are guessable, so a request alone does not start a tena
 
   Otherwise it gets a 401 and nothing starts. Failed credential lookups are remembered
   for a minute and run at most four at a time.
-- Requests without a credential do not count as activity, so a probe can't keep a
-  tenant awake.
+- A request without a credential never builds a context (it may use one already
+  built).
 - Tenant names are held in memory: an unknown name costs no query. The list is
   reloaded once a minute, so a tenant created by another process is known within a
   minute.
-- `HANDLER_MAX_ACTIVE_TENANTS` (default 40) caps running tenants. A start beyond it
-  first stops the quiescent, least recently used, unpinned tenant. If none can stop,
-  requests get 503, signed email is spooled, and a durable retry is recorded.
-- A tenant is pinned awake only while it has an enabled connected mailbox, which its
-  poller polls. Having the `mailbox` integration alone does not pin it. Gmail has no
-  poller and never pins. The host checks this at boot, and once per scan for running
-  tenants, so a tenant pins when its first mailbox is added and unpins when the last
-  is removed or disabled.
 
-## How queued work on a sleeping tenant is always found
+## How queued work is always found
 
 | Source | Guarantee |
 |---|---|
-| HTTP (chat, email intake, Crontal webhooks) | The request activates the tenant first. If that fails it gets 503 with `Retry-After`, nothing was accepted, and a durable retry is recorded. Email is instead spooled durably and acknowledged |
-| Another process (CLI, a store with its own connections) | Writes `next_wake_at` **in the same transaction as the work**, so the wake can't be lost. The notification only makes it faster |
-| Schedules, retries, expiries | `next_wake_at`, written at stop |
-| Listener outage | The durable wake above; reconnecting prompts an immediate scan |
-| Crash | `active_since` still set, restarted at boot |
-| Anything else, such as an older image writing during a release overlap | Each inactive tenant's tables are swept at boot, and once more after the boot grace |
+| HTTP (chat, email intake, Crontal webhooks) | The request builds the context first. If that fails it gets 503 with `Retry-After` and nothing was accepted. Email is instead spooled durably and acknowledged |
+| Every writer (this process, the CLI, another process) | Marks `tenant_state.next_wake_at` **in the same transaction as the work** (`MARK_WAKE_SQL`), so the wake can't be lost; `NOTIFY handler_work_shared` only makes it faster |
+| Thread retries, crashed runs | After each look the claim loop writes back the earliest of a retry's `available_at` and a live lease's `lease_until`; a lease a crash left expires and the thread is claimed again |
+| Schedules, expiries, mail polls, held-input release | Host timer rows (`due_work`, step 2) |
+| Deliveries | `next_delivery_at`, marked by enqueue, retry and redeliver |
+| Listener outage | The durable marks above, read by the backstop polls; reconnecting looks at every tenant |
+| A failed context build | The tenant stays due and is retried at the next pass |
+| Anything else, such as an older image writing during a release overlap | Every tenant is looked at once at boot; v65's NOTIFY still reaches the claim loop |
 
-Only those two sweeps look inside a sleeping tenant. Otherwise the host's single
-scan reads `handler_control` alone, so idle tenants issue no queries.
+Otherwise the host's loops read `handler_control` alone, so idle tenants issue no
+tenant-scoped queries (`store_pg/test_idle_tenants.py`, 50 tenants).
 
 ## Rollback
 

@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from pathlib import Path
 
@@ -30,7 +30,6 @@ from .auth import Authenticator, Principal, add_cli_commands, run_cli
 from .bus import RunEventBus
 from . import main_limits
 from .context import TenantScope, reset_current_tenant, set_current_tenant
-from .dispatcher import Dispatcher
 from .documents import configure_readers, shutdown_readers
 from .files import LocalFileStore, S3FileStore
 from .gateway.api import approvals_router, questions_router
@@ -71,7 +70,7 @@ from .settings import (
     check_harness,
     parse_allowed_harnesses,
 )
-from .sinks import Outbox
+from .sinks import HostOutbox, Outbox, outbox_settings
 from .store.postgres import PostgresStore
 from .store.postgres_hub import DEFAULT_POOL_MAX, PostgresHub
 from .store.sqlite import SQLiteStore
@@ -83,9 +82,18 @@ from .store.due_work import (
     RETENTION_CLEANUP,
     SCHEDULE_FIRE,
 )
-from .timer import HostTimer, TenantDirectory, TimerTarget, timer_settings
+from .timer import HostTimer, TimerTarget, timer_settings
+from .runner import HostRunner, runner_settings
 from .storage import register_workspace_limit, unregister_workspace_limit
-from .tenancy.host import DEFAULT_MAX_ACTIVE, PINNED_INTEGRATIONS, TenantHost
+from .tenancy.contexts import (
+    DEFAULT_CACHE_SIZE,
+    DEFAULT_CACHE_TTL_SECONDS,
+    ContextCache,
+    HostTenants,
+    ServedTenant,
+    TenantContext,
+)
+from .tenancy.host import PINNED_INTEGRATIONS, EnvRouter, TenantHost
 from .tenancy.limits import (
     PLAN_LIMITS_ENV,
     LiveLimits,
@@ -417,31 +425,138 @@ CORE_TIMER_KINDS = (
 )
 
 
+class HostTimerDirectory:
+    """Tenants as the host timer sees them: every enabled tenant's due rows, the
+    tenant resolved through the context cache for the handler's duration (pinned, so
+    it can't be closed under the firing). Hub tenants' rows are in the control schema;
+    a pinned local tenant has its own queue."""
+
+    def __init__(self, tenants: HostTenants) -> None:
+        self.tenants = tenants
+        self._queues: dict[int, Any] = {}  # id(queue) -> hub, or the local tenant's name
+
+    def sources(self) -> list[tuple[Any, list[str]]]:
+        out = []
+        enabled = self.tenants.enabled()
+        for hub in self.tenants.hubs():
+            queue = hub.due_queue()
+            self._queues[id(queue)] = hub
+            keys = [tenant.key for tenant in enabled if tenant.hub is hub]
+            if keys:
+                out.append((queue, keys))
+        for tenant in enabled:
+            if tenant.hub is not None:
+                continue
+            context = self.tenants.cache.cached(tenant.name)
+            if context is not None and context.timer_target is not None:
+                queue = context.timer_target.queue
+                self._queues[id(queue)] = tenant.name
+                out.append((queue, [context.key]))
+        return out
+
+    @contextlib.asynccontextmanager
+    async def tenant(self, queue: Any, key: str):
+        owner = self._queues.get(id(queue))
+        if isinstance(owner, str):
+            name = owner
+        else:
+            tenant = self.tenants.by_key(owner, key) if owner is not None else None
+            name = tenant.name if tenant is not None else None
+        if name is None:
+            yield None
+            return
+        async with self.tenants.use(name) as context:
+            yield None if context is None else context.timer_target
+
+
 class HostServices:
-    """What every instance on the host shares (role-split-design.md, step 2): one bus,
-    one timer over due work, one workspace backstop. A lone `instance_runtime` with
-    none given makes its own and runs them itself: the same code path, one tenant."""
+    """What every tenant on the host shares (role-split-design.md, steps 2 and 3): one
+    bus, one MCP app with host-wide run tokens, the tenant context cache, and the
+    host loops: the timer over due work, the claim loop over due threads, the outbox
+    loop over due deliveries, and the workspace backstop. No tenant has a task.
+
+    A lone `instance_runtime` with none given makes its own: the same code path, one
+    tenant."""
 
     def __init__(self, env: Mapping[str, str], directory: Any = None, *,
-                 sync_interval: float = 300.0) -> None:
+                 sync_interval: float = 300.0, gate: RunGate | None = None) -> None:
         self.bus = RunEventBus()
-        self.directory = directory if directory is not None else TenantDirectory()
+        self.tokens = RunTokens()
+        self.mcp = create_mcp_app(None, self.tokens)
+        self.cache = ContextCache(
+            max_size=int(env.get("HANDLER_TENANT_CACHE_SIZE", str(DEFAULT_CACHE_SIZE))),
+            ttl_seconds=float(env.get("HANDLER_TENANT_CACHE_TTL_SECONDS",
+                                      str(DEFAULT_CACHE_TTL_SECONDS))))
+        self.tenants = HostTenants(self.cache)
+        self.gate = gate
+        self.runner = HostRunner(self.tenants, gate, **runner_settings(env))
+        self.outbox = HostOutbox(self.tenants, **outbox_settings(env))
+        self.directory = directory if directory is not None else HostTimerDirectory(self.tenants)
         self.timer = HostTimer(self.directory, **timer_settings(env))
         self.workspaces = WorkspaceBackstop(sync_interval)
+        self.on_tenant_changed: list = []  # e.g. the registry host re-reads the row
         self._stop: asyncio.Event | None = None
         self._tasks: list[asyncio.Task] = []
 
+    def attach_hub(self, hub: PostgresHub) -> None:
+        """One LISTEN for the whole host: due work wakes the timer, a schema's work the
+        claim and outbox loops, a tenant change drops its context."""
+        hub.on_due = self.timer.wake
+
+        def work(schema: str) -> None:
+            self.runner.hint_schema(hub, schema)
+            tenant = self.tenants.by_key(hub, schema) if schema else None
+            self.outbox.hint(tenant.name if tenant is not None else "")
+
+        def changed(schema: str) -> None:
+            self.tenants.changed(hub, schema)
+            for listener in self.on_tenant_changed:
+                listener(hub, schema)
+
+        hub.on_work = work
+        hub.on_tenant_changed = changed
+
+    def serve_local(self, context: TenantContext) -> None:
+        """A tenant on a store with its own connections: only this process hears it, so
+        its context stays built (pinned) for the host's lifetime."""
+        self.cache.pin(context)
+        clock = getattr(context.store, "_clock", None)
+        self.tenants.serve(ServedTenant(context.name, context.key, clock=clock))
+        self.runner.local.register(context.name, clock)
+        self.outbox.local.register(context.name, clock)
+
+    def wire(self, name: str, store: Any, outbox: Any) -> None:
+        """A built context's in-process signals go to the host loops."""
+        signal = getattr(store, "_wake", None)
+        if hasattr(signal, "listener"):
+            signal.listener = lambda: self.runner.hint(name)
+        store.on_delivery_due = lambda: self.outbox.hint(name)
+        outbox.on_wake = lambda: self.outbox.hint(name)
+
     def start(self) -> None:
         self._stop = asyncio.Event()
-        self._tasks = [asyncio.create_task(self.timer.run(self._stop), name="host-timer"),
-                       asyncio.create_task(self.workspaces.run(self._stop),
+        self._mcp_stop = asyncio.Event()
+        stop, mcp_stop = self._stop, self._mcp_stop
+
+        async def own_mcp() -> None:
+            # MCP uses AnyIO cancel scopes: enter AND exit its lifespan in one task.
+            async with self.mcp.lifespan():
+                await mcp_stop.wait()
+
+        self._mcp_task = asyncio.create_task(own_mcp(), name="host-mcp")
+        self._tasks = [asyncio.create_task(self.timer.run(stop), name="host-timer"),
+                       asyncio.create_task(self.runner.run(stop), name="host-runner"),
+                       asyncio.create_task(self.outbox.run(stop), name="host-outbox"),
+                       asyncio.create_task(self.workspaces.run(stop),
                                            name="workspace-backstop")]
 
     async def stop(self) -> None:
         if self._stop is None:
             return
         self._stop.set()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await asyncio.gather(*self._tasks, return_exceptions=True)  # runs drained first
+        self._mcp_stop.set()
+        await asyncio.gather(self._mcp_task, return_exceptions=True)
         self._stop = None
 
 
@@ -585,7 +700,7 @@ def _host_run_gate(env: Mapping[str, str]) -> RunGate:
 
 
 def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs: list) -> FastAPI:
-    """Host tenants from `handler_control` and start each only when it has work."""
+    """Host tenants from `handler_control`; each is context, built when it has work."""
     platform_key, sealing_key = env.get(PLATFORM_KEY_ENV), env.get(TENANT_SECRET_ENV)
     if not args.database_url or not platform_key or not sealing_key:
         raise ValueError(f"{REGISTRY_ENV} needs DATABASE_URL, {PLATFORM_KEY_ENV} "
@@ -629,21 +744,33 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
         gate.configure(tenant.name, tenant.plan, _plan_limit(tenant))
         return resolve_limits(tenant.plan, tenant.limits, plan_table)
 
-    def runtime_for(tenant: Tenant):
-        name, cfg, scoped, base = tenant_instance_config(args, env, tenant, box)
-        return instance_runtime(cfg, scoped, base_path=base, instance_name=name, hub=hub, gate=gate,
-                                plan_limits=LiveLimits(limits_for(tenant)),
-                                allowed_harnesses=allowed_harnesses, host=services)
+    services = HostServices(env, sync_interval=args.sync_interval, gate=gate)
+    services.attach_hub(hub)
 
-    tenants = TenantHost(
-        registry, runtime_for, limits_for=limits_for,
-        max_active=int(env.get("HANDLER_MAX_ACTIVE_TENANTS", str(DEFAULT_MAX_ACTIVE))),
-        idle_seconds=float(env.get("HANDLER_TENANT_IDLE_SECONDS", "600")),
-        scan_seconds=float(env.get("HANDLER_TENANT_SCAN_SECONDS", "15")),
-        boot_grace_seconds=float(env.get("HANDLER_TENANT_BOOT_GRACE_SECONDS", "120")))
-    # One timer for every tenant's due work; a due row of a sleeping tenant wakes it.
-    services = HostServices(env, tenants.timer_directory(hub), sync_interval=args.sync_interval)
-    hub.on_due = services.timer.wake
+    async def build(name: str) -> TenantContext:
+        # Read afresh: a context is built from the row as it is now (new secrets,
+        # plan and integrations apply from the next build).
+        tenant = await registry.get(name)
+        if tenant is None or not tenant.enabled:
+            raise LookupError(f"tenant {name!r} is not enabled")
+        name, cfg, scoped, base = tenant_instance_config(args, env, tenant, box)
+        # One LiveLimits per tenant across rebuilds: a context still in use (an open
+        # stream, a running run) follows the new plan too, so a call from an older
+        # tool view is refused at once.
+        limits = live_limits.get(name)
+        if limits is None:
+            limits = live_limits[name] = LiveLimits(limits_for(tenant))
+        else:
+            limits.current = limits_for(tenant)
+        return await build_tenant_context(
+            cfg, scoped, base_path=base, instance_name=name, hub=hub,
+            plan_limits=limits,
+            allowed_harnesses=allowed_harnesses, host=services)
+
+    live_limits: dict[str, LiveLimits] = {}
+    services.cache.build = build
+    tenants = TenantHost(registry, services, hub, limits_for=limits_for,
+                         scan_seconds=float(env.get("HANDLER_TENANT_SCAN_SECONDS", "15")))
 
     @contextlib.asynccontextmanager
     async def lifespan(host):
@@ -652,12 +779,14 @@ def create_registry_host(args: argparse.Namespace, env: dict[str, str], configs:
             await registry.import_once(_imported_tenants(args, env, configs, registry))
             validate(await registry.list())
             await tenants.load()
-            tenants.start()  # in the background: the port must bind within Heroku's limit
+            await tenants.boot()  # every tenant due once: backfill, work left by a restart
+            tenants.start()
             services.start()
             yield
         finally:
             await services.stop()
             await tenants.shutdown()
+            await services.cache.close()
             await hub.close()
             await asyncio.to_thread(shutdown_readers)
 
@@ -684,54 +813,46 @@ def create_host(args: argparse.Namespace, env: Mapping[str, str] | None = None) 
     # registry gives them when it imports them (Tenant's defaults).
     gate = _host_run_gate(env)
     for name, *_ in configs:
-        gate.configure(name, Tenant.plan, None)
-    services = HostServices(env, sync_interval=args.sync_interval)
+        gate.configure(name or "main", Tenant.plan, None)
+    services = HostServices(env, sync_interval=args.sync_interval, gate=gate)
     for hub in hubs.values():
-        hub.on_due = services.timer.wake
+        services.attach_hub(hub)
+    by_name = {name or "main": (name, cfg, scoped, base) for name, cfg, scoped, base in configs}
+
+    async def build(key: str) -> TenantContext:
+        name, cfg, scoped, base = by_name[key]
+        return await build_tenant_context(
+            cfg, scoped, base_path=base, instance_name=name,
+            hub=hubs.get(cfg.database_url), allowed_harnesses=allowed_harnesses,
+            host=services)
+
+    services.cache.build = build
 
     @contextlib.asynccontextmanager
     async def lifespan(host):
-        stop = asyncio.Event()
-        tasks = []
-
-        async def own_runtime(name, cfg, scoped, base, ready):
-            # MCP uses AnyIO cancel scopes: enter AND exit each instance in the
-            # same task. Separate owner tasks let them drain concurrently.
-            try:
-                async with instance_runtime(cfg, scoped, base_path=base, instance_name=name,
-                                            hub=hubs.get(cfg.database_url), gate=gate,
-                                            allowed_harnesses=allowed_harnesses,
-                                            host=services) as app:
-                    ready.set_result(app)
-                    await stop.wait()
-            except BaseException as exc:
-                if not ready.done():
-                    ready.set_exception(exc)
-                raise
-
         try:
-            for name, cfg, scoped, base in configs:
-                ready = asyncio.get_running_loop().create_future()
-                tasks.append(asyncio.create_task(own_runtime(name, cfg, scoped, base, ready),
-                                                  name=f"instance-{name or 'default'}"))
-                app = await ready
-                host.mount(base or "/", app)
+            for key, (name, cfg, _, _) in by_name.items():
+                hub = hubs.get(cfg.database_url)
+                if hub is None:
+                    # Its own store (SQLite, or a lone Postgres instance): only this
+                    # process hears it, so its context stays built.
+                    services.serve_local(await build(key))
+                else:
+                    services.tenants.serve(ServedTenant(key, cfg.db_schema or "public", hub=hub))
+            for hub in hubs.values():
+                # Env tenants get tenant_state rows too: one code path. Due at once,
+                # so each is looked at once at boot (backfill, work a restart left).
+                await hub.register_tenants([(t.name, t.key) for t in services.tenants.all()
+                                            if t.hub is hub])
             if configs[0][0]:
-                async def unknown_instance(path: str = ""):
-                    raise HTTPException(404, "instance not found")
-                host.add_api_route("/i/{path:path}", unknown_instance,
-                                   methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
-                main = next(route.app for route in host.routes if getattr(route, "path", "") == "/i/main")
-                host.mount("/", main)
+                host.mount("/", EnvRouter(services.tenants))
+            else:
+                host.mount("/", services.cache.cached("main").app)
             services.start()
             yield
         finally:
             await services.stop()
-            stop.set()
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, BaseException):
-                    logger.error("instance lifecycle failed", exc_info=result)
+            await services.cache.close()
             for hub in hubs.values():
                 await hub.close()
             await asyncio.to_thread(shutdown_readers)
@@ -752,26 +873,44 @@ async def serve(args: argparse.Namespace) -> None:
         raise RuntimeError("handler host failed to start")
 
 
-@contextlib.asynccontextmanager
-async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
-                           base_path: str = "", instance_name: str = "",
-                           registry: IntegrationRegistry | None = None,
-                           hub: PostgresHub | None = None, gate: RunGate | None = None,
-                           plan_limits: LiveLimits | None = None,
-                           allowed_harnesses: frozenset[str] | None = None,
-                           host: HostServices | None = None):
-    """Own one instance and close all its resources when the host stops.
+async def build_tenant_context(args: argparse.Namespace, env: Mapping[str, str], *,
+                               host: "HostServices", base_path: str = "",
+                               instance_name: str = "",
+                               registry: IntegrationRegistry | None = None,
+                               hub: PostgresHub | None = None,
+                               plan_limits: LiveLimits | None = None,
+                               allowed_harnesses: frozenset[str] | None = None) -> TenantContext:
+    """Build one tenant's context (tenancy/contexts.py): its store, settings, gateway,
+    executor, sinks, timer handlers and HTTP sub-app. Starts no long-lived task: runs,
+    timer firings and deliveries are the host loops', MCP is the host's one app. The
+    only tasks are integration start-up work that ends by itself (Crontal tool
+    discovery, until 3b moves it into context loading); `close()` stops them.
 
     `allowed_harnesses` is the host's HANDLER_ALLOWED_HARNESSES (None: all).
-    `host` holds what the host shares (bus, timer, workspace backstop); without one
-    this instance makes its own and runs it (a lone instance).
     """
-    own_host = host is None
-    if host is None:
-        host = HostServices(env, sync_interval=args.sync_interval)
-    # Everything this instance runs (its tasks, and through TenantScope its
-    # requests) shares host pools such as the reader pool as this tenant.
     tenant_token = set_current_tenant(instance_name or "main")
+    try:
+        return await _build_tenant_context(
+            args, env, host=host, base_path=base_path, instance_name=instance_name,
+            registry=registry, hub=hub, plan_limits=plan_limits,
+            allowed_harnesses=allowed_harnesses)
+    finally:
+        reset_current_tenant(tenant_token)
+
+
+class _TenantRuns:
+    """A tenant's view of the host claim loop (what its dispatcher used to report)."""
+
+    def __init__(self, runner: HostRunner, name: str) -> None:
+        self._runner, self._name = runner, name
+
+    @property
+    def active_count(self) -> int:
+        return self._runner.running(self._name)
+
+
+async def _build_tenant_context(args, env, *, host, base_path, instance_name, registry, hub,
+                                plan_limits, allowed_harnesses) -> TenantContext:
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     env = dict(env)
@@ -809,8 +948,12 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
     if plan_limits is not None:
         store.limits = plan_limits
     store.on_due_changed = host.timer.wake  # its due-work writes wake the host timer
+    name = instance_name or "main"
     target: TimerTarget | None = None
     workspace_sync: WorkspaceSync | None = None
+    workspace_limit = None
+    stop = asyncio.Event()
+    tasks: list[asyncio.Task] = []
     try:
         # Runs a dead worker left at 'running' (e.g. the dyno restarted mid-run).
         swept = await store.sweep_abandoned_runs()
@@ -897,8 +1040,7 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         # Registered on every plan: each run's tool view and every call follow the
         # live plan (GrantPolicy.excluded), so an upgrade or downgrade needs no restart.
         gateway.register(AutomationTools(store, scheduler))
-        tokens = RunTokens()
-        mcp_app = create_mcp_app(gateway, tokens)
+        tokens = host.tokens  # one MCP app for the host; a token names its gateway
 
         config = RunConfig(data_dir=data_dir, reasoning_effort=args.reasoning_effort,
                            timeout_seconds=float(limits_cfg["run_timeout_seconds"]),
@@ -957,12 +1099,9 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             workspace_sync=workspace_sync,
             crontal_identity=crontal_id, crontal_catalog=crontal_catalog,
         )
-        dispatcher = Dispatcher(
-            store, executor, lease_seconds=config.lease_seconds,
-            max_concurrent=args.max_concurrent, gate=gate, gate_tenant=instance_name,
-            lane_capacity={Lane.INTERACTIVE: int(limits_cfg["interactive_capacity"]),
-                           Lane.BACKGROUND: int(limits_cfg["background_capacity"])},
-        )
+        executor.gateway = gateway
+        lane_capacity = {Lane.INTERACTIVE: int(limits_cfg["interactive_capacity"]),
+                         Lane.BACKGROUND: int(limits_cfg["background_capacity"])}
 
         trusted_user = env.get("HANDLER_TRUSTED_USER", "").strip() or None
         trusted_devices = _trusted_device_users(env.get("HANDLER_TRUSTED_DEVICE_USERS", ""))
@@ -977,13 +1116,14 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             (lambda: plan_limits.current.max_upload_bytes) if plan_limits is not None else None))
         if plan_limits is not None:
             # Counted once here, off the event loop; writes then keep the totals current.
-            await register_workspace_limit(
-                config.workspaces_dir, lambda: plan_limits.current.max_workspace_bytes).prime()
+            workspace_limit = register_workspace_limit(
+                config.workspaces_dir, lambda: plan_limits.current.max_workspace_bytes)
+            await workspace_limit.prime()
             await uploads.used.prime()
         app = create_app(store, bus, auth, default_harness=settings.harness_source("chat"),
                          uploads=uploads, instance_name=instance_name,
                          cancel_wake=executor.wake_cancel)
-        app.mount("/mcp", mcp_app)
+        app.mount("/mcp", host.mcp)
         app.include_router(approvals_router(gateway, store, auth))
         app.include_router(memory_recovery_router(gateway, store, auth))
         app.include_router(questions_router(questions, store, auth))
@@ -1032,9 +1172,6 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             async def mailboxes_not_in_plan(_principal: Principal = Depends(auth.require_admin)):
                 return JSONResponse(upgrade_required("mailbox", plan_limits.current), status_code=403)
 
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-
         # Grants: a save in this process applies at once (settings listener); one
         # made elsewhere is picked up by the version check before each run.
         grants_seen = {"version": grants_version}
@@ -1054,7 +1191,14 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
             take_grants(*await settings.get("grants"))
 
         settings.on_saved.append(grants_saved)
-        executor.before_run = refresh_grants
+        executor.before_run = refresh_grants  # a backstop for a save NOTIFY missed
+
+        def settings_saved(section: str, stored) -> None:
+            # Every section feeds the context (limits, threads, grants): the next use
+            # builds afresh. Other processes hear NOTIFY handler_tenant_changed.
+            host.cache.invalidate(name)
+
+        settings.on_saved.append(settings_saved)
 
         crontal_token = env.get("CRONTAL_AGENT_TOKEN")
         if legacy_crontal and args.crontal_url and crontal_token:
@@ -1091,7 +1235,8 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         app.add_middleware(TenantScope, tenant=instance_name or "main")
         app.state.integrations = integrations
         app.state.gateway, app.state.outbox = gateway, outbox
-        lifecycle = SimpleNamespace(dispatcher=dispatcher, store=store, outbox=outbox,
+        lifecycle = SimpleNamespace(dispatcher=_TenantRuns(host.runner, name), store=store,
+                                    outbox=outbox,
                                     workspace_sync=workspace_sync, limits=plan_limits,
                                     tokens=tokens, bus=bus, uploads=uploads,
                                     workspaces_dir=config.workspaces_dir,
@@ -1128,54 +1273,87 @@ async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
         lifecycle.backfill_due = backfill_due
         app.state.timer_target = target
         await backfill_due()
-        host.directory.register(target)
-        host.workspaces.register(instance_name or "main", workspace_sync)
+        host.workspaces.register(name, workspace_sync)
+        host.wire(name, store, outbox)
         app.state.identity_provider = (contributions.identity_provider[1]
                                        if contributions.identity_provider else None)
 
-        async with mcp_app.lifespan():
-            # No time-driven task per tenant: schedules, mail polls, expiries and
-            # cleanup are due rows for the host timer, and the workspace backstop
-            # is one task for the host.
-            tasks = [
-                asyncio.create_task(start_crontal_connector(), name="crontal-connector"),
-                asyncio.create_task(dispatcher.run_forever(stop), name="dispatcher"),
-                asyncio.create_task(outbox.run_forever(stop), name="outbox"),
-            ]
-            tasks.extend(asyncio.create_task(task.run(stop), name=f"{owner}:{task.name}")
-                         for owner, task in contributions.background_tasks)
-            if own_host:
-                host.start()
-            logger.info("handler-rt serving", extra={"url": f"http://{args.host}:{args.port}/login",
-                                                      "data_dir": str(data_dir),
-                                                      "tools": [s.name for s in gateway.specs()]})
-            try:
-                yield app
-            finally:
-                stop.set()
-                deadline = loop.time() + SHUTDOWN_BUDGET_SECONDS
-                await _flush_until(workspace_sync, deadline - loop.time())
-                try:
-                    await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True),
-                                           timeout=max(deadline - loop.time() - 5, 1))
-                except TimeoutError:
-                    logger.warning("shutdown: tasks still running at the deadline")
-                finally:
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    await _flush_until(workspace_sync, deadline - loop.time())
-
-    finally:
-        if target is not None:
-            host.directory.unregister(target)
+        # Integration start-up work that ends by itself (tool discovery with retry).
+        tasks.append(asyncio.create_task(start_crontal_connector(), name="crontal-connector"))
+        tasks.extend(asyncio.create_task(task.run(stop), name=f"{owner}:{task.name}")
+                     for owner, task in contributions.background_tasks)
+        await asyncio.sleep(0)  # let them start before the context is used
+    except BaseException:
+        stop.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if workspace_sync is not None:
             host.workspaces.unregister(workspace_sync)
+        unregister_workspace_limit(data_dir / "workspaces", workspace_limit)
+        await store.close()
+        raise
+
+    async def close() -> None:
+        """Evicted, invalidated or shut down: nothing of this tenant stays running."""
+        stop.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await _flush_until(workspace_sync, SHUTDOWN_BUDGET_SECONDS)
+        if not workspace_sync.dirty:  # else the host backstop keeps retrying it
+            host.workspaces.unregister(workspace_sync)
+        unregister_workspace_limit(data_dir / "workspaces", workspace_limit)
+        await store.close()
+
+    logger.info("tenant context ready", extra={"tenant": name, "data_dir": str(data_dir),
+                                               "tools": len(gateway.specs())})
+    return TenantContext(
+        name=name, key=store.due_tenant, store=store, app=app, executor=executor,
+        gateway=gateway, outbox=outbox, settings=settings, limits=plan_limits,
+        timer_target=target, workspace_sync=workspace_sync, lifecycle=lifecycle,
+        lane_capacity=lane_capacity, max_concurrent=args.max_concurrent,
+        lease_seconds=config.lease_seconds, close=close)
+
+
+@contextlib.asynccontextmanager
+async def instance_runtime(args: argparse.Namespace, env: Mapping[str, str], *,
+                           base_path: str = "", instance_name: str = "",
+                           registry: IntegrationRegistry | None = None,
+                           hub: PostgresHub | None = None, gate: RunGate | None = None,
+                           plan_limits: LiveLimits | None = None,
+                           allowed_harnesses: frozenset[str] | None = None,
+                           host: HostServices | None = None):
+    """One instance's app, for as long as the block runs.
+
+    Without `host` this is a lone instance: it makes its own host services and runs
+    them (the same host loops, one tenant). With one, the context is pinned in that
+    host (a tenant on its own store, which only this process hears).
+    """
+    own_host = host is None
+    if host is None:
+        host = HostServices(env, sync_interval=args.sync_interval, gate=gate)
+        if hub is not None:
+            host.attach_hub(hub)
+    context = await build_tenant_context(
+        args, env, host=host, base_path=base_path, instance_name=instance_name,
+        registry=registry, hub=hub, plan_limits=plan_limits,
+        allowed_harnesses=allowed_harnesses)
+    if hub is not None:
+        host.tenants.serve(ServedTenant(context.name, context.key, hub=hub))
+        host.cache.pin(context)
+        await hub.register_tenants([(context.name, context.key)])
+    else:
+        host.serve_local(context)
+    try:
+        if own_host:
+            host.start()
+        yield context.app
+    finally:
         if own_host:
             await host.stop()
-        unregister_workspace_limit(data_dir / "workspaces")
-        await store.close()
-        reset_current_tenant(tenant_token)
+        host.tenants.drop(context.name)
+        await context.close()
 
 
 SHUTDOWN_BUDGET_SECONDS = 25.0

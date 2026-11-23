@@ -429,6 +429,9 @@ class SettingsMixin(_Rows):
                 (section, stored.version, Jsonb(value), schema_version, updated_by,
                  stored.updated_at),
             )
+            if cursor.rowcount and self._hub is not None:
+                # Every process drops this tenant's cached context (grants, limits).
+                await self._hub.tenant_changed(conn, self._tenant_schema)
             return stored if cursor.rowcount else None
 
     async def settings_history(self, section: str, limit: int = 50) -> list[SettingsVersion]:

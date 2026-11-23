@@ -45,15 +45,20 @@ class FailingStore:
     async def has_claimable(self, lane):
         return True
 
+    async def work_state(self):
+        from handler.runtime.store.base import WorkState
+
+        return WorkState(frozenset({Lane.INTERACTIVE, Lane.BACKGROUND}))
+
 
 async def test_a_failed_claim_gives_its_gate_slots_back():
     gate = RunGate(2, {"free": 1, "paid": 2})
     gate.configure("t", "free")
     dispatcher = Dispatcher(FailingStore(), executor=None, gate=gate, gate_tenant="t",
                             lane_capacity={Lane.INTERACTIVE: 2, Lane.BACKGROUND: 1})
-    for _ in range(5):
-        with pytest.raises(ConnectionError):
-            await dispatcher.claim_once()
+    for _ in range(5):  # the host loop logs a failed claim and carries on
+        assert await dispatcher.claim_once() == 0
+    assert dispatcher.store.calls >= 5
     assert gate.total == 0 and gate.running("t") == 0
     assert gate.reserve("t", 1) == 1  # a free tenant at cap 1 can still run
 
@@ -64,23 +69,15 @@ async def test_with_the_registry_off_every_dispatcher_shares_one_gate(tmp_path, 
     share one host gate, configured paid as the registry would import them."""
     from tests.runtime.test_multi_instance import config
 
-    dispatchers = []
-    real = server.Dispatcher
-
-    def spy_dispatcher(*args, **kwargs):
-        dispatchers.append(kwargs)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(server, "Dispatcher", spy_dispatcher)
     monkeypatch.setattr(server, "codex_binary", lambda: (_ for _ in ()).throw(FileNotFoundError()))
     env = {**config(tmp_path), "HANDLER_GLOBAL_MAX_RUNS": "4", "HANDLER_MAX_CONCURRENT": "20"}
     host = server.create_host(server._parse_args(["serve"], env), env)
     async with host.router.lifespan_context(host):
-        pass
+        services = host.state.services
+        contexts = [services.cache.cached(name) for name in ("main", "bss")]
     gate = host.state.run_gate
-    assert [d["gate"] for d in dispatchers] == [gate, gate]
-    assert [d["gate_tenant"] for d in dispatchers] == ["main", "bss"]
-    assert [d["max_concurrent"] for d in dispatchers] == [20, 20]  # still applies beneath
+    assert services.runner.gate is gate  # one claim loop, one gate, for every instance
+    assert [c.max_concurrent for c in contexts] == [20, 20]  # still applies beneath
     assert gate.max_runs == 4 and gate._cap("main") == gate._cap("bss") == 3  # paid
 
 
@@ -93,8 +90,7 @@ async def test_env_instances_together_stay_under_the_host_cap(tmp_path, monkeypa
     host = server.create_host(server._parse_args(["serve"], env), env)
     async with host.router.lifespan_context(host):
         gate = host.state.run_gate
-        apps = {name: next(r.app for r in host.routes if getattr(r, "path", "") == f"/i/{name}")
-                for name in ("main", "bss")}
+        apps = {name: host.state.services.cache.cached(name).app for name in ("main", "bss")}
         for name, app in apps.items():
             store = app.state.lifecycle.store
             for n in range(3):
@@ -174,11 +170,11 @@ async def test_a_plan_change_made_elsewhere_is_applied_by_load(base_env, pg_dsn,
                                                  lambda: "unused")
         await app.state.tenants.load()
         await until(lambda: rows(pg_dsn, "SELECT count(*) FROM handler_m42.held_inputs")[0][0] == 0)
-        assert live_store(app).limits.current.plan == "paid"
-        assert slot(app).stale  # its new config waits for the next quiet restart
+        assert live_store(app).limits.current.plan == "paid"  # a fresh context
+        builds = spy.starts["m42"]
         # The platform's own report afterwards still sees nothing left to do.
         await app.state.tenants.tenant_changed("m42")
-        assert spy.starts["m42"] == 1
+        assert spy.starts["m42"] == builds  # no plan change: dropped, not rebuilt
 
 
 async def test_limits_are_resolved_only_when_they_change(base_env, monkeypatch):
