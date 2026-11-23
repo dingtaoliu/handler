@@ -81,7 +81,9 @@ async def test_conversations_scope_messages_and_attachments_to_mailbox(tmp_path,
                         attachments=[("quote.txt", b"attachment content", "text/plain")])
         fake.deliver(raw)
         reply = make_mail(subject="Re: Quote request", in_reply_to=root, references=root,
-                          sender=MAILBOX["email"], to="buyer@client.cn", body="Quote attached.",
+                          sender=MAILBOX["email"], to="buyer@client.cn",
+                          body="Quote attached.\n\nFrom: Buyer\nSent: Thursday\nTo: Sales\n"
+                               "Subject: Quote request\n\nPlease quote.",
                           date=datetime(2026, 11, 20, tzinfo=timezone.utc))
         fake.deliver(reply, folder="Sent")
         await integration_.service.poll(mailbox)
@@ -106,6 +108,8 @@ async def test_conversations_scope_messages_and_attachments_to_mailbox(tmp_path,
         detail = await client.get(path, headers=owner)
         messages = detail.json()["messages"]
         assert [message["direction"] for message in messages] == ["in", "out"]
+        assert messages[1]["body_text"] == "Quote attached."
+        assert messages[1]["quoted_text"].endswith("Please quote.")
         assert messages[0]["attachments"] == [
             {"index": 0, "filename": "quote.txt", "size": len(b"attachment content")}
         ]
@@ -115,6 +119,33 @@ async def test_conversations_scope_messages_and_attachments_to_mailbox(tmp_path,
         assert download.status_code == 200, download.text
         assert download.content == b"attachment content"
         assert download.headers["content-type"] == "application/octet-stream"
+
+        second = await client.post("/api/mailboxes", headers=admin, json={
+            **MAILBOX, "owner_user_id": "other", "wake_mode": "off", "enabled": False,
+        })
+        other_mailbox = await integration_.mail_store.get_mailbox(second.json()["id"])
+        other_mailbox.enabled = True
+        await integration_.mail_store.put_mailbox(other_mailbox)
+        await integration_.service.ingest(
+            other_mailbox, raw, folder="INBOX", uidvalidity=None, uid=None, wake=False)
+        followup = make_mail(
+            subject="Delivery question", body="Can you deliver Tuesday?",
+            in_reply_to=root, references=root, date=datetime(2026, 11, 21, tzinfo=timezone.utc))
+        await integration_.service.ingest(
+            other_mailbox, followup, folder="INBOX", uidvalidity=None, uid=None, wake=False)
+        listing = await client.get("/api/mailboxes/conversations", headers=admin,
+                                   params={"q": "delivery question"})
+        threads = listing.json()["threads"]
+        assert len(threads) == 1 and threads[0]["message_count"] == 3
+        assert threads[0]["snippet"] == "Can you deliver Tuesday?"
+        merged = (await client.get(path, headers=admin)).json()["messages"]
+        assert len(merged) == 3 and merged[-1]["mailbox_id"] == other_mailbox.id
+        attached = next(message for message in merged if message["attachments"])
+        merged_attachment = (f"/api/mailboxes/{attached['mailbox_id']}"
+                             f"/messages/{attached['id']}/attachments/0")
+        assert (await client.get(merged_attachment, headers=admin)).content == b"attachment content"
+        assert len((await client.get(path, headers=owner)).json()["messages"]) == 2
+        assert (await client.get(path, headers=other)).status_code == 404
 
 
 async def test_api_never_returns_secrets_and_instances_are_isolated(tmp_path, monkeypatch,

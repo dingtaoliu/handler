@@ -410,39 +410,80 @@ class MailStore:
             (mailbox_id, conversation_id))
         return _decode(rows[0]) if rows else None
 
-    async def list_conversations(self, mailbox_ids: list[str], *, limit: int,
-                                 offset: int, search: str = "") -> list[dict[str, Any]]:
+    async def list_conversations(self, mailbox_ids: list[str], *,
+                                 search: str = "") -> list[dict[str, Any]]:
         if not mailbox_ids:
             return []
         placeholders = ",".join("?" for _ in mailbox_ids)
-        params: list[Any] = list(mailbox_ids)
-        match = ""
+        search_params: list[str] = []
+        match = "1"
         if search:
             like = "LIKE ? ESCAPE '\\'"
             match = (
-                f" AND (lower(c.subject) {like} OR lower(c.participants) {like} OR EXISTS ("
+                f"(lower(c.subject) {like} OR lower(c.participants) {like} OR EXISTS ("
                 "SELECT 1 FROM mail_messages s WHERE s.account_id = c.account_id "
                 "AND s.conversation_id = c.id "
                 f"AND (lower(s.subject) {like} OR lower(s.from_name) {like} "
                 f"OR lower(s.to_addrs) {like} OR lower(s.cc_addrs) {like})))"
             )
-            params.extend([_like(search)] * 6)
+            search_params = [_like(search)] * 6
         rows = await self._query(
             "SELECT c.account_id, c.id, c.subject, c.participants, c.message_count, "
-            "c.last_message_at, (SELECT substr(m.body_text, 1, 240) FROM mail_messages m "
-            "WHERE m.account_id = c.account_id AND m.conversation_id = c.id "
-            "ORDER BY m.date DESC, m.id DESC LIMIT 1) AS snippet "
-            f"FROM mail_conversations c WHERE c.account_id IN ({placeholders}){match} "
-            "ORDER BY c.last_message_at DESC, c.account_id, c.id LIMIT ? OFFSET ?",
-            (*params, limit, offset))
+            f"c.last_message_at, {match} AS matches_search "
+            f"FROM mail_conversations c WHERE c.account_id IN ({placeholders}) "
+            "ORDER BY c.last_message_at DESC, c.account_id, c.id",
+            (*search_params, *mailbox_ids))
         return [_decode(row) for row in rows]
 
-    async def page_conversation_messages(self, mailbox_id: str, conversation_id: str,
-                                         *, limit: int, offset: int) -> list[dict[str, Any]]:
+    async def conversation_snippets(self, threads: list[tuple[str, str]]) -> dict:
+        if not threads:
+            return {}
+        values = ",".join("(?,?)" for _ in threads)
         rows = await self._query(
-            "SELECT * FROM mail_messages WHERE account_id = ? AND conversation_id = ? "
-            "ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
-            (mailbox_id, conversation_id, limit, offset))
+            f"WITH selected(account_id, conversation_id) AS (VALUES {values}) "
+            "SELECT s.account_id, s.conversation_id, "
+            "(SELECT substr(m.body_text, 1, 2000) FROM mail_messages m "
+            "WHERE m.account_id = s.account_id AND m.conversation_id = s.conversation_id "
+            "ORDER BY m.date DESC, m.id DESC LIMIT 1) AS snippet FROM selected s",
+            tuple(value for thread in threads for value in thread))
+        return {(row["account_id"], row["conversation_id"]): row["snippet"] for row in rows}
+
+    async def conversation_links(self, mailbox_ids: list[str]) -> list[dict[str, Any]]:
+        if len(mailbox_ids) < 2:
+            return []
+        marks = ",".join("?" for _ in mailbox_ids)
+        return await self._query(
+            "SELECT DISTINCT a.account_id AS a_account, a.conversation_id AS a_id, "
+            "b.account_id AS b_account, b.conversation_id AS b_id "
+            "FROM mail_refs a JOIN mail_refs b ON b.ref_id = a.ref_id "
+            "AND a.account_id < b.account_id "
+            f"WHERE a.account_id IN ({marks}) AND b.account_id IN ({marks})",
+            (*mailbox_ids, *mailbox_ids))
+
+    async def grouped_message_counts(self, groups: list[list[tuple[str, str]]]) -> dict[int, int]:
+        members = [(index, account, thread) for index, group in enumerate(groups)
+                   if len(group) > 1 for account, thread in group]
+        if not members:
+            return {}
+        values = ",".join("(CAST(? AS INTEGER),?,?)" for _ in members)
+        rows = await self._query(
+            f"WITH selected(group_number, account_id, conversation_id) AS (VALUES {values}) "
+            "SELECT s.group_number, COUNT(DISTINCT m.message_id) AS total FROM selected s "
+            "JOIN mail_messages m ON m.account_id = s.account_id "
+            "AND m.conversation_id = s.conversation_id GROUP BY s.group_number",
+            tuple(value for row in members for value in row))
+        return {row["group_number"]: row["total"] for row in rows}
+
+    async def page_conversation_messages(self, members: list[tuple[str, str]],
+                                         *, limit: int, offset: int) -> list[dict[str, Any]]:
+        values = ",".join("(?,?)" for _ in members)
+        rows = await self._query(
+            "WITH ranked AS (SELECT m.*, ROW_NUMBER() OVER (PARTITION BY message_id "
+            "ORDER BY CASE WHEN COALESCE(body_text, '') = '' THEN 1 ELSE 0 END, "
+            "body_truncated, CASE WHEN uid IS NULL THEN 1 ELSE 0 END, account_id, id) AS rank "
+            f"FROM mail_messages m WHERE (account_id, conversation_id) IN (VALUES {values})) "
+            "SELECT * FROM ranked WHERE rank = 1 ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
+            (*[value for member in members for value in member], limit, offset))
         return [_decode(row) for row in rows]
 
     # ── messages ───────────────────────────────────────────────────────────

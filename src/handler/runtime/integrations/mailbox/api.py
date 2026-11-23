@@ -28,6 +28,7 @@ from pydantic import BaseModel, ValidationError
 from ... import documents
 from ...auth import Authenticator, Principal
 from .config import PRESET_DEFAULTS, PRESETS, Mailbox, MailboxCreate, MailboxTest, MailboxUpdate
+from .inbox import conversation_groups, split_quoted_text
 from .message import parse_message_file
 from .transport import MailError
 
@@ -94,19 +95,51 @@ def mailboxes_router(service, mail_store, poller, auth: Authenticator) -> APIRou
         return {"id": mailbox.id, "email": mailbox.email, "status": mailbox.status,
                 "last_sync_at": mailbox.last_sync_at}
 
+    async def visible_mailboxes(principal: Principal) -> list[Mailbox]:
+        return [mailbox for mailbox in await mail_store.list_mailboxes()
+                if can_read(mailbox, principal)]
+
     @router.get("/api/mailboxes/conversations")
     async def list_conversations(response: Response,
                                  offset: int = Query(0, ge=0),
                                  q: str = Query("", max_length=200),
                                  principal: Principal = Depends(auth.require_principal)):
-        mailboxes = [m for m in await mail_store.list_mailboxes() if can_read(m, principal)]
+        mailboxes = await visible_mailboxes(principal)
+        mailbox_ids = [mailbox.id for mailbox in mailboxes]
         limit = 40
-        rows = await mail_store.list_conversations(
-            [m.id for m in mailboxes], limit=limit + 1, offset=offset, search=q.strip())
+        groups = conversation_groups(await mail_store.conversation_links(mailbox_ids))
+        rows = await mail_store.list_conversations(mailbox_ids, search=q.strip())
+        summaries = {(row["account_id"], row["id"]): row for row in rows}
+        seen = set()
+        listed = []
+        for key, latest in summaries.items():
+            if key in seen:
+                continue
+            members = [member for member in groups.get(key, [key]) if member in summaries]
+            seen.update(members)
+            sources = [summaries[member] for member in members]
+            if not any(row["matches_search"] for row in sources):
+                continue
+            canonical = sources[0]
+            listed.append((key, members, {
+                "id": canonical["id"], "account_id": canonical["account_id"],
+                "subject": canonical["subject"], "last_message_at": latest["last_message_at"],
+                "participants": list(dict.fromkeys(
+                    address for row in sources for address in row["participants"] or [])),
+                "message_count": canonical["message_count"],
+            }))
+        page = listed[offset:offset + limit]
+        counts = await mail_store.grouped_message_counts([members for _, members, _ in page])
+        snippets = await mail_store.conversation_snippets([key for key, _, _ in page])
+        threads = []
+        for index, (key, _, row) in enumerate(page):
+            snippet, _ = split_quoted_text(snippets.get(key) or "")
+            threads.append({**row, "message_count": counts.get(index, row["message_count"]),
+                            "snippet": snippet[:240] or None})
         response.headers["Cache-Control"] = "no-store"
         return {"mailboxes": [mailbox_summary(m) for m in mailboxes],
-                "threads": rows[:limit],
-                "next_offset": offset + limit if len(rows) > limit else None}
+                "threads": threads,
+                "next_offset": offset + limit if len(listed) > offset + limit else None}
 
     @router.get("/api/mailboxes/{mailbox_id}/conversations/{conversation_id}")
     async def read_conversation(mailbox_id: str, conversation_id: str, response: Response,
@@ -116,14 +149,27 @@ def mailboxes_router(service, mail_store, poller, auth: Authenticator) -> APIRou
         conversation = await mail_store.get_conversation(mailbox.id, conversation_id)
         if conversation is None:
             raise HTTPException(404, "conversation not found")
+        mailboxes = {m.id: m for m in await visible_mailboxes(principal)}
+        key = (mailbox.id, conversation_id)
+        groups = conversation_groups(await mail_store.conversation_links(list(mailboxes)))
+        members = groups.get(key, [key])
+        if members[0] != key:
+            primary_account, primary_thread = members[0]
+            primary = await mail_store.get_conversation(primary_account, primary_thread)
+            if primary is not None:
+                mailbox = mailboxes[primary_account]
+                conversation = primary
         limit = 10
         rows = await mail_store.page_conversation_messages(
-            mailbox.id, conversation_id, limit=limit + 1, offset=offset)
+            members, limit=limit + 1, offset=offset)
         messages = []
         for row in reversed(rows[:limit]):
             message = {key: row[key] for key in (
                 "id", "subject", "from_addr", "from_name", "to_addrs", "cc_addrs",
                 "date", "direction", "body_text", "body_truncated")}
+            message["mailbox_id"] = row["account_id"]
+            message["body_text"], message["quoted_text"] = split_quoted_text(
+                row.get("body_text") or "")
             message["attachments"] = [
                 {key: item[key] for key in ("index", "filename", "size")}
                 for item in row.get("attachments") or []
