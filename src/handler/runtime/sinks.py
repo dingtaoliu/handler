@@ -3,9 +3,11 @@
 Core code emits domain events (`notification.created` today; `task.status_changed`
 and others can follow) to the `Outbox`. Each registered `Sink` that `accepts`
 an event gets its own row in the store's `deliveries` table, keyed by
-(sink name, event key), so emitting the same event twice is a no-op. A
-background worker claims due rows and calls `sink.deliver(payload)`; failures
-retry by the sink's `RetryPolicy` and dead-letter after `max_attempts`.
+(sink name, event key), so emitting the same event twice is a no-op. The host's
+one `HostOutbox` loop claims due rows across tenants and calls
+`sink.deliver(payload)`; failures retry by the sink's `RetryPolicy` and
+dead-letter after `max_attempts`. A tenant's `Outbox` holds its sinks and holds
+no task.
 
 The outbox knows nothing about any one integration. A sink is registered only
 when its integration is configured (see `integrations/crontal/sink.py`).
@@ -91,6 +93,7 @@ class Outbox:
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
         self._wake = asyncio.Event()
+        self.on_wake: Any = None  # the host outbox loop's hint for this tenant
         for sink in sinks or []:
             self.register(sink)
 
@@ -111,17 +114,24 @@ class Outbox:
                 logger.exception("enqueue failed", extra={"sink": sink.name,
                                                           "event": event.type, "key": event.key})
         if queued:
-            self._wake.set()
+            self.wake()
         return queued
 
     def wake(self) -> None:
         """Deliver now (e.g. rows were just requeued)."""
         self._wake.set()
+        if self.on_wake is not None:
+            self.on_wake()
 
     async def deliver_once(self, limit: int = 20) -> int:
         """Deliver due rows once; returns how many succeeded."""
+        return (await self.deliver_batch(limit))[1]
+
+    async def deliver_batch(self, limit: int = 20) -> tuple[int, int]:
+        """Deliver up to `limit` due rows; returns (claimed, succeeded)."""
         delivered = 0
-        for row in await self.store.claim_deliveries(list(self.sinks), limit, self.lease_seconds):
+        rows = await self.store.claim_deliveries(list(self.sinks), limit, self.lease_seconds)
+        for row in rows:
             sink = self.sinks[row.sink]
             try:
                 await sink.deliver(row.payload)
@@ -141,15 +151,118 @@ class Outbox:
                 continue
             await self.store.delivery_succeeded(row.sink, row.key)
             delivered += 1
-        return delivered
+        return len(rows), delivered
 
     async def run_forever(self, stop: asyncio.Event) -> None:
-        if not self.sinks:
-            return
+        """This outbox alone, through the host loop (tests and tools)."""
+        from .tenancy.contexts import ContextCache, HostTenants, ServedTenant, TenantContext
+
+        cache = ContextCache()
+        cache.pin(TenantContext(name=self.tenant, key="local", store=self.store, outbox=self))
+        tenants = HostTenants(cache)
+        tenants.serve(ServedTenant(self.tenant, "local"))
+        loop = HostOutbox(tenants, poll_seconds=self.poll_seconds)
+        loop.local.register(self.tenant)
+        self.on_wake = lambda: loop.hint(self.tenant)
+        await loop.run(stop)
+
+
+DEFAULT_OUTBOX_POLL_SECONDS = 5.0
+DEFAULT_DELIVERY_BATCH = 20
+DEFAULT_OUTBOX_CONCURRENCY = 4
+
+
+class HostOutbox:
+    """The host's one delivery loop, across tenants (step 3).
+
+    Due tenants come from the wake record (wakes.py: `tenant_state.next_delivery_at`
+    on a hub, marked by every write that makes a delivery due). Each pass takes due
+    tenants oldest first and delivers at most `batch` rows for each, at most
+    `concurrency` tenants at once, then looks again: a tenant with a backlog gets one
+    batch per pass, round robin, so it cannot hold the loop. A tenant is written back
+    with its next due row (a retry's backoff) once its due rows are done. Sinks are
+    the tenant's own, from its context. Per-tenant and per-sink limits are step 6.
+    """
+
+    def __init__(self, tenants: Any, *, poll_seconds: float = DEFAULT_OUTBOX_POLL_SECONDS,
+                 batch: int = DEFAULT_DELIVERY_BATCH,
+                 concurrency: int = DEFAULT_OUTBOX_CONCURRENCY) -> None:
+        from .wakes import LocalWakes
+
+        self.tenants = tenants
+        self.poll_seconds = poll_seconds
+        self.batch = max(1, batch)
+        self.concurrency = max(1, concurrency)
+        self.local = LocalWakes()
+        self._control: dict[int, Any] = {}
+        self._hinted: set[str] = set()
+        self._wake = asyncio.Event()
+
+    def hint(self, name: str = "") -> None:
+        if name:
+            self._hinted.add(name)
+            self.local.mark(name)
+        self._wake.set()
+
+    def _source(self, tenant: Any) -> Any:
+        from .wakes import DELIVERIES, ControlWakes
+
+        if tenant.hub is None:
+            return self.local
+        source = self._control.get(id(tenant.hub))
+        if source is None:
+            source = self._control[id(tenant.hub)] = ControlWakes(tenant.hub, DELIVERIES)
+        return source
+
+    async def deliver_once(self) -> int:
+        """One round: up to `batch` rows for each due tenant. Returns rows claimed."""
+        from .wakes import Due
+
+        self._wake.clear()
+        served = {tenant.name: tenant for tenant in self.tenants.enabled()}
+        groups: dict[int, tuple[Any, list[str]]] = {}
+        for tenant in served.values():
+            source = self._source(tenant)
+            groups.setdefault(id(source), (source, []))[1].append(tenant.name)
+        due: dict[str, tuple[Any, Any]] = {}
+        for source, names in groups.values():
+            for item in await source.due(names):
+                due[item.name] = (source, item)
+        hinted, self._hinted = self._hinted, set()
+        for name in hinted:
+            if name in served and name not in due:
+                due[name] = (self._source(served[name]), Due(name, None))
+        limit = asyncio.Semaphore(self.concurrency)
+        claimed = 0
+
+        async def one(source: Any, item: Any) -> None:
+            nonlocal claimed
+            async with limit:
+                try:
+                    async with self.tenants.use(item.name) as context:
+                        outbox = getattr(context, "outbox", None) if context else None
+                        if outbox is None or not outbox.sinks:
+                            await source.reschedule(item.name, item.version, None)
+                            return
+                        taken, _ = await outbox.deliver_batch(self.batch)
+                        claimed += taken
+                        if taken >= self.batch:
+                            return  # more may be due: next round, after the others
+                        at = await context.store.next_delivery_at(list(outbox.sinks))
+                    await source.reschedule(item.name, item.version, at)
+                except Exception:
+                    logger.exception("outbox pass failed", extra={"tenant": item.name})
+
+        await asyncio.gather(*(one(source, item) for source, item in due.values()))
+        return claimed
+
+    async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
-            self._wake.clear()
             try:
-                await self.deliver_once()
+                if await self.deliver_once():
+                    continue
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("outbox pass failed")
             waits = [asyncio.ensure_future(stop.wait()), asyncio.ensure_future(self._wake.wait())]
@@ -161,3 +274,11 @@ class Outbox:
                     waiter.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.gather(*waits, return_exceptions=True)
+
+
+def outbox_settings(env) -> dict[str, float]:
+    return {"poll_seconds": float(env.get("HANDLER_OUTBOX_POLL_SECONDS",
+                                          str(DEFAULT_OUTBOX_POLL_SECONDS))),
+            "batch": int(env.get("HANDLER_OUTBOX_BATCH", str(DEFAULT_DELIVERY_BATCH))),
+            "concurrency": int(env.get("HANDLER_OUTBOX_CONCURRENCY",
+                                       str(DEFAULT_OUTBOX_CONCURRENCY)))}

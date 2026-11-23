@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from ..types import Approval, ApprovalStatus, AuditEntry, Decision, Question, QuestionStatus
+from .due_work import APPROVAL_EXPIRE, QUESTION_EXPIRE, sqlite_set_due
 from .sqlite import _insert, _timestamp, _transaction, _values
 
 _JSON = {"args", "result", "options", "answer"}
@@ -53,9 +54,14 @@ def _from_row(cls: type, row: sqlite3.Row):
 class ApprovalMixin:
     async def create_approval(self, approval: Approval) -> None:
         def write(db: sqlite3.Connection) -> None:
-            _insert(db, "approvals", _row_values(approval))
+            with _transaction(db):
+                _insert(db, "approvals", _row_values(approval))
+                if approval.expires_at is not None:  # expired by the host timer
+                    sqlite_set_due(db, APPROVAL_EXPIRE, approval.id, approval.expires_at, self._clock())
 
         await self._call(write)
+        if approval.expires_at is not None:
+            self._due_written()
 
     async def get_approval(self, approval_id: str) -> Approval | None:
         def read(db: sqlite3.Connection) -> Approval | None:
@@ -108,10 +114,13 @@ class ApprovalMixin:
                 sets.append("result = ?")
                 params.append(json.dumps(result))
             with _transaction(db):
-                return db.execute(
+                moved = db.execute(
                     f"UPDATE approvals SET {', '.join(sets)} WHERE id = ? AND status = ?",
                     (*params, approval_id, expected.value),
                 ).rowcount == 1
+                if moved and new.value != "pending":  # nothing left to expire
+                    sqlite_set_due(db, APPROVAL_EXPIRE, approval_id, None, self._clock())
+                return moved
 
         return await self._call(write)
 
@@ -119,9 +128,14 @@ class ApprovalMixin:
 class QuestionMixin:
     async def create_question(self, question: Question) -> None:
         def write(db: sqlite3.Connection) -> None:
-            _insert(db, "questions", _row_values(question))
+            with _transaction(db):
+                _insert(db, "questions", _row_values(question))
+                if question.expires_at is not None:  # expired by the host timer
+                    sqlite_set_due(db, QUESTION_EXPIRE, question.id, question.expires_at, self._clock())
 
         await self._call(write)
+        if question.expires_at is not None:
+            self._due_written()
 
     async def get_question(self, question_id: str) -> Question | None:
         def read(db: sqlite3.Connection) -> Question | None:
@@ -177,10 +191,13 @@ class QuestionMixin:
                 sets += ["answer = ?", "answered_by = ?", "answered_at = ?"]
                 params += [json.dumps(answer), answered_by, _timestamp(self._clock())]
             with _transaction(db):
-                return db.execute(
+                moved = db.execute(
                     f"UPDATE questions SET {', '.join(sets)} WHERE id = ? AND status = ?",
                     (*params, question_id, expected.value),
                 ).rowcount == 1
+                if moved and new.value != "pending":  # nothing left to expire
+                    sqlite_set_due(db, QUESTION_EXPIRE, question_id, None, self._clock())
+                return moved
 
         return await self._call(write)
 

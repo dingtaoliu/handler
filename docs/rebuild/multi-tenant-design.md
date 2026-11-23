@@ -2,8 +2,10 @@
 
 Status: **stage 1 deployed November 14, 2026 (Handler v61); the tenant registry and
 Crontal platform API are built but switched off.** The runtime model here (tenants started
-and stopped by `TenantHost`) is being replaced by [role-split-design.md](role-split-design.md);
-the registry is switched on at the end of its step 3.
+and stopped by `TenantHost`) has been replaced on `feat/shared-runtime-step3a` by tenant
+contexts and host loops ([role-split-design.md](role-split-design.md), step 3); the
+activation, pinning and idle-stop rules below describe the earlier design. The registry
+is switched on at the end of step 3.
 
 Spans two repositories: this one (Handler) and `../hephaestus` (Crontal).
 

@@ -1,0 +1,105 @@
+# Shared runtime step 3b: progress
+
+Branch `feat/shared-runtime-step3b` (from `feat/shared-runtime` at d3f2eae: v65 plus
+step 2, the legacy chat import and step 3a). Brief: the request side of step 3 in
+[role-split-design.md](role-split-design.md), then readiness to switch the tenant
+registry on in production and import `main`, `bss` and `yeup`.
+
+## Done
+
+1. **Store isolation check** (`store/postgres.py`): every transaction of a tenant's
+   store checks `context.current_tenant()` (set per request, run, timer firing and
+   context build) against the store's tenant, and raises `TenantMismatch` before any
+   statement on a mismatch. Probed across the whole suite: never fires.
+2. **One routed app** (`web/host_app.py`, `tenancy/routing.py`). `HostServices.app` is
+   built once; every router is registered once with `TenantLocal` proxies that read
+   the request tenant's object from its context (`TenantContext.parts`). The front
+   (`tenancy/host.py`) serves each request inside `serving(context)` (a context
+   variable plus `current_tenant`). Routes some tenants lack are route groups
+   (`email_ingest`, `integration:<name>`) refused with 404 by `TenantGuard`, which
+   also applies the plan's refusals (was `ConsoleGuard` and a per-tenant
+   `/api/mailboxes` route). `context.app` is now a `TenantApp` view, not an app. The
+   per-slot public shell is gone: a sleeping tenant's pages are the host app served
+   with no context (only public pages are reachable that way).
+3. **Credentials name the tenant:** `HostTenants` keeps each tenant's admin key
+   digest; the front refuses another tenant's admin key with 401 before any build
+   (env and registry hosts). Tokens, tickets, signatures and OAuth state are checked
+   against the hinted tenant's own, as before.
+4. **One MCP route:** `/mcp/` at the host root resolves the tenant from the run
+   token alone; harnesses are now given `http://127.0.0.1:<port>/mcp/`. `/i/<name>/mcp/`
+   still works for that tenant's tokens (401 for another's). MCP requests never build
+   a context.
+5. **Integration contract, request side** (`integrations/base.py`, `registry.py`):
+   `routers(TenantRoutes)` is called once per host on an unconfigured instance
+   (`host_routers`, duplicates refused across every registered integration);
+   `serves_routes(ctx)` says whether a tenant is served them; `load(ctx)` is
+   awaited during context loading and called again before a run while it returns
+   False. `background_tasks` and `BackgroundTask` are removed. Crontal and mailbox
+   are ported; legacy Crontal wiring is served the crontal integration's
+   `/ingest/crontal`.
+6. **Crontal discovery in context loading** (`integrations/crontal/connector.py`):
+   `CrontalDiscovery` caches the agent-mcp listing per URL for the host
+   (`HANDLER_CRONTAL_DISCOVERY_TTL_SECONDS`, 3600; attempt timeout
+   `HANDLER_CRONTAL_DISCOVERY_TIMEOUT_SECONDS`, 10), with a host-wide backoff after a
+   failure (5 s doubling to 300 s) and the last listing kept. Each tenant's
+   connector is built from it with its own token. A tenant without tools yet logs a
+   warning once and works; the next context load or run retries.
+
+7. **Discovery tests** (`crontal/test_discovery.py`): one listing for 20 tenants at
+   once with each connector on its own token, TTL expiry, host-wide backoff and
+   recovery, an expired listing kept when rediscovery fails, a missing curated tool
+   and a slow Crontal count as failures, a tenant's tools registered once available.
+8. **Switch-on rehearsal** (`store_pg/test_registry_switch_on.py`,
+   `store_pg/production_shape.py`), on a real loopback port: production's env shape
+   (`main`/`handler_crontal`, `bss` with `crontal,mailbox`, `yeup`) seeded with users,
+   tokens, chats, schedules, memory, approvals and a BSS mailbox; registry on; every
+   data table's row count unchanged; registry rows match (schemas, S3 prefixes,
+   merchant ids, plan `paid`, sealed admin keys, webhook secrets, agent tokens, Google
+   client, BSS email secret, config); old URLs, keys and tokens see the same data;
+   Crontal's proxy calls (provisioning, sign-in ticket, panel reads, multipart upload,
+   SSE stream, chat with attachment and context links, duplicate resend, failed run
+   retry, signed webhook); the harness listed its tools over `/mcp/` with its run
+   token; a free tenant through `PUT /platform/tenants/500` (schema `handler_m500`,
+   Terra, 50 inputs, no email, automations, console or mailboxes; chat works while
+   Crontal discovery fails, tools appear on a later run; legacy chat import uncounted);
+   registry off keeps everything (the free tenant 404s, data intact); on again, it is
+   back.
+
+9. **Routed app isolation** (`store_pg/test_routed_isolation.py`, env and registry
+   hosts, real loopback port, the same user id in every tenant): every admin key and
+   user token against every tenant URL (main's two URLs included) and the SSE
+   `?access_token=` form: 200 only on its own tenant, else 401; a thread, upload and
+   stream of main are invisible to bss under either of main's URLs (401 with bss's
+   credentials, 404 or empty under bss's own URL, and bss's stream for the same thread
+   key carries nothing of main's run); run tokens at `/mcp/` (any tenant's token) and
+   `/i/<name>/mcp/` (only its own); sign-in tickets and webhook signatures bound to
+   their tenant; unknown tenants 404 on every route; route groups per tenant; public
+   pages and health by the hint alone.
+
+10. **Context cache race fixed** (`tenancy/contexts.py`, found by the load test, from
+    3a): with more tenants than cache slots, a finished build's entry had no user until
+    its waiters resumed, and another tenant's release could trim and close it in that
+    gap ("PostgresCore is closed" on a chat). Entries are protected by their build's
+    waiter count; a closed entry is never handed out. `settle()` could also spin
+    forever on finished close tasks. `test_context_cache.py` reproduces both.
+11. **Load test** (`store_pg/test_load_fifty.py`): 50 registry tenants (10 paid, 40
+    free) chat at once, 10 of them reading a document through the reader pool, one
+    paid tenant also flooded with 30 background Crontal events; host cap 6, caps
+    free 1 / paid 3, cache 32, one reader. Six runs: all 80 runs complete in 10.6 to
+    11.3 s; chat wait median 1.9 to 2.3 s, max 3.6 to 4.1 s; peak 6 runs; peak 12
+    connections; no background run started while a chat waited; afterwards nothing
+    due, no context, no reader process, no per-tenant task.
+12. **Operator script** `deploy/registry-switch-on.sh` (`check`, `on`, `verify`, `off`).
+
+Suite: 1760 passed, 5 skipped (baseline 1736; 24 added). A registry host without `main` also serves `/mcp/` now (was a 404).
+
+13. **Docs:** role-split-design (step 3 done), tenant-registry (routing by credentials;
+    the switch-on procedure with production's exact config, verified), integrations
+    (request side, loading, discovery), multi-instance (routed app, MCP URL, startup),
+    HANDOFF.
+
+## Next
+
+- Owner: review, merge into `feat/shared-runtime`, deploy, then run runbook stage 1 with
+  `deploy/registry-switch-on.sh` (tenant-registry.md, "Switching the registry on in
+  production").

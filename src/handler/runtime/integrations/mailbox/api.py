@@ -195,7 +195,7 @@ def mailboxes_router(service, mail_store, poller, auth: Authenticator) -> APIRou
         logger.info("mailbox created", extra={"mailbox": mailbox.id, "email": mailbox.email,
                                                "by": principal.identity})
         if poller is not None and mailbox.enabled:
-            poller.poll_soon(mailbox.id)
+            await poller.poll_soon(mailbox.id)
         return await public(mailbox)
 
     @router.get("/api/mailboxes/{mailbox_id}")
@@ -230,7 +230,7 @@ def mailboxes_router(service, mail_store, poller, auth: Authenticator) -> APIRou
                 ["password"] if body.password is not None else []),
             "by": principal.identity})
         if poller is not None and mailbox.enabled:
-            poller.poll_soon(mailbox.id)
+            await poller.poll_soon(mailbox.id)
         return await public(mailbox)
 
     @router.post("/api/mailboxes/{mailbox_id}/test")
@@ -243,7 +243,7 @@ def mailboxes_router(service, mail_store, poller, auth: Authenticator) -> APIRou
         if not mailbox.enabled:
             raise HTTPException(409, "mailbox is disabled")
         if poller is not None:
-            poller.poll_soon(mailbox.id)
+            await poller.poll_soon(mailbox.id)
         return {"status": "scheduled"}
 
     @router.delete("/api/mailboxes/{mailbox_id}")

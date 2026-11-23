@@ -6,7 +6,6 @@ import httpx
 from handler.runtime import server
 from handler.runtime.integrations import default_registry
 from handler.runtime.integrations.crontal import connector as crontal_connector_module
-from handler.runtime.integrations.registry import route_keys
 from handler.runtime.types import ThreadType
 
 from ..test_multi_instance import config
@@ -23,19 +22,18 @@ CRONTAL_ENV = {
 async def serving(env, monkeypatch):
     async def idle(self, stop, *args):
         await stop.wait()
-    monkeypatch.setattr(server.Dispatcher, "run_forever", idle)
-    monkeypatch.setattr(server.Scheduler, "run_forever", idle)
+    monkeypatch.setattr(server.HostRunner, "run", idle)
 
     def no_codex():
         raise FileNotFoundError("test has no codex")
     monkeypatch.setattr(server, "codex_binary", no_codex)
     calls = []
 
-    async def fake_connector(url, token, gateway, stop):
-        if url and token:
-            calls.append((url, token, id(gateway)))
-    monkeypatch.setattr(server, "run_crontal_connector", fake_connector)
-    monkeypatch.setattr(crontal_connector_module, "run_crontal_connector", fake_connector)
+    async def fake_ensure(self):
+        if self.url and self.token:
+            calls.append((self.url, self.token, id(self.gateway)))
+        return True
+    monkeypatch.setattr(crontal_connector_module.CrontalTools, "ensure", fake_ensure)
     host = server.create_host(server._parse_args(["serve"], env), env)
     async with host.router.lifespan_context(host):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=host),
@@ -44,13 +42,13 @@ async def serving(env, monkeypatch):
 
 
 def instance_app(host, name):
-    return next(r.app for r in host.routes if getattr(r, "path", "") == f"/i/{name}")
+    return host.state.services.cache.cached(name).app  # SQLite: built at start
 
 
 def snapshot(app, calls):
     gateway = app.state.gateway
     return {
-        "routes": set(route_keys(app)),
+        "routes": set(app.context.routes),  # route groups of the host app it is served
         "tools": {s.name for s in gateway.specs()},
         "sinks": set(app.state.outbox.sinks),
         "thread_types": {t.value for t in ThreadType} | set(app.state.integrations.thread_types),
@@ -60,7 +58,7 @@ def snapshot(app, calls):
 
 def crontal_parts(snap):
     return {
-        "routes": {key for key in snap["routes"] if "crontal" in key[1]},
+        "routes": {group for group in snap["routes"] if "crontal" in group},
         "tools": {name for name in snap["tools"] if name.startswith("crontal")},
         "sinks": {name for name in snap["sinks"] if name.startswith("crontal")},
         "connector": snap["connector"],
@@ -85,7 +83,7 @@ async def test_enabled_matches_legacy(tmp_path, monkeypatch):
         assert enabled[name] == legacy[name], name
         parts = crontal_parts(legacy[name])
         # Legacy really wires Crontal here, so the comparison is meaningful.
-        assert ("POST", "/ingest/crontal") in parts["routes"]
+        assert "integration:crontal" in parts["routes"]  # its /ingest/crontal
         assert parts["tools"] and parts["sinks"] == {"crontal.notifications"}
         assert len(parts["connector"]) == 1
     assert "crontal" in enabled["bss"]["thread_types"]

@@ -47,8 +47,10 @@ class ConnectionWatch:
         async with conn:
             while not self._stop.is_set():
                 row = await (await conn.execute(
+                    # Client connections only: an autovacuum worker also carries
+                    # the database's name, and is no connection Handler holds.
                     "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
-                    "AND pid <> pg_backend_pid()")).fetchone()
+                    "AND pid <> pg_backend_pid() AND backend_type = 'client backend'")).fetchone()
                 self.peak = max(self.peak, row[0])
                 self.samples += 1
                 await asyncio.sleep(0.005)
@@ -88,11 +90,31 @@ async def test_store_code_that_skips_scoping_fails(tenants):
         await a.get_thread("x")
 
 
+async def test_a_store_refuses_work_for_another_tenant(tenants):
+    """The isolation layer in the process: a tenant's store checks, before any statement,
+    that the work in progress (context.current_tenant) is its tenant's."""
+    from handler.runtime.context import reset_current_tenant, set_current_tenant
+    from handler.runtime.store.postgres import TenantMismatch
+
+    a, b = tenants
+    a.tenant, b.tenant = "a", "b"
+    token = set_current_tenant("a")
+    try:
+        assert await a.get_thread("x") is None
+        with pytest.raises(TenantMismatch, match="store of tenant 'b' used while working for 'a'"):
+            await b.get_thread("x")
+        with pytest.raises(TenantMismatch):
+            await b.list_threads()
+    finally:
+        reset_current_tenant(token)
+    assert await b.get_thread("x") is None  # outside any tenant's work: no check
+
+
 async def test_control_schema_holds_no_tenant_tables(tenants, pg_dsn):
     found = {r[0] for r in rows(
         pg_dsn, "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
         CONTROL_SCHEMA)}
-    assert found == {"tenant_schema_versions"}
+    assert found == {"tenant_schema_versions", "due_work", "tenant_state"}  # control data only
 
 
 async def test_pool_connections_are_transactional(tenants, hub):
@@ -395,8 +417,8 @@ def quiet_host(monkeypatch, no_codex):
     async def idle(self, stop, *args):
         await stop.wait()
 
-    monkeypatch.setattr(server.Dispatcher, "run_forever", idle)
-    monkeypatch.setattr(server.Scheduler, "run_forever", idle)
+    monkeypatch.setattr(server.HostRunner, "run", idle)
+    monkeypatch.setattr(server.HostTimer, "run", idle)
 
 
 def admin(name):

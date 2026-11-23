@@ -18,6 +18,8 @@ from typing import Any
 from ...types import new_id, utcnow
 from .config import Mailbox, mailbox_from_row
 
+POLL_KIND = "mailbox.poll"  # the host timer kind (one row per enabled mailbox)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS mail_accounts (
     id TEXT PRIMARY KEY,
@@ -285,9 +287,24 @@ class MailStore:
 
     # ── accounts ───────────────────────────────────────────────────────────
 
+    def _poll_due(self, mailbox: Mailbox) -> list[tuple[str, tuple]]:
+        """The mailbox's `mailbox.poll` row, in the same transaction as the account:
+        an enabled mailbox keeps its due time (a new one is due now), a disabled one
+        has none. `MailboxPoller.poll_soon` moves it to now."""
+        writer = getattr(self._store, "due_statements", None)
+        if writer is None:
+            return []
+        due = utcnow() if mailbox.enabled else None
+        return writer(POLL_KIND, mailbox.id, due, keep_existing=True)
+
+    def _due_written(self) -> None:
+        written = getattr(self._store, "_due_written", None)
+        if written is not None:
+            written()
+
     async def put_mailbox(self, mailbox: Mailbox) -> None:
         mailbox.updated_at = _now()
-        await self._execute(
+        await self._script([(
             "INSERT INTO mail_accounts (id, config, secret_ref, status, last_sync_at, "
             "last_error, last_error_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT (id) DO UPDATE SET config=excluded.config, "
@@ -296,7 +313,8 @@ class MailStore:
             "last_error_at=excluded.last_error_at, updated_at=excluded.updated_at",
             (mailbox.id, json.dumps(mailbox.config(), ensure_ascii=False), mailbox.secret_ref,
              mailbox.status, mailbox.last_sync_at, mailbox.last_error, mailbox.last_error_at,
-             mailbox.created_at, mailbox.updated_at))
+             mailbox.created_at, mailbox.updated_at))] + self._poll_due(mailbox))
+        self._due_written()
 
     async def get_mailbox(self, mailbox_id: str) -> Mailbox | None:
         rows = await self._query("SELECT * FROM mail_accounts WHERE id = ?", (mailbox_id,))
@@ -328,7 +346,10 @@ class MailStore:
                            + [(f"DELETE FROM {table} WHERE account_id = ?", (mailbox_id,))
                             for table in ("mail_messages", "mail_refs", "mail_conversations",
                                           "mail_folders", "mail_drafts")]
-                           + [("DELETE FROM mail_accounts WHERE id = ?", (mailbox_id,))])
+                           + [("DELETE FROM mail_accounts WHERE id = ?", (mailbox_id,))]
+                           + (self._store.due_statements(POLL_KIND, mailbox_id, None)
+                              if hasattr(self._store, "due_statements") else []))
+        self._due_written()
 
     # ── folder sync state ──────────────────────────────────────────────────
 

@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import re
 
-from starlette._utils import get_route_path
-from starlette.responses import JSONResponse
 
 from typing import Any
 
-from .limits import LiveLimits, PlanLimits, upgrade_required
+from .limits import PlanLimits, upgrade_required
 
 _PANEL_ROUTES = re.compile(
     r"^/(healthz|mcp(/.*)?|ingest/.*|api/("
@@ -35,16 +33,3 @@ def plan_refusal(path: str, limits: PlanLimits) -> dict[str, Any] | None:
     if not limits.console and not allowed_without_console(path):
         return upgrade_required("console", limits)
     return None
-
-
-class ConsoleGuard:
-    def __init__(self, app, limits: LiveLimits) -> None:
-        self.app, self.limits = app, limits
-
-    async def __call__(self, scope, receive, send) -> None:
-        body = (plan_refusal(get_route_path(scope), self.limits.current)
-                if scope["type"] == "http" else None)
-        if body is not None:
-            await JSONResponse(body, 403)(scope, receive, send)
-            return
-        await self.app(scope, receive, send)

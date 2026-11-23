@@ -110,8 +110,13 @@ def register_workspace_limit(root: Path, limit: Limit) -> UsedBytes:
     return used
 
 
-def unregister_workspace_limit(root: Path) -> None:
-    _workspace_limits.pop(Path(root).resolve(), None)
+def unregister_workspace_limit(root: Path, used: UsedBytes | None = None) -> None:
+    """Stop limiting `root`; with `used`, only if that registration is still current
+    (a rebuilt tenant context may have registered the same root again)."""
+    root = Path(root).resolve()
+    current = _workspace_limits.get(root)
+    if current is not None and (used is None or current[1] is used):
+        del _workspace_limits[root]
 
 
 def ensure_workspace_room(target: Path, adding: int) -> None:

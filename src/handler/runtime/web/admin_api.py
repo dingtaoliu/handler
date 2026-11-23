@@ -6,6 +6,7 @@ import json
 import logging
 import uuid
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -169,7 +170,7 @@ class RedeliverRequest(BaseModel):
 
 def admin_router(
     store: Store, auth: Authenticator, *, scheduler: Scheduler, gateway: Gateway,
-    uploads: UploadStore, log_file: Path | None = None,
+    uploads: UploadStore, log_file: Path | Callable[[], Path | None] | None = None,
     artifact_store: ArtifactStore | None = None, outbox: Any = None,
 ) -> APIRouter:
     router = APIRouter()
@@ -442,7 +443,8 @@ def admin_router(
     @router.get("/api/logs")
     async def logs(lines: int = 200, level: str = "", q: str = "",
                    _: Principal = admin) -> list:
-        if log_file is None:
+        path = log_file() if callable(log_file) else log_file
+        if path is None:
             return []
         wanted = LOG_LEVELS.get(level.upper()) if level else None
         if level and wanted is None:
@@ -452,7 +454,7 @@ def admin_router(
         out: list[dict] = []
         # Filters apply before the cut, so scan more than `lines` when filtering.
         scan = lines if not (wanted or needle) else LOG_TAIL_MAX_LINES * 4
-        for raw in _tail(log_file, scan):
+        for raw in _tail(path, scan):
             if needle and needle not in raw.lower():
                 continue
             try:

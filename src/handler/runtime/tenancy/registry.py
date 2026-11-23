@@ -18,7 +18,7 @@ from psycopg.types.json import Jsonb
 
 from ..gateway.secret_box import SecretBox
 from ..store.postgres import earliest_work_at
-from ..store.postgres_hub import CONTROL_SCHEMA, PostgresHub
+from ..store.postgres_hub import CONTROL_SCHEMA, TENANT_CHANNEL, PostgresHub
 
 REGISTRY_LOCK = 7_283_002
 
@@ -115,6 +115,14 @@ class TenantRegistry:
         async with self.hub.pool.connection() as conn:
             await conn.execute("SELECT pg_advisory_xact_lock(%s)", (REGISTRY_LOCK,))
             await conn.execute(_DDL)
+            # Rows written before step 3 (or by v65) lack the schema writers mark by.
+            await conn.execute(
+                f"INSERT INTO {_C}.tenant_state (name) SELECT name FROM {_C}.tenants "
+                "ON CONFLICT (name) DO NOTHING")
+            await conn.execute(
+                f"UPDATE {_C}.tenant_state s SET schema_name = t.schema_name "
+                f"FROM {_C}.tenants t WHERE t.name = s.name "
+                "AND s.schema_name IS DISTINCT FROM t.schema_name")
 
     async def _all(self, conn: AsyncConnection) -> list[Tenant]:
         cursor = await conn.execute(f"{_SELECT} ORDER BY t.created_at, t.name")
@@ -146,7 +154,10 @@ class TenantRegistry:
              tenant.plan, Jsonb(tenant.limits),
              Jsonb(tenant.integrations) if tenant.integrations is not None else None,
              Jsonb(tenant.config), tenant.secrets))
-        await conn.execute(f"INSERT INTO {_C}.tenant_state (name) VALUES (%s)", (tenant.name,))
+        await conn.execute(
+            f"INSERT INTO {_C}.tenant_state (name, schema_name, next_wake_at, next_delivery_at) "
+            "VALUES (%s, %s, now(), now()) ON CONFLICT (name) DO UPDATE SET "
+            "schema_name = excluded.schema_name", (tenant.name, tenant.schema_name))
 
     async def import_once(self, tenants: Sequence[Tenant]) -> bool:
         """Copy the env-defined instances in on the first start with the registry on."""
@@ -199,7 +210,14 @@ class TenantRegistry:
                      Jsonb(updated.integrations) if updated.integrations is not None else None,
                      Jsonb(updated.config), updated.secrets, updated.name))
                 tenant, generated = updated, None
+            await self._changed(conn, tenant.name)
         return await self.get(tenant.name) or tenant, existing is None, generated
+
+    async def _changed(self, conn: AsyncConnection, name: str) -> None:
+        """In the writer's transaction: every process drops this tenant's cached context."""
+        await conn.execute(
+            f"SELECT pg_notify(%s, schema_name) FROM {_C}.tenants WHERE name = %s",
+            (TENANT_CHANNEL, name))
 
     async def credential_exists(self, schema: str, table: str, column: str, value: str) -> bool:
         """Whether a hashed credential is on file in this tenant's own table."""
@@ -224,13 +242,18 @@ class TenantRegistry:
             await conn.execute(f"UPDATE {_C}.tenants SET enabled=%s, updated_at=now() WHERE name=%s",
                                (enabled, name))
             if enabled:  # anything that queued while it was off runs now
-                await conn.execute(f"UPDATE {_C}.tenant_state SET next_wake_at=now() WHERE name=%s",
-                                   (name,))
+                await conn.execute(
+                    f"UPDATE {_C}.tenant_state SET next_wake_at = LEAST(next_wake_at, now()), "
+                    "next_delivery_at = LEAST(next_delivery_at, now()), "
+                    "wake_version = wake_version + 1, delivery_version = delivery_version + 1 "
+                    "WHERE name=%s", (name,))
+            await self._changed(conn, name)
 
     async def request_wake(self, name: str) -> None:
         async with self.hub.pool.connection() as conn:
             await conn.execute(
-                f"UPDATE {_C}.tenant_state SET next_wake_at = LEAST(next_wake_at, now()) WHERE name=%s",
+                f"UPDATE {_C}.tenant_state SET next_wake_at = LEAST(next_wake_at, now()), "
+                "wake_version = wake_version + 1 WHERE name=%s",
                 (name,))
 
     # --- email the tenant could not take ------------------------------------
@@ -242,7 +265,8 @@ class TenantRegistry:
                 "VALUES (%s, %s, %s, %s) ON CONFLICT (tenant, digest) DO NOTHING",
                 (name, digest, body, Jsonb(headers)))
             await conn.execute(
-                f"UPDATE {_C}.tenant_state SET next_wake_at = LEAST(next_wake_at, now()) WHERE name=%s",
+                f"UPDATE {_C}.tenant_state SET next_wake_at = LEAST(next_wake_at, now()), "
+                "wake_version = wake_version + 1 WHERE name=%s",
                 (name,))
 
     async def tenants_with_spooled_email(self) -> list[str]:

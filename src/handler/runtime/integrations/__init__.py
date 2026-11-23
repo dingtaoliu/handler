@@ -11,9 +11,9 @@ integration with it.
 from importlib import import_module
 
 _EXPORTS = {
-    **dict.fromkeys(("BackgroundTask", "Integration", "IntegrationConfig",
+    **dict.fromkeys(("Integration", "IntegrationConfig",
                      "IntegrationContext", "PromptFragment", "SettingsSection",
-                     "ThreadTypeSpec", "UIManifestEntry"), ".base"),
+                     "ThreadTypeSpec", "TimerKind", "UIManifestEntry"), ".base"),
     **dict.fromkeys(("IntegrationError", "IntegrationRegistry", "LoadedIntegrations",
                      "default_registry", "enabled_names"), ".registry"),
 }

@@ -87,6 +87,10 @@ class UpstreamConnector:
         self._specs: list[ToolSpec] | None = None
 
     async def start(self, access: UpstreamAccess | None = None) -> None:
+        self.adopt(await self.discover(access))
+
+    async def discover(self, access: UpstreamAccess | None = None) -> dict[str, mt.Tool]:
+        """The upstream's tool listing (initialize + tools/list), by name."""
         if access is None:
             discover = getattr(self._credentials, "discovery_access", None)
             access = (await discover(self.name) if discover
@@ -95,7 +99,11 @@ class UpstreamConnector:
             raise RuntimeError(f"connector {self.name!r}: no credential available to list tools")
         async with _session(access, self._timeout, []) as session:
             listed = await session.list_tools()
-        upstream = {t.name: t for t in listed.tools}
+        return {t.name: t for t in listed.tools}
+
+    def adopt(self, upstream: dict[str, mt.Tool]) -> None:
+        """Build the curated tools from a listing (this connector's or a shared one);
+        fails on curated names the upstream doesn't have."""
         missing = sorted(set(self._curated) - set(upstream))
         if missing:
             raise ValueError(f"connector {self.name!r}: upstream has no tool(s) {missing}")
