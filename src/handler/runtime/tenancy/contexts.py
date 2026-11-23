@@ -3,7 +3,7 @@
 `TenantContext` is everything a run, a timer firing, a delivery or a request needs for
 one tenant: its store on the shared hub, settings and grant policy, live plan limits,
 gateway, executor, sinks, timer handlers, workspace and file store, integration
-context, and the tenant's HTTP sub-app. Building one starts no long-lived task and
+context, and the route groups of the host's one app it is served. Building one starts no long-lived task and
 opens no connection of its own on a hub (the store borrows the hub's pool).
 
 `ContextCache` keeps built contexts in an LRU with a TTL. A context in use (a run, a
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -42,7 +43,7 @@ class TenantContext:
     name: str
     key: str  # its due-work and tenant_state key: the schema name, or "local" (SQLite)
     store: Any
-    app: Any = None  # the tenant's HTTP sub-app (3b replaces it with one routed app)
+    app: Any = None  # its view of the host's one app (tenancy/routing.py TenantApp)
     executor: Any = None
     gateway: Any = None
     outbox: Any = None  # the tenant's sinks (the host outbox loop delivers for it)
@@ -55,6 +56,13 @@ class TenantContext:
     max_concurrent: int | None = None
     lease_seconds: float = 120.0
     close: Callable[[], Awaitable[None]] | None = None
+    instance_name: str = ""  # as configured: "" for a lone instance, else its name
+    routes: dict = field(default_factory=dict)  # route group -> what its handlers use
+
+    @property
+    def parts(self) -> Any:
+        """The tenant's objects the host app's handlers read (web/host_app.py)."""
+        return self.lifecycle
 
 
 @dataclass
@@ -247,7 +255,22 @@ class HostTenants:
         self.cache = cache
         self._served: dict[str, ServedTenant] = {}
         self._by_key: dict[tuple[int, str], str] = {}
+        self._admin_keys: dict[bytes, str] = {}  # sha256(admin key) -> tenant
         self.on_hint: Callable[[str], None] | None = None  # the host loops' wake
+
+    # --- credentials that name a tenant (the front door, tenancy/host.py) ------
+    def set_admin_key(self, name: str, key: str | None) -> None:
+        """Remember which tenant an admin key belongs to (only its digest is kept)."""
+        for digest in [d for d, owner in self._admin_keys.items() if owner == name]:
+            del self._admin_keys[digest]
+        if key:
+            self._admin_keys[hashlib.sha256(key.encode()).digest()] = name
+
+    def admin_key_owner(self, credential: str | None) -> str | None:
+        """The tenant whose admin key this is, if it is one."""
+        if not credential:
+            return None
+        return self._admin_keys.get(hashlib.sha256(credential.encode()).digest())
 
     def serve(self, tenant: ServedTenant) -> None:
         old = self._served.get(tenant.name)
@@ -257,6 +280,7 @@ class HostTenants:
         self._by_key[(id(tenant.hub), tenant.key)] = tenant.name
 
     def drop(self, name: str) -> None:
+        self.set_admin_key(name, None)
         old = self._served.pop(name, None)
         if old is not None:
             self._by_key.pop((id(old.hub), old.key), None)

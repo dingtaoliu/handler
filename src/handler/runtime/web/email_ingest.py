@@ -26,6 +26,8 @@ import json
 import logging
 import tempfile
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -107,6 +109,19 @@ async def ai_identity_available(client: Any) -> bool:
     return True
 
 
+@dataclass
+class EmailIngest:
+    """What `/ingest/email` needs of one tenant."""
+
+    store: Store
+    secret: str
+    settings: SettingsService
+    workspace_sync: WorkspaceSync
+    harness: HarnessSource = "codex"
+    crontal_identity: Any = None
+    observers: list[Any] = field(default_factory=list)
+
+
 def email_ingest_router(
     store: Store,
     secret: str,
@@ -121,13 +136,28 @@ def email_ingest_router(
 ) -> APIRouter:
     """`observers` (filled by integrations, possibly after this call) are
     awaited with each accepted message once it is queued."""
+    binding = EmailIngest(store, secret, settings, workspace_sync, harness=harness,
+                          crontal_identity=crontal_identity,
+                          observers=observers if observers is not None else [])
+    return email_ingest_router_for(lambda: binding, resolver=resolver, max_bytes=max_bytes)
+
+
+def email_ingest_router_for(
+    binding: Callable[[], EmailIngest], *, resolver: TxtResolver | None = None,
+    max_bytes: int = MAX_EMAIL_BYTES,
+) -> APIRouter:
+    """`/ingest/email` for the tenant `binding()` returns, read once per request (the
+    host's one app passes the request tenant's)."""
     router = APIRouter()
     dns = resolver
-    watchers = observers if observers is not None else []
 
     @router.post("/ingest/email")
     async def ingest(request: Request):
         nonlocal dns
+        tenant = binding()
+        store, secret, settings = tenant.store, tenant.secret, tenant.settings
+        workspace_sync, harness = tenant.workspace_sync, tenant.harness
+        crontal_identity, watchers = tenant.crontal_identity, tenant.observers
         length = request.headers.get("content-length")
         if length and length.isdigit() and int(length) > max_bytes:
             raise HTTPException(413, "email too large")

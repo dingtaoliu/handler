@@ -11,6 +11,8 @@ from handler.runtime.integrations import (
     enabled_names,
 )
 
+from handler.runtime.integrations.registry import host_routers
+
 from .fakes import Alpha, Beta, FakeSink, Gamma, registry, tool
 
 
@@ -96,13 +98,17 @@ def test_duplicate_thread_types_and_core_thread_types():
 def test_runtime_contributions_and_duplicates():
     loaded = registry().load(["alpha"], env={"ALPHA_TOKEN": "t"})
     out = loaded.collect_runtime(ctx())
-    assert [owner for owner, _ in out.routers] == ["alpha"]
+    assert list(out.route_bindings) == ["integration:alpha"]
+    assert out.route_bindings["integration:alpha"][0] is loaded.integrations[0]
     assert [s.name for _, s in out.sinks] == ["alpha.sink"]
-    assert [t.name for _, t in out.background_tasks] == ["poller"]
     assert out.identity_provider[0] == "alpha"
 
+    # Routes are the host's, registered once on unconfigured instances.
+    routes = host_routers(registry(Alpha), auth=None)
+    assert [(name, [r.path for router in routers for r in router.routes])
+            for name, routers in routes] == [("alpha", ["/ingest/alpha"])]
     with pytest.raises(IntegrationError, match="route GET /ingest/alpha from 'alpha' duplicates"):
-        loaded.collect_runtime(ctx(), reserved_routes={("GET", "/ingest/alpha")})
+        host_routers(registry(Alpha), auth=None, reserved_routes={("GET", "/ingest/alpha")})
     with pytest.raises(IntegrationError, match="tool 'alpha_ping' from 'alpha' duplicates"):
         loaded.collect_runtime(ctx(), reserved_tools={"alpha_ping"})
 
@@ -115,10 +121,9 @@ def test_two_identity_providers_and_duplicate_tools_sinks_routes_between_integra
         name = "copy"
         kind = ""
 
-        def routers(self, ctx):
+        def routers(self, tenant):
             router = APIRouter()
-            if self.kind == "route":
-                router.add_api_route("/ingest/alpha", lambda: None)
+            router.add_api_route("/ingest/alpha", lambda: None)
             return [router]
 
         def tool_sets(self, ctx):
@@ -127,8 +132,10 @@ def test_two_identity_providers_and_duplicate_tools_sinks_routes_between_integra
         def sinks(self, ctx):
             return [FakeSink("alpha.sink")] if self.kind == "sink" else []
 
-    for kind, message in [("route", "route GET /ingest/alpha from 'copy'"),
-                          ("tool", "tool 'alpha_ping' from 'copy'"),
+    # Two integrations declaring one route are refused even if no tenant enables both.
+    with pytest.raises(IntegrationError, match="route GET /ingest/alpha from 'copy'"):
+        host_routers(registry(Alpha, Copy), auth=None)
+    for kind, message in [("tool", "tool 'alpha_ping' from 'copy'"),
                           ("sink", "sink 'alpha.sink' from 'copy'")]:
         loaded = registry(Alpha, Copy).load(["alpha", "copy"], env={"ALPHA_TOKEN": "t"})
         loaded.integrations[1].kind = kind

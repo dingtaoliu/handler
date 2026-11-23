@@ -44,17 +44,29 @@ def verify(secret: str, header: str | None, body: bytes, *, now: float | None = 
     return hmac.compare_digest(expected, given)
 
 
+Harness = Callable[[], Awaitable[str]] | str
+
+
 def crontal_ingest_router(
     queue: EventQueue,
     secret: str,
     *,
-    harness: Callable[[], Awaitable[str]] | str = "codex",
+    harness: Harness = "codex",
 ) -> APIRouter:
     """POST /ingest/crontal: Crontal notification → crontal.notification event."""
+    return crontal_ingest_router_for(lambda: (queue, secret, harness))
+
+
+def crontal_ingest_router_for(
+    binding: Callable[[], tuple[EventQueue, str, Harness]],
+) -> APIRouter:
+    """`/ingest/crontal` for the tenant `binding()` returns, read once per request:
+    its queue, webhook secret and harness source."""
     router = APIRouter()
 
     @router.post("/ingest/crontal")
     async def ingest(request: Request):
+        queue, secret, harness = binding()
         body = await request.body()
         if not verify(secret, request.headers.get("x-crontal-signature"), body):
             raise HTTPException(status_code=401, detail="invalid signature")

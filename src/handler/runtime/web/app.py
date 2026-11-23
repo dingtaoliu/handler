@@ -47,8 +47,16 @@ def _csv_values(values: list[str] | None) -> list[str] | None:
     return [part for part in flat if part] or None
 
 
-def render_page(path: Path, request: Request, instance_name: str, build: str) -> HTMLResponse:
+Name = str | Callable[[], str]  # an instance name, or a getter of the request's
+
+
+def name_of(instance_name: Name) -> str:
+    return instance_name if isinstance(instance_name, str) else instance_name()
+
+
+def render_page(path: Path, request: Request, instance_name: Name, build: str) -> HTMLResponse:
     base = request.scope.get("root_path", "").rstrip("/")
+    instance_name = name_of(instance_name)
     # Serialize trusted server config, keeping script contexts safe even under
     # an externally supplied ASGI root path.
     config = json.dumps({"base": base, "instance": instance_name, "build": build}).replace("<", "\\u003c")
@@ -58,7 +66,7 @@ def render_page(path: Path, request: Request, instance_name: str, build: str) ->
     return HTMLResponse(content, headers={"Cache-Control": "no-store"})
 
 
-def public_pages(instance_name: str, build: str) -> APIRouter:
+def public_pages(instance_name: Name, build: str) -> APIRouter:
     """The sign-in page and app shell: no credentials, no store, no runtime needed."""
     router = APIRouter()
 
@@ -82,15 +90,6 @@ def public_pages(instance_name: str, build: str) -> APIRouter:
         return render_page(TIMELINE_HTML.with_name("login.html"), request, instance_name, build)
 
     return router
-
-
-def public_shell(instance_name: str) -> FastAPI:
-    """The public pages alone, so a sleeping tenant can show them without waking."""
-    build = ui_build()
-    shell = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    shell.add_middleware(BuildHeaderMiddleware, build=build)
-    shell.include_router(public_pages(instance_name, build))
-    return shell
 
 
 def ui_build() -> str:
@@ -191,7 +190,7 @@ async def sse_stream(
 def create_app(
     store: Store, bus: RunEventBus, auth: Authenticator, *, default_harness: HarnessSource = "codex",
     uploads: UploadStore | None = None,
-    instance_name: str = "",
+    instance_name: Name = "",
     cancel_wake: Callable[[str], None] | None = None,
 ) -> FastAPI:
     # No interactive docs / OpenAPI: the API is authenticated, its schema needn't be public.

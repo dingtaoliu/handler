@@ -236,8 +236,17 @@ async def test_mcp_run_tokens_and_internal_urls_are_isolated(running):
         response = await client.post(path, headers=request_headers, json=body)
         assert response.status_code == 200, response.text
     assert (await client.post('/i/bss/mcp/', headers=request_headers, json=body)).status_code == 401
-    assert host.state.resources['main']['mcp_url'].endswith('/i/main/mcp/')
-    assert host.state.resources['bss']['mcp_url'].endswith('/i/bss/mcp/')
+    # Harnesses are given the host's one MCP route: the run token alone names the
+    # tenant; `/i/<name>/mcp/` is still accepted, for that tenant's tokens only.
+    assert host.state.resources['main']['mcp_url'] == 'http://127.0.0.1:8100/mcp/'
+    assert host.state.resources['bss']['mcp_url'] == 'http://127.0.0.1:8100/mcp/'
+    bss = host.state.services.cache.cached('bss')
+    bss_token = host.state.resources['bss']['tokens'].issue(
+        RunContext('bss-run', 'chat:bob:t', 'bob'), 60, gateway=bss.gateway, tenant='bss')
+    bss_headers = {**headers(bss_token), 'Accept': 'application/json, text/event-stream'}
+    for path in ('/mcp/', '/i/bss/mcp/'):
+        assert (await client.post(path, headers=bss_headers, json=body)).status_code == 200
+    assert (await client.post('/i/main/mcp/', headers=bss_headers, json=body)).status_code == 401
 
 
 @pytest.mark.parametrize('instances', ['', 'main'])

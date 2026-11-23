@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from collections.abc import Callable
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -69,7 +70,13 @@ def ticket_hash(instance_name: str, ticket: str) -> str:
     return hashlib.sha256(f"handler-sign-in\n{instance_name}\n{ticket}".encode()).hexdigest()
 
 
-def auth_router(auth: Authenticator, instance_name: str = "") -> APIRouter:
+def _name(instance_name: str | Callable[[], str]) -> str:
+    return instance_name if isinstance(instance_name, str) else instance_name()
+
+
+def auth_router(auth: Authenticator, instance_name: str | Callable[[], str] = "") -> APIRouter:
+    """`instance_name` is the name sign-in tickets are bound to (a getter on the host's
+    one app, where it is the request's tenant)."""
     router = APIRouter()
     users = auth.users
     admin = Depends(auth.require_admin)
@@ -98,7 +105,7 @@ def auth_router(auth: Authenticator, instance_name: str = "") -> APIRouter:
                     body.user_id, display_name=body.display_name, role=body.role)
         ticket = secrets.token_urlsafe(32)
         expires_at = await users.create_sign_in_ticket(
-            body.user_id, ticket_hash(instance_name, ticket), TICKET_TTL_SECONDS)
+            body.user_id, ticket_hash(_name(instance_name), ticket), TICKET_TTL_SECONDS)
         return JSONResponse(jsonable_encoder({
             "ticket": ticket, "expires_at": expires_at, "expires_in": TICKET_TTL_SECONDS,
             "user_id": body.user_id, "role": body.role, "sign_in_path": "/login",
@@ -107,7 +114,7 @@ def auth_router(auth: Authenticator, instance_name: str = "") -> APIRouter:
     @router.post("/login/ticket")
     async def redeem_sign_in_ticket(body: RedeemSignInTicket) -> JSONResponse:
         # Unauthenticated by design: the ticket is the credential.
-        user_id = await users.redeem_sign_in_ticket(ticket_hash(instance_name, body.ticket))
+        user_id = await users.redeem_sign_in_ticket(ticket_hash(_name(instance_name), body.ticket))
         user = await users.get_user(user_id) if user_id else None
         if user is None or user.disabled:
             raise HTTPException(401, "Sign-in link is invalid, used or expired",
