@@ -226,7 +226,12 @@ class MailboxService:
                 if mailbox.sent_folder is None or mailbox.drafts_folder is None:
                     await self._detect_folders(mailbox, session)
                 budget = MAX_MESSAGES_PER_POLL
-                for folder in mailbox.folders:
+                folders = mailbox.folders
+                # Keep the default mailbox view complete while respecting an explicit
+                # list of folders. Sent messages are stored without waking the agent.
+                if folders == ["INBOX"] and mailbox.sent_folder not in (None, "", "INBOX"):
+                    folders = [*folders, mailbox.sent_folder]
+                for folder in folders:
                     budget -= await self._sync_folder(mailbox, session, folder, result, budget)
                     if budget <= 0:
                         break

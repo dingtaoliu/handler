@@ -1,5 +1,6 @@
 """The `mailbox` integration on a multi-instance host: wiring, API, isolation."""
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
@@ -55,6 +56,65 @@ async def test_enabling_on_bss_adds_mailboxes_and_keeps_everything_else(tmp_path
         "mail_list_server_drafts", "mail_read_server_draft"}
     # The host app's mailbox routes are served to bss only (route group).
     assert bss["routes"] - old["routes"] == {"integration:mailbox"}
+
+
+async def test_conversations_scope_messages_and_attachments_to_mailbox(tmp_path, monkeypatch, fake):
+    env = {**config(tmp_path), "HANDLER_INTEGRATIONS": "mailbox"}
+    async with serving(env, monkeypatch) as (client, host, _):
+        admin = headers("main")
+        for user_id in ("owner", "other"):
+            user = await client.post("/api/users", headers=admin, json={
+                "id": user_id, "display_name": user_id, "role": "member",
+            })
+            assert user.status_code == 201, user.text
+        owner = {**admin, "X-Handler-User": "owner"}
+        other = {**admin, "X-Handler-User": "other"}
+        created = await client.post("/api/mailboxes", headers=admin, json={
+            **MAILBOX, "owner_user_id": "owner", "wake_mode": "off",
+        })
+        mailbox_id = created.json()["id"]
+        integration_ = integration(instance_app(host, "main"))
+        mailbox = await integration_.mail_store.get_mailbox(mailbox_id)
+        await integration_.poller.wait_idle()
+        root = "<root@example.com>"
+        raw = make_mail(message_id=root, date=datetime(2026, 11, 19, tzinfo=timezone.utc),
+                        attachments=[("quote.txt", b"attachment content", "text/plain")])
+        fake.deliver(raw)
+        reply = make_mail(subject="Re: Quote request", in_reply_to=root, references=root,
+                          sender=MAILBOX["email"], to="buyer@client.cn", body="Quote attached.",
+                          date=datetime(2026, 11, 20, tzinfo=timezone.utc))
+        fake.deliver(reply, folder="Sent")
+        await integration_.service.poll(mailbox)
+
+        listing = await client.get("/api/mailboxes/conversations", headers=owner)
+        assert listing.status_code == 200, listing.text
+        assert listing.headers["cache-control"] == "no-store"
+        threads = listing.json()["threads"]
+        assert len(threads) == 1 and threads[0]["message_count"] == 2
+        assert threads[0]["snippet"].strip() == "Quote attached."
+        assert [m["id"] for m in listing.json()["mailboxes"]] == [mailbox_id]
+        assert (await client.get("/api/mailboxes/conversations", headers=other)).json()["threads"] == []
+        for query in ("QUOTE REQUEST", "buyer@client.cn", "Buyer"):
+            match = await client.get("/api/mailboxes/conversations", headers=owner, params={"q": query})
+            assert match.json()["threads"] == threads
+        for query in ("%", "_", "nonexistent"):
+            empty = await client.get("/api/mailboxes/conversations", headers=owner, params={"q": query})
+            assert empty.json()["threads"] == []
+
+        path = f"/api/mailboxes/{mailbox_id}/conversations/{threads[0]['id']}"
+        assert (await client.get(path, headers=other)).status_code == 404
+        detail = await client.get(path, headers=owner)
+        messages = detail.json()["messages"]
+        assert [message["direction"] for message in messages] == ["in", "out"]
+        assert messages[0]["attachments"] == [
+            {"index": 0, "filename": "quote.txt", "size": len(b"attachment content")}
+        ]
+        attachment = f"/api/mailboxes/{mailbox_id}/messages/{messages[0]['id']}/attachments/0"
+        assert (await client.get(attachment, headers=other)).status_code == 404
+        download = await client.get(attachment, headers=owner)
+        assert download.status_code == 200, download.text
+        assert download.content == b"attachment content"
+        assert download.headers["content-type"] == "application/octet-stream"
 
 
 async def test_api_never_returns_secrets_and_instances_are_isolated(tmp_path, monkeypatch,

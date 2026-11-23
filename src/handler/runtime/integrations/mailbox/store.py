@@ -410,6 +410,41 @@ class MailStore:
             (mailbox_id, conversation_id))
         return _decode(rows[0]) if rows else None
 
+    async def list_conversations(self, mailbox_ids: list[str], *, limit: int,
+                                 offset: int, search: str = "") -> list[dict[str, Any]]:
+        if not mailbox_ids:
+            return []
+        placeholders = ",".join("?" for _ in mailbox_ids)
+        params: list[Any] = list(mailbox_ids)
+        match = ""
+        if search:
+            like = "LIKE ? ESCAPE '\\'"
+            match = (
+                f" AND (lower(c.subject) {like} OR lower(c.participants) {like} OR EXISTS ("
+                "SELECT 1 FROM mail_messages s WHERE s.account_id = c.account_id "
+                "AND s.conversation_id = c.id "
+                f"AND (lower(s.subject) {like} OR lower(s.from_name) {like} "
+                f"OR lower(s.to_addrs) {like} OR lower(s.cc_addrs) {like})))"
+            )
+            params.extend([_like(search)] * 6)
+        rows = await self._query(
+            "SELECT c.account_id, c.id, c.subject, c.participants, c.message_count, "
+            "c.last_message_at, (SELECT substr(m.body_text, 1, 240) FROM mail_messages m "
+            "WHERE m.account_id = c.account_id AND m.conversation_id = c.id "
+            "ORDER BY m.date DESC, m.id DESC LIMIT 1) AS snippet "
+            f"FROM mail_conversations c WHERE c.account_id IN ({placeholders}){match} "
+            "ORDER BY c.last_message_at DESC, c.account_id, c.id LIMIT ? OFFSET ?",
+            (*params, limit, offset))
+        return [_decode(row) for row in rows]
+
+    async def page_conversation_messages(self, mailbox_id: str, conversation_id: str,
+                                         *, limit: int, offset: int) -> list[dict[str, Any]]:
+        rows = await self._query(
+            "SELECT * FROM mail_messages WHERE account_id = ? AND conversation_id = ? "
+            "ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
+            (mailbox_id, conversation_id, limit, offset))
+        return [_decode(row) for row in rows]
+
     # ── messages ───────────────────────────────────────────────────────────
 
     async def find_message(self, mailbox_id: str, message_id: str) -> dict[str, Any] | None:
