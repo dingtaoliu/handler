@@ -29,8 +29,34 @@ lifecycle replaced by the cache. 3b (after this) does the request side.
 8. Tests moved to the context model: registry, free plan, plan limits, review fixes,
    multi-instance, integrations; crash and lease reclaim; idle 50 (env and registry).
 
-## Next
+9. New checks: `test_host_runner.py` (fairness: with the gate full a chat goes before
+   another tenant's background flood; a free flood cannot starve a paid tenant; two
+   tenants run at once; a disabled tenant is not claimed), `store_pg/test_host_loops.py`
+   (two tenants running at once share no store, bus, workspace, sink, context or
+   token; a plan change and a disable from another process apply through
+   `NOTIFY handler_tenant_changed`; settings saved elsewhere drop the context; 50
+   tenants under load stay within 12 connections), `store_pg/test_idle_tenants.py` (50
+   idle env and registry tenants: no per-tenant task, no cached context after the TTL,
+   only control-schema statements), `test_tenant_registry.py` (a crashed run's lease
+   is the next wake and the thread is reclaimed, dead run swept as abandoned).
+10. Writer audit (every writer marks `tenant_state` in its transaction through the hub
+    store's `_notify`): `put` (chat, ingest, Crontal, email, approval and question
+    answers via `emit_event`, timer handlers' events), schedule firing, held-input
+    release, `complete` (remaining events), `fail` with retry (`available_at`: the
+    loop writes the retry time back), terminal `fail`, `replay_failed_run` (operator
+    replay and user retry), `revive_thread`, `sweep_dead_threads`; deliveries:
+    `enqueue_delivery`, retrying `delivery_failed`, `redeliver`; registry:
+    `set_enabled`, `request_wake`, `spool_email` bump `wake_version`.
+11. Docs: role-split-design (step 3 row, progress), tenant-registry, multi-instance,
+    multi-tenant-design status, HANDOFF.
 
-- Fairness, isolation, invalidation-by-NOTIFY and 50-tenant connection-budget tests.
-- Full suite green; docs (role-split step 3 row, tenant-registry, multi-instance,
-  multi-tenant-design, dispatcher notes).
+Full suite: 1736 passed, 5 skipped (baseline 1745: about 35 obsolete lifecycle tests
+removed, about 26 added).
+
+## Next (3b)
+
+- One routed app instead of a FastAPI sub-app per context; MCP keyed by token alone.
+- Routers, tool sets and sinks as tenant-context factories.
+- Crontal tool discovery in context loading (still a start-up task per context until
+  it succeeds; cancelled when the context closes).
+- Registry switch-on and import of `main`, `bss` and `yeup`.
